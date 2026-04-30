@@ -1,0 +1,12 @@
+[package]
+name = "nds-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nds-core = { path = "../nds-core" }
+sdl2 = { version = "0.37", features = ["bundled", "static-link"] }
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+zstd = "0.13"

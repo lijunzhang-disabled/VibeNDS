@@ -1,0 +1,443 @@
+//! ARM9-side bus.
+//!
+//! Constructed per-step from the top-level `Nds` struct so it can borrow
+//! the ARM9-private memories alongside `SharedState`. See ARCHITECTURE.md
+//! "Ownership Model" for the full pattern.
+
+use super::shared::SharedState;
+use crate::cpu::bus::CpuBus;
+use crate::cpu::cp15::TcmRegion;
+use crate::dma::AddrControl;
+use serde::{Deserialize, Serialize};
+
+pub const ITCM_SIZE: usize = 32 * 1024;
+pub const DTCM_SIZE: usize = 16 * 1024;
+pub const ARM9_BIOS_SIZE: usize = 4 * 1024;
+
+/// ARM9-private memories owned by the top-level `Nds` struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Arm9Memory {
+    #[serde(with = "super::shared::serde_bytes_vec")]
+    pub itcm: Vec<u8>,
+    #[serde(with = "super::shared::serde_bytes_vec")]
+    pub dtcm: Vec<u8>,
+    #[serde(with = "super::shared::serde_bytes_vec")]
+    pub bios: Vec<u8>,
+}
+
+impl Arm9Memory {
+    pub fn new(bios: Option<Vec<u8>>) -> Self {
+        Arm9Memory {
+            itcm: vec![0u8; ITCM_SIZE],
+            dtcm: vec![0u8; DTCM_SIZE],
+            bios: bios.unwrap_or_else(|| vec![0xFFu8; ARM9_BIOS_SIZE]),
+        }
+    }
+}
+
+/// A borrow of ARM9 state suitable to step the CPU against.
+pub struct Bus9<'a> {
+    pub mem: &'a mut Arm9Memory,
+    pub shared: &'a mut SharedState,
+    pub itcm_region: TcmRegion,
+    pub dtcm_region: TcmRegion,
+}
+
+impl<'a> Bus9<'a> {
+    /// Construct a fresh view. The caller must pass current TCM regions
+    /// (read off the CPU's CP15 just before stepping).
+    pub fn new(
+        mem: &'a mut Arm9Memory,
+        shared: &'a mut SharedState,
+        itcm_region: TcmRegion,
+        dtcm_region: TcmRegion,
+    ) -> Self {
+        Bus9 { mem, shared, itcm_region, dtcm_region }
+    }
+
+    /// Execute the next chunk of channel `id`'s DMA transfer to completion
+    /// (one trigger). Returns `irq_request` = whether to raise the
+    /// channel's IRQ on the ARM9 controller.
+    pub fn run_dma(&mut self, id: usize) -> bool {
+        let (count, word_size, src_ctrl, dst_ctrl, irq_on_complete) = {
+            let d = &self.shared.dma9;
+            (
+                d.channels[id].internal_count,
+                d.word_size(id),
+                d.src_control(id),
+                d.dst_control(id),
+                d.irq_on_complete(id),
+            )
+        };
+
+        for _ in 0..count {
+            let (sad, dad) = {
+                let c = &self.shared.dma9.channels[id];
+                (c.internal_sad, c.internal_dad)
+            };
+            if word_size == 4 {
+                let v = self.read32(sad);
+                self.write32(dad, v);
+            } else {
+                let v = self.read16(sad);
+                self.write16(dad, v);
+            }
+            advance(&mut self.shared.dma9.channels[id].internal_sad, src_ctrl, word_size);
+            advance(&mut self.shared.dma9.channels[id].internal_dad, dst_ctrl, word_size);
+        }
+
+        self.shared.dma9.finish_transfer(id);
+        irq_on_complete
+    }
+}
+
+fn advance(addr: &mut u32, ctrl: AddrControl, word: u32) {
+    match ctrl {
+        AddrControl::Increment | AddrControl::IncrementReload => *addr = addr.wrapping_add(word),
+        AddrControl::Decrement => *addr = addr.wrapping_sub(word),
+        AddrControl::Fixed => {}
+    }
+}
+
+#[inline]
+fn wram_addr_in_view(view_len: usize, addr: u32) -> usize {
+    // The 0x03000000 window (8 MB span) mirrors the WRAM view. Mask the
+    // address to the window then take it modulo the view size.
+    let off = (addr & 0x007F_FFFF) as usize;
+    off % view_len.max(1)
+}
+
+impl<'a> CpuBus for Bus9<'a> {
+    fn irq_pending(&self) -> bool {
+        self.shared.irq9.has_pending()
+    }
+
+    fn read8(&mut self, addr: u32) -> u8 {
+        // DTCM and ITCM are checked first — if enabled they shadow the
+        // physical memory map.
+        if self.dtcm_region.contains(addr) {
+            let off = addr.wrapping_sub(self.dtcm_region.base) as usize % DTCM_SIZE;
+            return self.mem.dtcm[off];
+        }
+        if self.itcm_region.contains(addr) {
+            let off = (addr as usize) % ITCM_SIZE;
+            return self.mem.itcm[off];
+        }
+
+        match addr >> 24 {
+            0x02 => self.shared.main_ram[(addr as usize) & 0x3F_FFFF],
+            0x03 => {
+                if let Some((view, _)) = self.shared.arm9_wram_view() {
+                    let off = wram_addr_in_view(view.len(), addr);
+                    view[off]
+                } else {
+                    0
+                }
+            }
+            0x04 => super::io_arm9::read_io8(self.shared, addr),
+            0x05 => self.shared.palette[(addr as usize) & 0x7FF],
+            0x06 => self.shared.vram.cpu_read_arm9(addr),
+            0x07 => self.shared.oam[(addr as usize) & 0x7FF],
+            0xFF => {
+                if addr & 0xFFFF_F000 == 0xFFFF_0000 {
+                    self.mem.bios[(addr as usize) & 0xFFF]
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    fn read16(&mut self, addr: u32) -> u16 {
+        if addr >> 24 == 0x04 {
+            return super::io_arm9::read_io16(self.shared, addr);
+        }
+        let lo = self.read8(addr) as u16;
+        let hi = self.read8(addr.wrapping_add(1)) as u16;
+        lo | (hi << 8)
+    }
+
+    fn read32(&mut self, addr: u32) -> u32 {
+        if self.dtcm_region.contains(addr) {
+            let off = addr.wrapping_sub(self.dtcm_region.base) as usize & !3;
+            let off = off % DTCM_SIZE;
+            return u32::from_le_bytes([
+                self.mem.dtcm[off], self.mem.dtcm[off + 1],
+                self.mem.dtcm[off + 2], self.mem.dtcm[off + 3],
+            ]);
+        }
+        if self.itcm_region.contains(addr) {
+            let off = (addr as usize) & !3;
+            let off = off % ITCM_SIZE;
+            return u32::from_le_bytes([
+                self.mem.itcm[off], self.mem.itcm[off + 1],
+                self.mem.itcm[off + 2], self.mem.itcm[off + 3],
+            ]);
+        }
+
+        match addr >> 24 {
+            0x02 => {
+                let off = (addr as usize) & 0x3F_FFFC;
+                u32::from_le_bytes([
+                    self.shared.main_ram[off], self.shared.main_ram[off + 1],
+                    self.shared.main_ram[off + 2], self.shared.main_ram[off + 3],
+                ])
+            }
+            0x03 => {
+                let view = match self.shared.arm9_wram_view() {
+                    Some((v, _)) => v,
+                    None => return 0,
+                };
+                let off = wram_addr_in_view(view.len(), addr) & !3;
+                u32::from_le_bytes([
+                    view[off], view[off + 1], view[off + 2], view[off + 3],
+                ])
+            }
+            0x04 => super::io_arm9::read_io32_mut(self.shared, addr),
+            0x05 => {
+                let off = (addr as usize) & 0x7FC;
+                u32::from_le_bytes([
+                    self.shared.palette[off], self.shared.palette[off + 1],
+                    self.shared.palette[off + 2], self.shared.palette[off + 3],
+                ])
+            }
+            0x06 => {
+                let a = addr & !3;
+                let b0 = self.shared.vram.cpu_read_arm9(a) as u32;
+                let b1 = self.shared.vram.cpu_read_arm9(a + 1) as u32;
+                let b2 = self.shared.vram.cpu_read_arm9(a + 2) as u32;
+                let b3 = self.shared.vram.cpu_read_arm9(a + 3) as u32;
+                b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+            }
+            0x07 => {
+                let off = (addr as usize) & 0x7FC;
+                u32::from_le_bytes([
+                    self.shared.oam[off], self.shared.oam[off + 1],
+                    self.shared.oam[off + 2], self.shared.oam[off + 3],
+                ])
+            }
+            0xFF => {
+                if addr & 0xFFFF_F000 == 0xFFFF_0000 {
+                    let off = (addr as usize) & 0xFFC;
+                    u32::from_le_bytes([
+                        self.mem.bios[off], self.mem.bios[off + 1],
+                        self.mem.bios[off + 2], self.mem.bios[off + 3],
+                    ])
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    fn write8(&mut self, addr: u32, val: u8) {
+        if self.dtcm_region.contains(addr) {
+            let off = addr.wrapping_sub(self.dtcm_region.base) as usize % DTCM_SIZE;
+            self.mem.dtcm[off] = val;
+            return;
+        }
+        if self.itcm_region.contains(addr) {
+            let off = (addr as usize) % ITCM_SIZE;
+            self.mem.itcm[off] = val;
+            return;
+        }
+
+        match addr >> 24 {
+            0x02 => self.shared.main_ram[(addr as usize) & 0x3F_FFFF] = val,
+            0x03 => {
+                if let Some(view) = self.shared.arm9_wram_view_mut() {
+                    let off = wram_addr_in_view(view.len(), addr);
+                    view[off] = val;
+                }
+            }
+            0x04 => super::io_arm9::write_io8(self.shared, addr, val),
+            // Per NDS hardware: 8-bit writes to palette / VRAM / OAM are
+            // dropped — only halfword/word writes update those regions.
+            0x05 | 0x06 | 0x07 => {}
+            _ => {}
+        }
+    }
+
+    fn write16(&mut self, addr: u32, val: u16) {
+        match addr >> 24 {
+            0x04 => super::io_arm9::write_io16(self.shared, addr, val),
+            0x05 => {
+                let off = (addr as usize) & 0x7FE;
+                let b = val.to_le_bytes();
+                self.shared.palette[off]     = b[0];
+                self.shared.palette[off + 1] = b[1];
+            }
+            0x06 => {
+                let a = addr & !1;
+                let b = val.to_le_bytes();
+                self.shared.vram.cpu_write_arm9(a,     b[0]);
+                self.shared.vram.cpu_write_arm9(a + 1, b[1]);
+            }
+            0x07 => {
+                let off = (addr as usize) & 0x7FE;
+                let b = val.to_le_bytes();
+                self.shared.oam[off]     = b[0];
+                self.shared.oam[off + 1] = b[1];
+            }
+            _ => {
+                let bytes = val.to_le_bytes();
+                self.write8(addr, bytes[0]);
+                self.write8(addr.wrapping_add(1), bytes[1]);
+            }
+        }
+    }
+
+    fn write32(&mut self, addr: u32, val: u32) {
+        if self.dtcm_region.contains(addr) {
+            let off = addr.wrapping_sub(self.dtcm_region.base) as usize & !3;
+            let off = off % DTCM_SIZE;
+            let b = val.to_le_bytes();
+            self.mem.dtcm[off]     = b[0];
+            self.mem.dtcm[off + 1] = b[1];
+            self.mem.dtcm[off + 2] = b[2];
+            self.mem.dtcm[off + 3] = b[3];
+            return;
+        }
+        if self.itcm_region.contains(addr) {
+            let off = (addr as usize) & !3;
+            let off = off % ITCM_SIZE;
+            let b = val.to_le_bytes();
+            self.mem.itcm[off]     = b[0];
+            self.mem.itcm[off + 1] = b[1];
+            self.mem.itcm[off + 2] = b[2];
+            self.mem.itcm[off + 3] = b[3];
+            return;
+        }
+
+        match addr >> 24 {
+            0x02 => {
+                let off = (addr as usize) & 0x3F_FFFC;
+                let b = val.to_le_bytes();
+                self.shared.main_ram[off]     = b[0];
+                self.shared.main_ram[off + 1] = b[1];
+                self.shared.main_ram[off + 2] = b[2];
+                self.shared.main_ram[off + 3] = b[3];
+            }
+            0x03 => {
+                if let Some(view) = self.shared.arm9_wram_view_mut() {
+                    let off = wram_addr_in_view(view.len(), addr) & !3;
+                    let b = val.to_le_bytes();
+                    view[off]     = b[0];
+                    view[off + 1] = b[1];
+                    view[off + 2] = b[2];
+                    view[off + 3] = b[3];
+                }
+            }
+            0x04 => {
+                let effect = super::io_arm9::write_io32(self.shared, addr, val);
+                if let super::io_arm9::Write32Effect::RunDma9(ch) = effect {
+                    let irq = self.run_dma(ch);
+                    if irq {
+                        use crate::interrupt::Irq;
+                        let irq_bit = match ch {
+                            0 => Irq::Dma0, 1 => Irq::Dma1, 2 => Irq::Dma2, _ => Irq::Dma3,
+                        };
+                        self.shared.irq9.request(irq_bit);
+                    }
+                }
+            }
+            0x05 => {
+                let off = (addr as usize) & 0x7FC;
+                let b = val.to_le_bytes();
+                for i in 0..4 { self.shared.palette[off + i] = b[i]; }
+            }
+            0x06 => {
+                let a = addr & !3;
+                let b = val.to_le_bytes();
+                for i in 0..4 { self.shared.vram.cpu_write_arm9(a + i as u32, b[i]); }
+            }
+            0x07 => {
+                let off = (addr as usize) & 0x7FC;
+                let b = val.to_le_bytes();
+                for i in 0..4 { self.shared.oam[off + i] = b[i]; }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::cp15::TcmRegion;
+
+    fn fresh() -> (Arm9Memory, SharedState) {
+        (Arm9Memory::new(None), SharedState::new())
+    }
+
+    #[test]
+    fn test_main_ram_round_trip() {
+        let (mut mem, mut shared) = fresh();
+        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        bus.write32(0x0200_1000, 0xDEAD_BEEF);
+        assert_eq!(bus.read32(0x0200_1000), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn test_main_ram_mirrors() {
+        let (mut mem, mut shared) = fresh();
+        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        bus.write32(0x0200_0000, 0xAABB_CCDD);
+        // 0x02400000 is +4MB and should mirror the same 4MB.
+        assert_eq!(bus.read32(0x0240_0000), 0xAABB_CCDD);
+    }
+
+    #[test]
+    fn test_itcm_shadows_main_decode() {
+        let (mut mem, mut shared) = fresh();
+        // 64 KB ITCM window — physical ITCM is still 32 KB, so the second
+        // 32 KB of the window mirrors the first.
+        let itcm = TcmRegion { base: 0, size_bytes: 64 * 1024 };
+        let mut bus = Bus9::new(&mut mem, &mut shared, itcm, TcmRegion::disabled());
+        bus.write32(0x0000_0010, 0x1234_5678);
+        assert_eq!(bus.read32(0x0000_0010), 0x1234_5678);
+        // Mirror at +32K within the 64K window
+        assert_eq!(bus.read32(0x0000_8010), 0x1234_5678);
+        // Outside the window — falls through to other decoders (open bus)
+        assert_eq!(bus.read32(0x0001_0010), 0);
+    }
+
+    #[test]
+    fn test_dtcm_at_high_base() {
+        let (mut mem, mut shared) = fresh();
+        let dtcm = TcmRegion { base: 0x027C_0000, size_bytes: 16 * 1024 };
+        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), dtcm);
+        bus.write32(0x027C_0000, 0xCAFEBABE);
+        assert_eq!(bus.read32(0x027C_0000), 0xCAFEBABE);
+        // Adjacent main-RAM byte should still be 0
+        assert_eq!(bus.read32(0x027C_4000), 0);
+    }
+
+    #[test]
+    fn test_wram_visible_in_mode_0() {
+        let (mut mem, mut shared) = fresh();
+        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        bus.write32(0x0300_0010, 0xABCD_EF01);
+        assert_eq!(bus.read32(0x0300_0010), 0xABCD_EF01);
+    }
+
+    #[test]
+    fn test_wram_invisible_in_mode_3() {
+        let (mut mem, mut shared) = fresh();
+        shared.wramcnt = 3;
+        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        bus.write32(0x0300_0000, 0xDEAD);
+        // Reads return 0 (open bus stub) when ARM9 has no WRAM mapping
+        assert_eq!(bus.read32(0x0300_0000), 0);
+    }
+
+    #[test]
+    fn test_high_vector_bios_read() {
+        let mut mem = Arm9Memory::new(Some(vec![0xAB; 4096]));
+        let mut shared = SharedState::new();
+        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        assert_eq!(bus.read32(0xFFFF_0000), 0xABAB_ABAB);
+    }
+}

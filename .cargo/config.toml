@@ -1,0 +1,5 @@
+# Modern CMake (≥3.5 default policy) requires this so the bundled SDL2
+# build script can configure SDL's older CMakeLists. See:
+# https://github.com/Rust-SDL2/rust-sdl2/issues/1429
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
