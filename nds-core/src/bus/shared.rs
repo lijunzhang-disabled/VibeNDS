@@ -14,6 +14,7 @@ use crate::timer::Timers;
 use crate::dma::DmaController;
 use crate::spi::SpiBus;
 use crate::cart::AuxSpi;
+use crate::gpu3d::Engine3d;
 
 pub const MAIN_RAM_SIZE: usize = 4 * 1024 * 1024;
 pub const SHARED_WRAM_SIZE: usize = 32 * 1024;
@@ -104,6 +105,10 @@ pub struct SharedState {
     /// at `0x040001A0..0x040001A3`. ARM7 by default, but `EXMEMCNT` bit
     /// 11 can flip slot-1 over to ARM9; Phase 5 keeps it ARM7-only.
     pub auxspi: AuxSpi,
+
+    /// 3D engine — matrix stacks + vertex pipeline + lighting + clipper +
+    /// viewport transform + GXFIFO. ARM9-only.
+    pub gpu3d: Engine3d,
 }
 
 impl SharedState {
@@ -134,6 +139,7 @@ impl SharedState {
             dma7: DmaController::new(false),
             spi: SpiBus::new(),
             auxspi: AuxSpi::new(),
+            gpu3d: Engine3d::new(),
         }
     }
 

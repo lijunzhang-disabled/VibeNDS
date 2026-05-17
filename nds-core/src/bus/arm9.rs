@@ -332,15 +332,34 @@ impl<'a> CpuBus for Bus9<'a> {
             }
             0x04 => {
                 let effect = super::io_arm9::write_io32(self.shared, addr, val);
-                if let super::io_arm9::Write32Effect::RunDma9(ch) = effect {
-                    let irq = self.run_dma(ch);
-                    if irq {
-                        use crate::interrupt::Irq;
-                        let irq_bit = match ch {
-                            0 => Irq::Dma0, 1 => Irq::Dma1, 2 => Irq::Dma2, _ => Irq::Dma3,
-                        };
-                        self.shared.irq9.request(irq_bit);
+                match effect {
+                    super::io_arm9::Write32Effect::RunDma9(ch) => {
+                        let irq = self.run_dma(ch);
+                        if irq {
+                            use crate::interrupt::Irq;
+                            let irq_bit = match ch {
+                                0 => Irq::Dma0, 1 => Irq::Dma1, 2 => Irq::Dma2, _ => Irq::Dma3,
+                            };
+                            self.shared.irq9.request(irq_bit);
+                        }
                     }
+                    super::io_arm9::Write32Effect::FireGxFifoDma => {
+                        // Fire any ARM9 DMA channel armed for the GxFifo
+                        // start mode. The carry-over from Phase 4.
+                        let channels = self.shared.dma9
+                            .channels_for_timing(crate::dma::DmaTiming::GxFifo);
+                        for ch in channels {
+                            let irq = self.run_dma(ch);
+                            if irq {
+                                use crate::interrupt::Irq;
+                                let irq_bit = match ch {
+                                    0 => Irq::Dma0, 1 => Irq::Dma1, 2 => Irq::Dma2, _ => Irq::Dma3,
+                                };
+                                self.shared.irq9.request(irq_bit);
+                            }
+                        }
+                    }
+                    super::io_arm9::Write32Effect::None => {}
                 }
             }
             0x05 => {

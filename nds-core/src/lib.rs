@@ -417,11 +417,13 @@ impl Nds {
                     });
                 } else if line == 0 {
                     // VBlank ends — re-latch affine reference points for both
-                    // engines at the start of a new frame.
+                    // engines and swap the 3D engine's polygon buffer for
+                    // the frame about to render.
                     self.shared.dispstat9 &= !0x0001;
                     self.shared.dispstat7 &= !0x0001;
                     self.shared.engine_a.latch_affine_refs();
                     self.shared.engine_b.latch_affine_refs();
+                    self.shared.gpu3d.swap_buffers();
                 }
 
                 self.scheduler.schedule(Event {
@@ -950,6 +952,55 @@ mod tests {
         nds.run_frame();
         assert!(nds.shared.irq9.read_if() & Irq::Timer0.bit() != 0,
             "Timer0 IRQ should have fired, IF = 0x{:08X}", nds.shared.irq9.read_if());
+    }
+
+    #[test]
+    fn test_3d_pipeline_via_arm9_io_writes() {
+        let mut nds = Nds::new(None, None);
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9, &mut nds.shared,
+                nds.cpu9.cp15.itcm, nds.cpu9.cp15.dtcm,
+            );
+
+            // BEGIN_VTXS triangles (cmd 0x40, 1 param). Direct port at
+            // 0x0400_0440 + (0x40 - 0x10) * 4 = 0x0400_0500.
+            bus.write32(0x0400_0500, 0);
+
+            // VTX_16 (cmd 0x23, 2 params). Direct port at 0x0400_048C.
+            let z_half = 0x800u32; // 0.5 in 1.19.12
+            for _ in 0..3 {
+                bus.write32(0x0400_048C, 0);
+                bus.write32(0x0400_048C, z_half);
+            }
+
+            // SWAP_BUFFERS (cmd 0x50). Direct port at 0x0400_0540.
+            bus.write32(0x0400_0540, 0);
+        }
+
+        assert_eq!(nds.shared.gpu3d.geometry_polygons.len(), 1,
+            "one triangle should have landed in geometry buffer");
+        assert!(nds.shared.gpu3d.swap_pending);
+
+        // Run a frame so VBlank-end swaps the buffers.
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.run_frame();
+        assert!(!nds.shared.gpu3d.swap_pending);
+        assert_eq!(nds.shared.gpu3d.raster_polygons.len(), 1);
+        assert!(nds.shared.gpu3d.geometry_polygons.is_empty());
+    }
+
+    #[test]
+    fn test_gxstat_low_reflects_empty_fifo_at_boot() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9, &mut nds.shared,
+            nds.cpu9.cp15.itcm, nds.cpu9.cp15.dtcm,
+        );
+        // GXSTAT at 0x0400_0600. Bit 0 = empty.
+        let stat = bus.read16(0x0400_0600);
+        assert!(stat & 0x1 != 0, "FIFO empty at boot");
     }
 
     #[test]

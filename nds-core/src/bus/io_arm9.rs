@@ -6,6 +6,7 @@
 
 use super::SharedState;
 use crate::gpu2d::Engine2d;
+use crate::gpu3d::{GxCmd};
 use crate::ipc::{self, Side};
 
 /// Returns Some((engine, local_offset)) if `offset` falls within an engine's
@@ -179,6 +180,8 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x0248 => (shared.vram.read_cnt(BankId::H) as u16)
                 | ((shared.vram.read_cnt(BankId::I) as u16) << 8),
         0x0304 => shared.powcnt1,
+        0x0600 => shared.gpu3d.fifo.stat_low(),
+        0x0602 => 0, // GXSTAT high half — Phase 7 (PE busy, polygon count)
         _ => 0,
     }
 }
@@ -345,6 +348,8 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
 pub enum Write32Effect {
     None,
     RunDma9(usize),
+    /// GXFIFO crossed below half-full; caller should fire GxFifo DMA.
+    FireGxFifoDma,
 }
 
 pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effect {
@@ -356,6 +361,30 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
     if let Some((ch, kind)) = decode_dma_reg(local) {
         return write_dma_reg(shared, ch, kind, val);
     }
+
+    // GXFIFO (packed format) at 0x04000400 + the direct-port range
+    // 0x04000440..0x040005FF.
+    if local == 0x0400 {
+        shared.gpu3d.fifo.write_packed(val);
+        shared.gpu3d.drain_fifo();
+        if shared.gpu3d.fifo.take_below_half_edge() {
+            return Write32Effect::FireGxFifoDma;
+        }
+        return Write32Effect::None;
+    }
+    if (0x0440..0x0600).contains(&local) {
+        // Direct ports — each command lives at its own 4-byte slot.
+        let cmd_byte = ((local - 0x0440) / 4 + 0x10) as u8;
+        if let Some(cmd) = GxCmd::from_u8(cmd_byte) {
+            shared.gpu3d.fifo.write_direct(cmd, val);
+            shared.gpu3d.drain_fifo();
+            if shared.gpu3d.fifo.take_below_half_edge() {
+                return Write32Effect::FireGxFifoDma;
+            }
+        }
+        return Write32Effect::None;
+    }
+
     match local {
         0x0188 => { write_fifosend(shared, val); Write32Effect::None }
         0x0208 => { shared.irq9.write_ime(val); Write32Effect::None }
