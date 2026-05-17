@@ -340,6 +340,38 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0246 => shared.wramcnt = val as u8,
         0x0060 => shared.gpu3d.rasterizer.disp3dcnt = val,
         0x0304 => shared.powcnt1 = val,
+        0x0330..=0x033F => {
+            // EDGE_COLOR table — 8 × u16.
+            let idx = ((local - 0x0330) / 2) as usize;
+            shared.gpu3d.rasterizer.edge_color[idx] = val & 0x7FFF;
+        }
+        0x0340 => shared.gpu3d.rasterizer.alpha_test_ref = val as u8,
+        0x0350 => shared.gpu3d.rasterizer.clear_color =
+                  (shared.gpu3d.rasterizer.clear_color & 0xFFFF_0000) | val as u32,
+        0x0352 => shared.gpu3d.rasterizer.clear_color =
+                  (shared.gpu3d.rasterizer.clear_color & 0x0000_FFFF) | ((val as u32) << 16),
+        0x0354 => shared.gpu3d.rasterizer.clear_depth = val,
+        0x0356 => { /* CLEAR_IMAGE_OFFSET — unused */ }
+        0x0358 => shared.gpu3d.rasterizer.fog_color =
+                  (shared.gpu3d.rasterizer.fog_color & 0xFFFF_0000) | (val as u32),
+        0x035A => shared.gpu3d.rasterizer.fog_color =
+                  (shared.gpu3d.rasterizer.fog_color & 0x0000_FFFF) | ((val as u32) << 16),
+        0x035C => shared.gpu3d.rasterizer.fog_offset = val,
+        0x0360..=0x037F => {
+            // 32-byte FOG_TABLE — one byte per entry, packed in u16 writes.
+            let base = ((local - 0x0360) * 2) as usize;
+            if base + 1 < 32 {
+                shared.gpu3d.rasterizer.fog_table[base] = val as u8;
+                shared.gpu3d.rasterizer.fog_table[base + 1] = (val >> 8) as u8;
+            }
+        }
+        0x0380..=0x03BF => {
+            // 32-entry TOON_TABLE u16 each.
+            let idx = ((local - 0x0380) / 2) as usize;
+            if idx < 32 {
+                shared.gpu3d.rasterizer.toon_table[idx] = val & 0x7FFF;
+            }
+        }
         _ => {
             log::trace!("ARM9 I/O write16 to unhandled 0x{:08X} = 0x{:04X}", addr, val);
         }

@@ -356,6 +356,47 @@ impl VramRouter {
         let hi = self.read_engine_b_obj(a + 1) as u16;
         lo | (hi << 8)
     }
+
+    /// Read one byte from the 512 KB texture image target. The 3D engine's
+    /// texture unit calls this per-texel during rasterization. Banks A-D
+    /// can each back a 128 KB slot (selected by their VRAMCNT offset).
+    pub fn read_texture_image(&self, addr: u32) -> u8 {
+        let addr = addr & 0x7_FFFF; // 19-bit address within texture-image space
+        for bank in &self.banks {
+            if let VramTarget::TextureImage { slot } = bank.target {
+                let base = (slot as u32) * 0x2_0000; // 128 KB per slot
+                let span = bank.id.size() as u32;
+                if addr >= base && addr < base + span {
+                    return bank.data[(addr - base) as usize];
+                }
+            }
+        }
+        0
+    }
+
+    /// Read one byte from the 128 KB texture palette target. Slots are
+    /// 16 KB each; banks E (64 KB) covers slots 0..3, F/G (16 KB each)
+    /// cover any single slot per their VRAMCNT offset.
+    pub fn read_texture_palette(&self, addr: u32) -> u8 {
+        let addr = addr & 0x1_FFFF; // 17-bit address within texture-palette space
+        for bank in &self.banks {
+            if let VramTarget::TexturePalette { slot } = bank.target {
+                let base = (slot as u32) * 0x4000; // 16 KB per slot
+                let span = bank.id.size() as u32;
+                if addr >= base && addr < base + span {
+                    return bank.data[(addr - base) as usize];
+                }
+            }
+        }
+        0
+    }
+
+    pub fn read_texture_palette_u16(&self, addr: u32) -> u16 {
+        let a = addr & !1;
+        let lo = self.read_texture_palette(a) as u16;
+        let hi = self.read_texture_palette(a + 1) as u16;
+        lo | (hi << 8)
+    }
 }
 
 impl Default for VramRouter {

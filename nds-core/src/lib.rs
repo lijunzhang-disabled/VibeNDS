@@ -427,7 +427,10 @@ impl Nds {
                     self.shared.dispstat7 &= !0x0001;
                     self.shared.engine_a.latch_affine_refs();
                     self.shared.engine_b.latch_affine_refs();
-                    self.shared.gpu3d.swap_buffers();
+                    // Disjoint-borrow the gpu3d and vram fields so the
+                    // rasterizer can read textures.
+                    let SharedState { gpu3d, vram, .. } = &mut self.shared;
+                    gpu3d.swap_buffers(Some(vram));
                 }
 
                 self.scheduler.schedule(Event {
@@ -997,7 +1000,7 @@ mod tests {
         // scanlines render. In a real run, this happens at VBlank-end of
         // the previous frame (line 0 transition). Tests don't need to
         // wait an extra frame for that.
-        nds.shared.gpu3d.swap_buffers();
+        nds.shared.gpu3d.swap_buffers(None);
 
         nds.cpu9.halted = true;
         nds.cpu7.halted = true;
@@ -1036,7 +1039,7 @@ mod tests {
             attr: 0x1F << 16, tex_image_param: 0, palette_base: 0,
         });
         nds.shared.gpu3d.swap_pending = true;
-        nds.shared.gpu3d.swap_buffers();
+        nds.shared.gpu3d.swap_buffers(None);
 
         nds.cpu9.halted = true;
         nds.cpu7.halted = true;

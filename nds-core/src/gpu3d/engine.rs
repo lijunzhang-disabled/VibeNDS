@@ -258,15 +258,15 @@ impl Engine3d {
     /// Frame-boundary swap. Called by the top-level scheduler at VBlank end
     /// when `swap_pending` is true. Moves geometry buffer to raster buffer
     /// and re-rasterizes the frame.
-    pub fn swap_buffers(&mut self) {
+    ///
+    /// `vram` is `None` when the caller doesn't have VRAM handy (unit
+    /// tests); textures render as transparent in that case but per-vertex
+    /// color + post-effects still work.
+    pub fn swap_buffers(&mut self, vram: Option<&crate::vram::VramRouter>) {
         if !self.swap_pending { return; }
         self.raster_polygons = std::mem::take(&mut self.geometry_polygons);
         self.swap_pending = false;
-        // Rasterize immediately into the framebuffer. Phase 7 doesn't yet
-        // pipeline scanline-by-scanline rendering; rendering the whole
-        // frame at the buffer swap is simpler and matches what most
-        // emulators do.
-        self.rasterizer.render_frame(&self.raster_polygons);
+        self.rasterizer.render_frame(&self.raster_polygons, vram);
     }
 
     /// Read a pixel from the 3D framebuffer. Engine A's BG0 path calls
@@ -333,7 +333,7 @@ mod tests {
         // Queue swap, then trigger.
         e.dispatch(GxOp { cmd: GxCmd::SwapBuffers as u8, params: vec![0] });
         assert!(e.swap_pending);
-        e.swap_buffers();
+        e.swap_buffers(None);
         assert!(!e.swap_pending);
         assert_eq!(e.raster_polygons.len(), 1);
         assert!(e.geometry_polygons.is_empty());

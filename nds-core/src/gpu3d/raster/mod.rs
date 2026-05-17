@@ -12,10 +12,13 @@
 //! same shape as the 2D engines' BG renderers.
 
 pub mod triangle;
+pub mod texture;
+pub mod postfx;
 
 use serde::{Deserialize, Serialize};
 
 use super::viewport::ScreenPolygon;
+use crate::vram::VramRouter;
 
 /// 3D framebuffer dimensions.
 pub const FB_WIDTH: usize = 256;
@@ -47,9 +50,35 @@ pub struct Rasterizer {
     pub clear_color: u32,
     /// `CLEAR_DEPTH` register — 16-bit value, scaled to depth buffer range.
     pub clear_depth: u16,
-    /// `DISP3DCNT` register. Bit assignments per GBATEK; Phase 7 part 1
-    /// only consults bit 0 (3D-enable).
+    /// `DISP3DCNT` register. Bit assignments per GBATEK:
+    /// ```text
+    /// [0]  3D enable
+    /// [1]  Highlight mode (vs Toon)
+    /// [2]  Alpha-test enable
+    /// [3]  Alpha-blend enable
+    /// [4]  Anti-alias enable
+    /// [5]  Edge-mark enable
+    /// [6]  Fog: alpha only (vs alpha + color)
+    /// [7]  Fog enable
+    /// [11:8] Fog shift (depth → fog-table index)
+    /// ```
     pub disp3dcnt: u16,
+
+    /// `EDGE_COLOR` — 8 BGR555 entries at `0x04000330..0x0400033F`. Indexed
+    /// by the top 3 bits of the polygon ID (low 3 bits select within the
+    /// same edge-color group).
+    pub edge_color: [u16; 8],
+    /// `FOG_COLOR` — BGR555 + alpha.
+    pub fog_color: u32,
+    /// `FOG_OFFSET` — depth offset before fog-table lookup.
+    pub fog_offset: u16,
+    /// 32-entry `FOG_TABLE` — density values 0..127 indexed by shifted depth.
+    pub fog_table: [u8; 32],
+    /// 32-entry `TOON_TABLE` of BGR555 values.
+    pub toon_table: [u16; 32],
+    /// `ALPHA_TEST_REF` — pixels with alpha < this are discarded when
+    /// alpha-test is enabled (DISP3DCNT bit 2).
+    pub alpha_test_ref: u8,
 }
 
 impl Rasterizer {
@@ -61,6 +90,12 @@ impl Rasterizer {
             clear_color: 0,
             clear_depth: 0x7FFF,
             disp3dcnt: 0,
+            edge_color: [0; 8],
+            fog_color: 0,
+            fog_offset: 0,
+            fog_table: [0; 32],
+            toon_table: [0; 32],
+            alpha_test_ref: 0,
         }
     }
 
@@ -86,23 +121,27 @@ impl Rasterizer {
         for i in self.id_buffer.iter_mut() { *i = 0; }
     }
 
-    /// Rasterize every polygon in the input list into the framebuffer.
-    /// Opaque polygons drawn first, translucent after — per
-    /// `POLYGON_ATTR.alpha` (top 5 bits of `[20:16]`).
-    pub fn render_frame(&mut self, polygons: &[ScreenPolygon]) {
+    /// Rasterize every polygon into the framebuffer, then apply post-effects.
+    ///
+    /// - Opaque polygons drawn first, translucent after (per NDS convention).
+    /// - `vram` is `None` for unit tests that only care about per-vertex
+    ///   color paths; `Some(...)` for the real pipeline so textures work.
+    pub fn render_frame(&mut self, polygons: &[ScreenPolygon], vram: Option<&VramRouter>) {
         self.clear();
         if !self.enabled() { return; }
 
-        // Split into opaque + translucent passes.
         let (opaque, translucent): (Vec<_>, Vec<_>) =
             polygons.iter().partition(|p| !is_translucent(p));
 
         for p in &opaque {
-            triangle::rasterize_polygon(p, self);
+            triangle::rasterize_polygon(p, self, vram);
         }
         for p in &translucent {
-            triangle::rasterize_polygon(p, self);
+            triangle::rasterize_polygon(p, self, vram);
         }
+
+        // Post-effects (each gated by its own DISP3DCNT bit).
+        postfx::apply(self);
     }
 }
 

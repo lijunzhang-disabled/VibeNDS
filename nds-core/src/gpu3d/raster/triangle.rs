@@ -22,52 +22,48 @@
 //! and the result matches real hardware more faithfully.
 
 use super::super::viewport::{ScreenPolygon, ScreenVertex};
+use super::texture::{self, TexParams};
 use super::{Rasterizer, DEPTH_MAX, FB_HEIGHT, FB_WIDTH};
+use crate::vram::VramRouter;
 
-/// Per-vertex attributes carried through interpolation. All in 1.19.12
-/// fixed-point except `screen_x` (24.8) and `screen_y` (integer pixel
-/// after sort).
+/// Per-vertex attributes carried through interpolation.
 #[derive(Debug, Clone, Copy)]
 struct Vert {
-    /// 24.8 fixed-point screen x.
-    x: i32,
-    /// Integer screen y (already rounded for sort).
-    y: i32,
-    /// Depth (1.19.12 NDC-space).
-    depth: i32,
-    /// 1/W in 1.0.30 fixed-point so multiplies stay in i64 range.
-    inv_w: i64,
-    /// R/W, G/W, B/W in 0..(31 × inv_w) range. Each ≈ 1.0.30 fixed-point.
-    r_over_w: i64,
+    x: i32,         // 24.8 fixed-point screen x
+    y: i32,         // integer screen y after sort
+    depth: i32,     // 1.19.12 NDC-space depth
+    inv_w: i64,     // 1/W scaled by (1<<42) so products stay in i64
+    r_over_w: i64,  // (R / 31) × inv_w
     g_over_w: i64,
     b_over_w: i64,
-    /// Polygon ID for the ID buffer (used by edge-mark post-effect).
+    s_over_w: i64,  // (S / 16) × inv_w  (S is 1.11.4 → divide by 16 to get pixel units)
+    t_over_w: i64,
     poly_id: u8,
-    /// Alpha 0..31 from POLYGON_ATTR (snapshot per polygon, same for all 3).
     alpha: u8,
 }
 
 impl Vert {
     fn from(v: &ScreenVertex, poly_id: u8, alpha: u8) -> Self {
-        // Recover screen_y to integer pixels (drop the 24.8 fractional bits).
         let y_pixel = v.screen_y >> 8;
-        // Guard against w == 0 (clipper should have prevented).
         let w = v.w.max(1) as i64;
-        // 1/W in 1.0.30 fixed-point: (1 << 30) / w  (w in 1.19.12).
-        // (1 << 30) * (1<<12) / w_raw is the natural derivation, but
-        // we want consistent fractional bits. Easiest: (1 << 42) / w.
         let inv_w = (1i64 << 42) / w;
         let r = (v.color & 0x1F) as i64;
         let g = ((v.color >> 5) & 0x1F) as i64;
         let b = ((v.color >> 10) & 0x1F) as i64;
+        let s = v.tex[0] as i64;
+        let t = v.tex[1] as i64;
         Vert {
             x: v.screen_x,
             y: y_pixel,
             depth: v.depth_z,
             inv_w,
-            r_over_w: r * inv_w / 31, // normalize so 31 (full chan) maps to inv_w
+            r_over_w: r * inv_w / 31,
             g_over_w: g * inv_w / 31,
             b_over_w: b * inv_w / 31,
+            // S/T are 1.11.4 fixed-point pixel coords. Scale by inv_w
+            // (we'll divide by inv_w per pixel to recover the true value).
+            s_over_w: (s * inv_w) >> 4,
+            t_over_w: (t * inv_w) >> 4,
             poly_id,
             alpha,
         }
@@ -75,35 +71,42 @@ impl Vert {
 }
 
 /// Rasterize one polygon: triangulate by fanning around v[0], then
-/// rasterize each triangle.
-pub fn rasterize_polygon(p: &ScreenPolygon, rast: &mut Rasterizer) {
+/// rasterize each triangle. `vram` is None for unit tests that only
+/// exercise the per-vertex-color path.
+pub fn rasterize_polygon(p: &ScreenPolygon, rast: &mut Rasterizer, vram: Option<&VramRouter>) {
     if p.vertices.len() < 3 { return; }
     let poly_id = ((p.attr >> 24) & 0x3F) as u8;
     let alpha = ((p.attr >> 16) & 0x1F) as u8;
+    let mode = ((p.attr >> 4) & 0x3) as u8;
+    let tex_params = TexParams::from_register(p.tex_image_param);
+    let palette_base = p.palette_base;
 
     let v0 = Vert::from(&p.vertices[0], poly_id, alpha);
     for i in 1..p.vertices.len() - 1 {
         let v1 = Vert::from(&p.vertices[i], poly_id, alpha);
         let v2 = Vert::from(&p.vertices[i + 1], poly_id, alpha);
-        rasterize_triangle(v0, v1, v2, rast);
+        rasterize_triangle(v0, v1, v2, rast, vram, tex_params, palette_base, mode);
     }
 }
 
-fn rasterize_triangle(mut v0: Vert, mut v1: Vert, mut v2: Vert, rast: &mut Rasterizer) {
-    // Sort by y so v0.y <= v1.y <= v2.y.
+#[allow(clippy::too_many_arguments)]
+fn rasterize_triangle(
+    mut v0: Vert, mut v1: Vert, mut v2: Vert,
+    rast: &mut Rasterizer,
+    vram: Option<&VramRouter>,
+    tex_params: TexParams,
+    palette_base: u16,
+    mode: u8,
+) {
     if v0.y > v1.y { std::mem::swap(&mut v0, &mut v1); }
     if v1.y > v2.y { std::mem::swap(&mut v1, &mut v2); }
     if v0.y > v1.y { std::mem::swap(&mut v0, &mut v1); }
 
-    if v2.y < 0 || v0.y >= FB_HEIGHT as i32 { return; } // off-screen
-    if v0.y == v2.y { return; }                          // degenerate (zero height)
+    if v2.y < 0 || v0.y >= FB_HEIGHT as i32 { return; }
+    if v0.y == v2.y { return; }
 
-    // Long edge spans v0 → v2; short edges are v0 → v1 (top half) and
-    // v1 → v2 (bottom half). For each scanline we pick the active edge
-    // pair and interpolate along both.
     let total_dy = v2.y - v0.y;
 
-    // Render top half: scanlines v0.y..v1.y, edges (v0→v1) and (v0→v2).
     if v1.y > v0.y {
         let dy_short = v1.y - v0.y;
         for y in v0.y.max(0)..(v1.y).min(FB_HEIGHT as i32) {
@@ -111,11 +114,10 @@ fn rasterize_triangle(mut v0: Vert, mut v1: Vert, mut v2: Vert, rast: &mut Raste
             let t_short = ((y - v0.y) as i64 * I_SCALE) / dy_short as i64;
             let edge_long  = lerp_vert(&v0, &v2, t_long);
             let edge_short = lerp_vert(&v0, &v1, t_short);
-            rasterize_scanline(y, edge_short, edge_long, rast);
+            rasterize_scanline(y, edge_short, edge_long, rast, vram, tex_params, palette_base, mode);
         }
     }
 
-    // Render bottom half: scanlines v1.y..v2.y, edges (v1→v2) and (v0→v2).
     if v2.y > v1.y {
         let dy_short = v2.y - v1.y;
         for y in v1.y.max(0)..(v2.y).min(FB_HEIGHT as i32) {
@@ -123,7 +125,7 @@ fn rasterize_triangle(mut v0: Vert, mut v1: Vert, mut v2: Vert, rast: &mut Raste
             let t_short = ((y - v1.y) as i64 * I_SCALE) / dy_short as i64;
             let edge_long  = lerp_vert(&v0, &v2, t_long);
             let edge_short = lerp_vert(&v1, &v2, t_short);
-            rasterize_scanline(y, edge_short, edge_long, rast);
+            rasterize_scanline(y, edge_short, edge_long, rast, vram, tex_params, palette_base, mode);
         }
     }
 }
@@ -147,33 +149,43 @@ fn lerp_i32(a: i32, b: i32, t: i64) -> i32 {
 fn lerp_vert(a: &Vert, b: &Vert, t: i64) -> Vert {
     Vert {
         x: lerp_i32(a.x, b.x, t),
-        y: a.y, // not used downstream — set to a.y for completeness
+        y: a.y,
         depth: lerp_i32(a.depth, b.depth, t),
         inv_w: lerp_i64(a.inv_w, b.inv_w, t),
         r_over_w: lerp_i64(a.r_over_w, b.r_over_w, t),
         g_over_w: lerp_i64(a.g_over_w, b.g_over_w, t),
         b_over_w: lerp_i64(a.b_over_w, b.b_over_w, t),
+        s_over_w: lerp_i64(a.s_over_w, b.s_over_w, t),
+        t_over_w: lerp_i64(a.t_over_w, b.t_over_w, t),
         poly_id: a.poly_id,
         alpha: a.alpha,
     }
 }
 
-fn rasterize_scanline(y: i32, mut a: Vert, mut b: Vert, rast: &mut Rasterizer) {
+#[allow(clippy::too_many_arguments)]
+fn rasterize_scanline(
+    y: i32,
+    mut a: Vert,
+    mut b: Vert,
+    rast: &mut Rasterizer,
+    vram: Option<&VramRouter>,
+    tex_params: TexParams,
+    palette_base: u16,
+    mode: u8,
+) {
     if y < 0 || y >= FB_HEIGHT as i32 { return; }
-
-    // Ensure a is left of b.
     if a.x > b.x { std::mem::swap(&mut a, &mut b); }
 
-    // Pixel range (round inclusively).
     let x_left  = ((a.x + 128) >> 8).max(0);
     let x_right = ((b.x + 128) >> 8).min(FB_WIDTH as i32 - 1);
     if x_left > x_right { return; }
 
-    let dx_total = (b.x - a.x).max(1) as i64; // 24.8 units
+    let dx_total = (b.x - a.x).max(1) as i64;
     let row_base = (y as usize) * FB_WIDTH;
 
+    let textured = !tex_params.is_disabled() && vram.is_some();
+
     for x in x_left..=x_right {
-        // t = (x_pixel_in_24_8 - a.x) / dx_total, scaled to I_SCALE.
         let x_24_8 = (x as i64) << 8;
         let t = ((x_24_8 - a.x as i64).max(0) * I_SCALE) / dx_total;
         let t = t.clamp(0, I_SCALE);
@@ -184,28 +196,45 @@ fn rasterize_scanline(y: i32, mut a: Vert, mut b: Vert, rast: &mut Rasterizer) {
         let g_w = lerp_i64(a.g_over_w, b.g_over_w, t);
         let b_w = lerp_i64(a.b_over_w, b.b_over_w, t);
 
-        // Perspective-correct recovery: U = (U/W) / (1/W).
+        // Perspective-correct vertex color.
         let r = ((r_w * 31) / inv_w).clamp(0, 31) as u16;
         let g = ((g_w * 31) / inv_w).clamp(0, 31) as u16;
         let bch = ((b_w * 31) / inv_w).clamp(0, 31) as u16;
-        let color = r | (g << 5) | (bch << 10) | (1 << 15); // bit 15 = pixel written
+        let vertex_color = r | (g << 5) | (bch << 10);
 
-        // Depth test. NDC depth is in [-ONE, +ONE] = [-4096, +4096];
-        // shift to a positive 24-bit range so the comparison is unsigned-style.
+        // Combine with texel if textured.
+        let (color_no_alpha_bit, frag_alpha) = if textured {
+            let s_w = lerp_i64(a.s_over_w, b.s_over_w, t);
+            let t_w = lerp_i64(a.t_over_w, b.t_over_w, t);
+            // S = (S/W) / (1/W). S was scaled into pixel units when packed.
+            let s_pixel = ((s_w * 16) / inv_w) as i32 >> 4;
+            let t_pixel = ((t_w * 16) / inv_w) as i32 >> 4;
+            let texel = texture::sample(tex_params, s_pixel, t_pixel, palette_base, vram.unwrap());
+            texture::combine_with_vertex(texel, vertex_color, mode)
+        } else {
+            (vertex_color, 31)
+        };
+
+        // Alpha-test against the polygon's own alpha threshold.
+        let poly_alpha = a.alpha;
+        if poly_alpha == 0 { continue; } // fully transparent polygon
+        let effective_alpha = ((frag_alpha as u32) * (poly_alpha as u32) / 31) as u8;
+        if effective_alpha == 0 { continue; }
+
+        let color = color_no_alpha_bit | (1 << 15);
+
         let depth_24 = (depth + (1 << 12)).max(0).min(DEPTH_MAX);
         let idx = row_base + x as usize;
         if depth_24 < rast.depth_buffer[idx] {
-            // Alpha blend with existing pixel for translucent polygons.
-            if a.alpha != 0 && a.alpha != 31 {
+            if effective_alpha < 31 {
                 let prev = rast.framebuffer[idx];
                 if prev & (1 << 15) != 0 {
-                    let blended = alpha_blend(color, prev, a.alpha);
+                    let blended = alpha_blend(color, prev, effective_alpha);
                     rast.framebuffer[idx] = blended | (1 << 15);
                 } else {
                     rast.framebuffer[idx] = color;
                 }
-                // Translucent polygons only update depth conditionally;
-                // we follow GBATEK's POLYGON_ATTR bit 11 here later.
+                // Translucent: don't update depth (POLYGON_ATTR bit 11 = 0 default).
             } else {
                 rast.framebuffer[idx] = color;
                 rast.depth_buffer[idx] = depth_24;
@@ -262,7 +291,7 @@ mod tests {
             sv(50, 10, 0x001F),
             sv(30, 30, 0x001F),
         ]);
-        r.render_frame(&[p]);
+        r.render_frame(&[p], None);
 
         // A pixel inside the triangle should be red, alpha-bit set.
         let center_idx = (15 * FB_WIDTH) + 30;
@@ -298,7 +327,7 @@ mod tests {
             ],
             attr: 0x1F << 16, tex_image_param: 0, palette_base: 0,
         };
-        r.render_frame(&[near, far]);
+        r.render_frame(&[near, far], None);
 
         // Center pixel: should still be blue (near won).
         let idx = (15 * FB_WIDTH) + 30;
@@ -315,7 +344,7 @@ mod tests {
         r.disp3dcnt = 1;
         // Set clear color to red with alpha = 1.
         r.clear_color = 0x001F | (0x1F << 16);
-        r.render_frame(&[]);
+        r.render_frame(&[], None);
         // Every pixel should be red with alpha set.
         for &p in &r.framebuffer {
             assert_eq!(p & 0x7FFF, 0x001F);
@@ -333,7 +362,7 @@ mod tests {
             sv(50, 10, 0x001F),
             sv(30, 30, 0x001F),
         ]);
-        r.render_frame(&[p]);
+        r.render_frame(&[p], None);
         // No 3D pixels should be written — all should be clear (0).
         for &px in &r.framebuffer {
             assert_eq!(px & 0x7FFF, 0);
@@ -350,7 +379,7 @@ mod tests {
             sv(50, -50, 0x001F),
             sv(30, -30, 0x001F),
         ]);
-        r.render_frame(&[p]);
+        r.render_frame(&[p], None);
         // No writes; framebuffer stays clear.
         for &px in &r.framebuffer {
             assert_eq!(px & (1 << 15), 0);
