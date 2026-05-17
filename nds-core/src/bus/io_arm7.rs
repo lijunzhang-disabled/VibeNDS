@@ -2,6 +2,7 @@
 
 use super::SharedState;
 use crate::ipc::{self, Side};
+use crate::interrupt::Irq;
 
 #[inline]
 pub fn in_io_page(addr: u32) -> bool {
@@ -31,6 +32,10 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x0136 => shared.extkeyin,
         0x0180 => shared.ipc.read_sync(Side::Arm7),
         0x0184 => shared.ipc.read_fifocnt(Side::Arm7),
+        0x01A0 => shared.auxspi.read_cnt(),
+        0x01A2 => shared.auxspi.read_data() as u16,
+        0x01C0 => shared.spi.read_cnt(),
+        0x01C2 => shared.spi.read_data() as u16,
         0x0208 => shared.irq7.read_ime() as u16,
         0x0210 => shared.irq7.read_ie() as u16,
         0x0212 => (shared.irq7.read_ie() >> 16) as u16,
@@ -164,6 +169,22 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0132 => shared.keycnt7 = val,
         0x0180 => write_sync(shared, val),
         0x0184 => write_fifocnt(shared, val),
+        0x01A0 => shared.auxspi.write_cnt(val),
+        0x01A2 => {
+            // AUXSPIDATA: byte-level transfer to the cart backup chip.
+            // Returns true on transfer-complete-IRQ-enable; we raise the
+            // Slot-1 IRQ on ARM7 since that's where the slot lives by
+            // default.
+            if shared.auxspi.write_data(val as u8) {
+                shared.irq7.request(Irq::Slot1Data);
+            }
+        }
+        0x01C0 => shared.spi.write_cnt(val),
+        0x01C2 => {
+            if shared.spi.write_data(val as u8) {
+                shared.irq7.request(Irq::Spi);
+            }
+        }
         0x0208 => shared.irq7.write_ime(val as u32),
         0x0210 => {
             let prev = shared.irq7.read_ie();

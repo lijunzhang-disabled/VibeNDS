@@ -12,6 +12,8 @@ use crate::gpu2d::{Engine2d, Which as EngineWhich};
 use crate::ipc::Ipc;
 use crate::timer::Timers;
 use crate::dma::DmaController;
+use crate::spi::SpiBus;
+use crate::cart::AuxSpi;
 
 pub const MAIN_RAM_SIZE: usize = 4 * 1024 * 1024;
 pub const SHARED_WRAM_SIZE: usize = 32 * 1024;
@@ -94,6 +96,14 @@ pub struct SharedState {
     /// Per-CPU DMA controllers (4 channels each).
     pub dma9: DmaController,
     pub dma7: DmaController,
+
+    /// SPI bus (ARM7-only) wrapping firmware / TSC / PMIC devices.
+    pub spi: SpiBus,
+
+    /// AUXSPI bus (cart-side backup). Routed through slot-1 control regs
+    /// at `0x040001A0..0x040001A3`. ARM7 by default, but `EXMEMCNT` bit
+    /// 11 can flip slot-1 over to ARM9; Phase 5 keeps it ARM7-only.
+    pub auxspi: AuxSpi,
 }
 
 impl SharedState {
@@ -122,6 +132,8 @@ impl SharedState {
             timers7: Timers::new(),
             dma9: DmaController::new(true),
             dma7: DmaController::new(false),
+            spi: SpiBus::new(),
+            auxspi: AuxSpi::new(),
         }
     }
 

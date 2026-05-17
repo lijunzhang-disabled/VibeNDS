@@ -5,9 +5,11 @@
 
 pub mod header;
 pub mod direct_boot;
+pub mod auxspi;
 
 pub use header::{CartHeader, ParseError, HEADER_SIZE};
 pub use direct_boot::{apply as direct_boot_apply, DirectBootError};
+pub use auxspi::{AuxSpi, BackupKind};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +22,8 @@ pub struct Cart {
     /// Parsed header (when a ROM is loaded).
     #[serde(default)]
     pub header: Option<CartHeader>,
+    // AUXSPI lives in SharedState (it's accessed from the ARM7 I/O page,
+    // and the top-level loop wants to fire Slot1 DMA off its events).
 }
 
 impl Cart {

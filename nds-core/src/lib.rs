@@ -11,6 +11,7 @@ pub mod gpu2d;
 pub mod ipc;
 pub mod timer;
 pub mod dma;
+pub mod spi;
 
 pub use cpu::{Cpu, CpuMode, Psr};
 pub use cpu::bus::CpuBus;
@@ -198,6 +199,40 @@ impl Nds {
     /// 7 = pen down. ARM7 only sees this register.
     pub fn set_extkeys(&mut self, extkeys: u16) {
         self.shared.extkeyin = extkeys & 0x007F;
+    }
+
+    /// Push touchscreen state from the frontend. `x` / `y` are NDS-screen
+    /// pixel coords (0..256 / 0..192). `pen_down` controls the TSC pressure
+    /// reading AND `EXTKEYIN` bit 6 (which is active-low: 0 = pen down).
+    ///
+    /// Real games either poll TSC over SPI directly, or read EXTKEYIN for
+    /// a quick "is the stylus down?" check before going through SPI. We
+    /// drive both paths from a single call.
+    pub fn set_touch(&mut self, x: u16, y: u16, pen_down: bool) {
+        self.shared.spi.tsc.set_touch(x, y, pen_down);
+        // EXTKEYIN bit 6 = pen down (active-low). Clear it when pen is down.
+        if pen_down {
+            self.shared.extkeyin &= !(1 << 6);
+        } else {
+            self.shared.extkeyin |= 1 << 6;
+        }
+    }
+
+    /// Select the cart backup type. Frontends should call this after
+    /// loading a ROM if they have a save type to force.
+    pub fn set_backup_kind(&mut self, kind: cart::BackupKind) {
+        self.shared.auxspi.set_backup_kind(kind);
+    }
+
+    /// Import a `.sav` file into the AUXSPI backup.
+    pub fn import_save(&mut self, data: &[u8]) {
+        self.shared.auxspi.load_save(data);
+    }
+
+    /// Export a `.sav` from the AUXSPI backup. Returns `None` if no backup
+    /// kind has been set.
+    pub fn export_save(&self) -> Option<Vec<u8>> {
+        self.shared.auxspi.export_save()
     }
 
     fn check_keypad_irq(&mut self) {
@@ -914,6 +949,116 @@ mod tests {
         nds.run_frame();
         assert!(nds.shared.irq9.read_if() & Irq::Timer0.bit() != 0,
             "Timer0 IRQ should have fired, IF = 0x{:08X}", nds.shared.irq9.read_if());
+    }
+
+    #[test]
+    fn test_set_touch_drives_tsc_and_extkeyin() {
+        let mut nds = Nds::new(None, None);
+        // Pen down at (128, 96).
+        nds.set_touch(128, 96, true);
+        // EXTKEYIN bit 6 = 0 when pen down (active-low).
+        assert_eq!(nds.shared.extkeyin & (1 << 6), 0);
+        // Reading X via TSC over the SPI bus should give a non-trivial ADC.
+        // Drive a 3-byte conversion against device 2 (TSC). CS must be held
+        // for the first two bytes; released on the third (final).
+        let bus = &mut nds.shared.spi;
+        let cnt_hold = (1 << 15) | (2 << 8) | (1 << 11);
+        let cnt_drop = (1 << 15) | (2 << 8);
+        bus.cnt = cnt_hold;
+        let _ = bus.write_data(0x80 | (5 << 4)); // control byte
+        bus.cnt = cnt_hold;
+        let _ = bus.write_data(0);
+        let hi = bus.read_data();
+        bus.cnt = cnt_drop;
+        let _ = bus.write_data(0);
+        let lo = bus.read_data();
+        let adc = ((hi as u16) << 5) | ((lo as u16) >> 3);
+        // 128 of 255 → roughly halfway between ADC_X1 (0x0200) and ADC_X2
+        // (0x0E00); expect ≈ 0x0800 ± 32.
+        assert!((0x07E0..=0x0820).contains(&adc),
+            "TSC X ADC {:#06X} should be near 0x0800", adc);
+
+        nds.set_touch(0, 0, false);
+        assert_eq!(nds.shared.extkeyin & (1 << 6), 1 << 6);
+    }
+
+    #[test]
+    fn test_set_backup_kind_and_save_round_trip() {
+        let mut nds = Nds::new(None, None);
+        nds.set_backup_kind(cart::BackupKind::Eeprom8K);
+
+        // Drive AUXSPI: WRITE_ENABLE, then WRITE 4 bytes at addr 0x100.
+        let aux = &mut nds.shared.auxspi;
+        let base_cnt = (1 << 15) | (1 << 13);
+        // WRITE_ENABLE (single byte, hold off)
+        aux.cnt = base_cnt;
+        let _ = aux.write_data(0x06);
+        // WRITE cmd 0x02 + 2-byte addr 0x0100 + 4 data bytes.
+        let mut send = |aux: &mut cart::AuxSpi, byte: u8, hold: bool| {
+            aux.cnt = base_cnt | if hold { 1 << 6 } else { 0 };
+            let _ = aux.write_data(byte);
+        };
+        send(aux, 0x02, true);
+        send(aux, 0x01, true);
+        send(aux, 0x00, true);
+        send(aux, 0xAA, true);
+        send(aux, 0xBB, true);
+        send(aux, 0xCC, true);
+        send(aux, 0xDD, false);
+
+        let sav = nds.export_save().expect("save");
+        assert_eq!(sav.len(), 8 * 1024);
+        assert_eq!(&sav[0x100..0x104], &[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // Import into a fresh Nds, read back via AUXSPI.
+        let mut nds2 = Nds::new(None, None);
+        nds2.set_backup_kind(cart::BackupKind::Eeprom8K);
+        nds2.import_save(&sav);
+        let aux = &mut nds2.shared.auxspi;
+        let mut send = |aux: &mut cart::AuxSpi, byte: u8, hold: bool| -> u8 {
+            aux.cnt = base_cnt | if hold { 1 << 6 } else { 0 };
+            let _ = aux.write_data(byte);
+            aux.read_data()
+        };
+        send(aux, 0x03, true);
+        send(aux, 0x01, true);
+        send(aux, 0x00, true);
+        let mut out = [0u8; 4];
+        for i in 0..4 {
+            let hold = i + 1 < 4;
+            out[i] = send(aux, 0, hold);
+        }
+        assert_eq!(out, [0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn test_firmware_nickname_via_spi_io() {
+        // Drive SPI from the ARM7 bus to confirm I/O wiring routes correctly.
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
+        // Enable SPI + select firmware (device 1).
+        bus.write16(0x0400_01C0, (1 << 15) | (1 << 8));
+        // Issue READ cmd (0x03) at addr 0x3FE06 — the nickname start.
+        let cnt_hold = (1 << 15) | (1 << 8) | (1 << 11); // hold = bit 11
+        bus.write16(0x0400_01C0, cnt_hold);
+        bus.write16(0x0400_01C2, 0x03); // READ
+        bus.write16(0x0400_01C2, 0x03); // addr [23:16]
+        bus.write16(0x0400_01C2, 0xFE); // addr [15:8]
+        bus.write16(0x0400_01C2, 0x06); // addr [7:0]
+        // Read 4 bytes — first should be 'N'.
+        bus.write16(0x0400_01C2, 0);
+        let n = bus.read16(0x0400_01C2) as u8;
+        bus.write16(0x0400_01C2, 0);
+        let _hi = bus.read16(0x0400_01C2);
+        bus.write16(0x0400_01C2, 0);
+        let d = bus.read16(0x0400_01C2) as u8;
+        // Final byte — release hold.
+        bus.write16(0x0400_01C0, (1 << 15) | (1 << 8));
+        bus.write16(0x0400_01C2, 0);
+        let _s_hi = bus.read16(0x0400_01C2);
+
+        assert_eq!(n, b'N');
+        assert_eq!(d, b'D');
     }
 
     #[test]

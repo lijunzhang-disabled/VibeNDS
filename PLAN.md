@@ -14,7 +14,7 @@ GBATEK (https://problemkaputt.de/gbatek.htm) is the primary reference. Where GBA
 | Phase 2: Cart loader + boot transfer + scheduler + IRQs | **Done** | 89 |
 | Phase 3: 2D Engine A + Engine B + VRAM bank routing | **Done** | 104 |
 | Phase 4: DMA + timers + IPC FIFO/Sync + keypad/EXTKEYIN | **Done** | 137 |
-| Phase 5: SPI (firmware + TSC + PMIC) + AUXSPI cart backup | Not started | — |
+| Phase 5: SPI (firmware + TSC + PMIC) + AUXSPI cart backup | **Done** | 161 |
 | Phase 6: 3D geometry pipeline (matrix stacks, vertex, clip, GXFIFO) | Not started | — |
 | Phase 7: 3D rasterizer (depth, alpha, edge, fog, anti-alias, capture) | Not started | — |
 | Phase 8: Audio (16 ch, capture units) + save states + AUXSPI export | Not started | — |
