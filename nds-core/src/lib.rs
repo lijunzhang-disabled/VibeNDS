@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod timer;
 pub mod dma;
 pub mod spi;
+pub mod gpu3d;
 
 pub use cpu::{Cpu, CpuMode, Psr};
 pub use cpu::bus::CpuBus;
