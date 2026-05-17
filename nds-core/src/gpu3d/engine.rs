@@ -20,6 +20,7 @@ use super::vertex::{
     PrimitiveType, Vertex, VertexState, VtxAxisPair,
 };
 use super::viewport::{transform_polygon, ScreenPolygon, Viewport};
+use super::raster::Rasterizer;
 
 /// Maximum polygons / vertices per frame, per GBATEK.
 pub const POLYGON_BUF_LIMIT: usize = 2048;
@@ -39,12 +40,16 @@ pub struct Engine3d {
     pub geometry_polygons: Vec<ScreenPolygon>,
 
     /// Raster buffer: last frame's geometry, swapped in by SWAP_BUFFERS,
-    /// consumed by the Phase 7 rasterizer.
+    /// rasterized into `rasterizer.framebuffer` at the same time.
     pub raster_polygons: Vec<ScreenPolygon>,
 
     /// Set whenever `SWAP_BUFFERS` is queued; consumed and cleared at the
     /// next frame boundary (VBlank-end) by the top-level scheduler.
     pub swap_pending: bool,
+
+    /// 3D rasterizer (Phase 7) — produces the 256×192 BGR555 framebuffer
+    /// Engine A composites as BG0 when DISPCNT bit 3 is set.
+    pub rasterizer: Rasterizer,
 }
 
 impl Engine3d {
@@ -58,6 +63,7 @@ impl Engine3d {
             geometry_polygons: Vec::new(),
             raster_polygons: Vec::new(),
             swap_pending: false,
+            rasterizer: Rasterizer::new(),
         }
     }
 
@@ -250,11 +256,24 @@ impl Engine3d {
     }
 
     /// Frame-boundary swap. Called by the top-level scheduler at VBlank end
-    /// when `swap_pending` is true. Moves geometry buffer to raster buffer.
+    /// when `swap_pending` is true. Moves geometry buffer to raster buffer
+    /// and re-rasterizes the frame.
     pub fn swap_buffers(&mut self) {
         if !self.swap_pending { return; }
         self.raster_polygons = std::mem::take(&mut self.geometry_polygons);
         self.swap_pending = false;
+        // Rasterize immediately into the framebuffer. Phase 7 doesn't yet
+        // pipeline scanline-by-scanline rendering; rendering the whole
+        // frame at the buffer swap is simpler and matches what most
+        // emulators do.
+        self.rasterizer.render_frame(&self.raster_polygons);
+    }
+
+    /// Read a pixel from the 3D framebuffer. Engine A's BG0 path calls
+    /// this when DISPCNT bit 3 is set.
+    pub fn read_3d_pixel(&self, x: usize, y: usize) -> u16 {
+        let idx = y * super::raster::FB_WIDTH + x;
+        self.rasterizer.framebuffer.get(idx).copied().unwrap_or(0)
     }
 }
 

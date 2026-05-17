@@ -351,17 +351,20 @@ impl Nds {
                     } else {
                         (true, false)
                     };
-                    // Engine A → top by default
+                    // Engine A → top by default. Pass the 3D framebuffer
+                    // slice so BG0 can read from it when DISPCNT bit 3 is set.
                     {
                         let palette = &self.shared.palette[0..0x400];
                         let oam = &self.shared.oam[0..0x400];
+                        let fb_3d: &[u16] = &self.shared.gpu3d.rasterizer.framebuffer;
                         let fb = if top_engine_a { &mut self.framebuffer_top } else { &mut self.framebuffer_bot };
                         gpu2d::render_scanline(
                             &mut self.shared.engine_a, line,
                             palette, oam, &self.shared.vram, fb,
+                            Some(fb_3d),
                         );
                     }
-                    // Engine B → bottom by default
+                    // Engine B → bottom by default. Engine B has no 3D source.
                     {
                         let palette = &self.shared.palette[0x400..0x800];
                         let oam = &self.shared.oam[0x400..0x800];
@@ -369,6 +372,7 @@ impl Nds {
                         gpu2d::render_scanline(
                             &mut self.shared.engine_b, line,
                             palette, oam, &self.shared.vram, fb,
+                            None,
                         );
                     }
                 }
@@ -952,6 +956,98 @@ mod tests {
         nds.run_frame();
         assert!(nds.shared.irq9.read_if() & Irq::Timer0.bit() != 0,
             "Timer0 IRQ should have fired, IF = 0x{:08X}", nds.shared.irq9.read_if());
+    }
+
+    /// End-to-end Phase 7 test: configure 3D + DISPCNT.bg0_3d + a single
+    /// red triangle, run a frame, verify the top framebuffer has red
+    /// pixels (the rasterized 3D landing through Engine A BG0).
+    #[test]
+    fn test_3d_rasterized_triangle_lands_on_top_framebuffer() {
+        let mut nds = Nds::new(None, None);
+
+        // Configure Engine A: display mode 1, BG0 enabled, BG0_3D enabled.
+        // DISPCNT bits: [0..2] mode, [3] bg0_3d, [8] bg0_enable, [16..17] display mode.
+        nds.shared.engine_a.dispcnt = 0x0001_0108; // mode=0, bg0_3d=1, bg0_en=1, dispmode=1
+
+        // Configure rasterizer: 3D enabled.
+        nds.shared.gpu3d.rasterizer.disp3dcnt = 0x0001;
+
+        // Set palette[0] (backdrop) to black explicitly.
+        nds.shared.palette[0] = 0;
+        nds.shared.palette[1] = 0;
+
+        // Submit a single screen-covering red triangle directly to the
+        // geometry buffer (skipping the GX command path here since
+        // Phase 6 already tested that). swap_buffers will move it to
+        // raster_polygons + rasterize. This validates the
+        // rasterize→Engine-A-BG0→top-framebuffer pipeline end to end.
+        use crate::gpu3d::viewport::{ScreenPolygon, ScreenVertex};
+        nds.shared.gpu3d.geometry_polygons.push(ScreenPolygon {
+            vertices: vec![
+                ScreenVertex { screen_x: 50 << 8,  screen_y: 50 << 8,  depth_z: 0, w: 4096, color: 0x001F, tex: [0, 0] },
+                ScreenVertex { screen_x: 200 << 8, screen_y: 50 << 8,  depth_z: 0, w: 4096, color: 0x001F, tex: [0, 0] },
+                ScreenVertex { screen_x: 125 << 8, screen_y: 150 << 8, depth_z: 0, w: 4096, color: 0x001F, tex: [0, 0] },
+            ],
+            attr: 0x1F << 16, // alpha = 31 = opaque
+            tex_image_param: 0,
+            palette_base: 0,
+        });
+        nds.shared.gpu3d.swap_pending = true;
+        // Rasterize directly so the framebuffer is populated before any
+        // scanlines render. In a real run, this happens at VBlank-end of
+        // the previous frame (line 0 transition). Tests don't need to
+        // wait an extra frame for that.
+        nds.shared.gpu3d.swap_buffers();
+
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.run_frame();
+
+        // Top framebuffer center should now be red — the 3D rasterizer
+        // produced a red pixel, Engine A's BG0 sourced it, the compositor
+        // wrote it through to the top framebuffer.
+        let center_idx = 100 * SCREEN_WIDTH + 125;
+        let c = nds.framebuffer_top[center_idx];
+        let r = c & 0x1F;
+        assert!(r >= 30, "top framebuffer center should be red, got 0x{:04X} (r={})", c, r);
+
+        // A pixel far outside the triangle should be backdrop (black).
+        let outside_idx = 10 * SCREEN_WIDTH + 10;
+        assert_eq!(nds.framebuffer_top[outside_idx] & 0x7FFF, 0,
+            "top framebuffer corner should be backdrop black");
+    }
+
+    #[test]
+    fn test_3d_disabled_when_bg0_3d_clear() {
+        let mut nds = Nds::new(None, None);
+
+        // Engine A: BG0 enabled but BG0_3D *not* set. Plain BG0 source.
+        nds.shared.engine_a.dispcnt = 0x0001_0100;
+        nds.shared.gpu3d.rasterizer.disp3dcnt = 0x0001;
+
+        // Push a red triangle into the geometry buffer so swap_buffers picks it up.
+        use crate::gpu3d::viewport::{ScreenPolygon, ScreenVertex};
+        nds.shared.gpu3d.geometry_polygons.push(ScreenPolygon {
+            vertices: vec![
+                ScreenVertex { screen_x: 50 << 8, screen_y: 50 << 8, depth_z: 0, w: 4096, color: 0x001F, tex: [0,0] },
+                ScreenVertex { screen_x: 200 << 8, screen_y: 50 << 8, depth_z: 0, w: 4096, color: 0x001F, tex: [0,0] },
+                ScreenVertex { screen_x: 125 << 8, screen_y: 150 << 8, depth_z: 0, w: 4096, color: 0x001F, tex: [0,0] },
+            ],
+            attr: 0x1F << 16, tex_image_param: 0, palette_base: 0,
+        });
+        nds.shared.gpu3d.swap_pending = true;
+        nds.shared.gpu3d.swap_buffers();
+
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.run_frame();
+
+        // BG0 is now showing tile data (which is all zeros), so the center
+        // pixel should NOT be red.
+        let center_idx = 100 * SCREEN_WIDTH + 125;
+        let c = nds.framebuffer_top[center_idx];
+        let r = c & 0x1F;
+        assert!(r < 5, "BG0_3D disabled: should not see 3D pixels in framebuffer; got 0x{:04X}", c);
     }
 
     #[test]

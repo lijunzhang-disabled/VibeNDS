@@ -193,6 +193,87 @@ impl Default for SharedState {
     fn default() -> Self { Self::new() }
 }
 
+/// `Vec<u16>` serialized as a flat byte stream (length × 2 bytes,
+/// little-endian). Same fast-path idea as `serde_bytes_vec`, just for
+/// 16-bit elements. Used for the 3D framebuffer.
+pub(crate) mod serde_bytes_vec_u16 {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Vec<u16>, s: S) -> Result<S::Ok, S::Error> {
+        let mut bytes = Vec::with_capacity(v.len() * 2);
+        for &w in v {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        s.serialize_bytes(&bytes)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u16>, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Vec<u16>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("byte buffer of u16 LE")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u16>, E> {
+                let mut out = Vec::with_capacity(v.len() / 2);
+                for chunk in v.chunks_exact(2) {
+                    out.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+                }
+                Ok(out)
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u16>, E> {
+                self.visit_bytes(&v)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u16>, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(w) = seq.next_element::<u16>()? { out.push(w); }
+                Ok(out)
+            }
+        }
+        d.deserialize_bytes(Visitor)
+    }
+}
+
+/// `Vec<i32>` serialized as a flat byte stream (length × 4 bytes,
+/// little-endian). Used for the 3D depth buffer.
+pub(crate) mod serde_bytes_vec_u32_i {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Vec<i32>, s: S) -> Result<S::Ok, S::Error> {
+        let mut bytes = Vec::with_capacity(v.len() * 4);
+        for &w in v {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        s.serialize_bytes(&bytes)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<i32>, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Vec<i32>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("byte buffer of i32 LE")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<i32>, E> {
+                let mut out = Vec::with_capacity(v.len() / 4);
+                for chunk in v.chunks_exact(4) {
+                    out.push(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+                Ok(out)
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<i32>, E> {
+                self.visit_bytes(&v)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<i32>, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(w) = seq.next_element::<i32>()? { out.push(w); }
+                Ok(out)
+            }
+        }
+        d.deserialize_bytes(Visitor)
+    }
+}
+
 pub(crate) mod serde_bytes_vec {
     //! Serialize `Vec<u8>` as a byte string rather than a sequence of u8s.
     //! Without this, bincode encodes 4 MB as 4 M serde elements, which

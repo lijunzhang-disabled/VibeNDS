@@ -17,6 +17,7 @@ pub mod clip;
 pub mod lighting;
 pub mod viewport;
 pub mod engine;
+pub mod raster;
 
 pub use matrix::{Matrix, ONE, fmul};
 pub use stacks::{MatrixStacks, MtxMode};
@@ -27,3 +28,4 @@ pub use clip::clip_polygon;
 pub use lighting::{Light, LightingState, compute_vertex_color};
 pub use viewport::{ScreenPolygon, ScreenVertex, Viewport};
 pub use engine::{Engine3d, POLYGON_BUF_LIMIT, VERTEX_BUF_LIMIT};
+pub use raster::{Rasterizer, FB_HEIGHT, FB_PIXELS, FB_WIDTH};

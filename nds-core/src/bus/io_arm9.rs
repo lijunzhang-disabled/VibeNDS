@@ -15,7 +15,11 @@ use crate::ipc::{self, Side};
 #[inline]
 fn classify_engine(offset: u32) -> Option<(EngineSel, u32)> {
     if offset < 0x70 {
+        // 0x04 = DISPSTAT, 0x06 = VCOUNT are shared between both CPUs.
+        // 0x60-0x6B are 3D-engine / capture / main-mem-FIFO regs (not
+        // really Engine A's, just happen to live in its address window).
         if offset == 0x04 || offset == 0x06 { return None; }
+        if (0x60..0x6C).contains(&offset) { return None; }
         Some((EngineSel::A, offset))
     } else if (0x1000..0x1070).contains(&offset) {
         Some((EngineSel::B, offset - 0x1000))
@@ -180,8 +184,9 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x0248 => (shared.vram.read_cnt(BankId::H) as u16)
                 | ((shared.vram.read_cnt(BankId::I) as u16) << 8),
         0x0304 => shared.powcnt1,
+        0x0060 => shared.gpu3d.rasterizer.disp3dcnt,
         0x0600 => shared.gpu3d.fifo.stat_low(),
-        0x0602 => 0, // GXSTAT high half — Phase 7 (PE busy, polygon count)
+        0x0602 => 0, // GXSTAT high half — PE busy / polygon count
         _ => 0,
     }
 }
@@ -333,6 +338,7 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0180 => write_sync(shared, val),
         0x0184 => write_fifocnt(shared, val),
         0x0246 => shared.wramcnt = val as u8,
+        0x0060 => shared.gpu3d.rasterizer.disp3dcnt = val,
         0x0304 => shared.powcnt1 = val,
         _ => {
             log::trace!("ARM9 I/O write16 to unhandled 0x{:08X} = 0x{:04X}", addr, val);

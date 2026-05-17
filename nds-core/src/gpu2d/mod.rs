@@ -109,6 +109,9 @@ pub struct ResolvedPixel {
 /// Render one scanline. `palette` and `oam` are this engine's 1 KB halves;
 /// `vram` is the global router (the engine reads via its target views).
 /// `framebuffer` is 256 × 192 u16, indexed by `line * 256 + x`.
+/// `framebuffer_3d` is the 3D rasterizer's output, consulted when
+/// `DISPCNT` bit 3 selects "BG0 source is 3D" — Engine A only. Pass `None`
+/// for Engine B or when 3D isn't being composited.
 pub fn render_scanline(
     engine: &mut Engine2d,
     line: u16,
@@ -116,6 +119,7 @@ pub fn render_scanline(
     oam: &[u8],
     vram: &crate::vram::VramRouter,
     framebuffer: &mut [u16],
+    framebuffer_3d: Option<&[u16]>,
 ) {
     let mode = engine.dispcnt & 0x07;
 
@@ -146,8 +150,28 @@ pub fn render_scanline(
     let dispcnt_bg_enable = ((engine.dispcnt >> 8) & 0xF) as u8;
 
     let mut bg_layers: [Option<[Option<bg::BgPixel>; 256]>; 4] = [None, None, None, None];
+
+    // BG0 = 3D path: DISPCNT bit 3 says "BG0 source is the 3D framebuffer."
+    // Engine A only — `framebuffer_3d` is None on Engine B.
+    let bg0_is_3d = engine.dispcnt & (1 << 3) != 0 && framebuffer_3d.is_some();
+
     for &n in text_bgs {
         if dispcnt_bg_enable & (1 << n) == 0 { continue; }
+        if n == 0 && bg0_is_3d {
+            // Synthesize BG0 from the 3D framebuffer.
+            let fb3d = framebuffer_3d.unwrap();
+            let line_off = line as usize * 256;
+            let priority = (engine.bgcnt[0] & 0x3) as u8;
+            let mut layer = [None; 256];
+            for x in 0..256 {
+                let pixel = fb3d[line_off + x];
+                if pixel & (1 << 15) != 0 {
+                    layer[x] = Some(bg::BgPixel { color: pixel & 0x7FFF, priority, bg_index: 0 });
+                }
+            }
+            bg_layers[0] = Some(layer);
+            continue;
+        }
         let mut layer = [None; 256];
         bg::render_text_bg(engine, n, line, palette, vram, &mut layer);
         bg_layers[n] = Some(layer);
