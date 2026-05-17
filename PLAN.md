@@ -256,13 +256,15 @@ Each `VRAMCNT_x` byte: `[7]=enable, [6:5]=offset, [4:3]=reserved, [2:0]=mst (mod
 
 **Goal**: Compatibility with a target set of commercial titles (initial goal: 5 titles boot to title screen; stretch goal: 20+ playable to first save).
 
-**Plan (tracked one bug at a time, each with a `debug/<date>_<short-name>.md`):**
-- ARM9 cache emulation — most games don't depend on it but a few prefetch quirks bite us. We'll add a write-through cache simulator if needed.
-- Memory wait states — `EXMEMCNT` GBA-slot timing, Main RAM access penalty (8/9-cycle ARM9, 4-cycle ARM7).
-- 3D edge cases — degenerate polygons (zero-area, all-clip), W-buffer mode, depth precision in projection matrix corner cases.
-- Slot-1 cart timing — RTC is read via the cart's KEY2 stream too, not the SPI bus.
-- Boot logo video — DSi-specific; we skip.
-- Audio channel timing edge cases — start/stop while DMA in flight.
+**Workflow**: each item gets its own `debug/YYYY-MM-DD_<slug>.md` investigation log (same shape as `../gba/debug/`). Track items in [`debug/phase9_carryover.md`](debug/phase9_carryover.md); pull one into an investigation log when starting work, delete from the checklist when the fix lands.
+
+**Current backlog (see `debug/phase9_carryover.md` for the full detail on each):**
+
+- **3D engine deferrals (7 items)**: format-5 block-compressed textures, anti-aliasing, toon/highlight mode 2, shadow mode 3, W-buffer mode, display capture from 3D, box/pos/vec test commands.
+- **CPU / bus accuracy (4 items)**: ARM9 cache simulation, memory wait states, open-bus accuracy, misaligned-access spec review.
+- **Cart / boot (4 items)**: KEY1/KEY2 encrypted ROMs, slot-1 RTC via cart bus, slot-1 ROM transfer machine, backup-type ROM database.
+- **Audio (3 items, after Phase 8 lands)**: sound-DMA cross-trigger discipline, ADPCM block-loop edge cases, capture units.
+- **Diagnostics (3 items)**: env-var hot-path cache pattern, instruction trace ring buffer, multi-game compatibility sweep.
 
 ## Project Structure (planned)
 
