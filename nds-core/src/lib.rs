@@ -137,6 +137,23 @@ impl Nds {
             while let Some(event) = self.scheduler.pop_if_ready() {
                 self.dispatch_event(event);
             }
+
+            // Halt-wake: a halted CPU is skipped by the run loop above,
+            // so `step()` (the usual place that clears `halted`) never
+            // runs. Real ARM7TDMI / ARM946E-S wakes from
+            // SWI Halt / IntrWait / VBlankIntrWait as soon as
+            // `(IE & IF) != 0` — independent of IME and CPSR.I. We
+            // mirror that here: after each chunk + event dispatch, clear
+            // `halted` on either CPU if its controller has an unmasked
+            // IRQ. The next iteration's step() then delivers the IRQ
+            // through the normal path. See
+            // debug/2026-05-08_halt-wake-inherited.md.
+            if self.cpu9.halted && self.shared.irq9.has_unmasked_irq() {
+                self.cpu9.halted = false;
+            }
+            if self.cpu7.halted && self.shared.irq7.has_unmasked_irq() {
+                self.cpu7.halted = false;
+            }
         }
     }
 
@@ -516,6 +533,63 @@ mod tests {
         // After exactly one frame, vcount should be back to 0 (we cycle
         // through 0..LINES_PER_FRAME and the count is mod LINES_PER_FRAME).
         assert_eq!(nds.shared.vcount, 0);
+    }
+
+    /// Regression for the halt-wake bug inherited from `../gba` (their
+    /// commit 27722c4). `run_cycles` skips `step()` while a CPU is halted,
+    /// but `step()` is the only place that clears `halted` — so without
+    /// the post-dispatch halt-wake check, a CPU that executes `SWI Halt` /
+    /// `IntrWait` / `VBlankIntrWait` sleeps forever even when VBlank fires.
+    ///
+    /// Real ARM7TDMI / ARM946E-S wakes on `(IE & IF) != 0` alone,
+    /// regardless of IME and CPSR.I. See
+    /// `debug/2026-05-08_halt-wake-inherited.md`.
+    #[test]
+    fn test_halt_wake_on_unmasked_vblank_irq() {
+        let mut nds = Nds::new(None, None);
+        // Configure VBlank IRQ enable in each CPU's DISPSTAT (bit 3) and
+        // unmask it in IE. Crucially, IME is left at 0 — that gates
+        // delivery but must NOT gate halt-wake.
+        nds.shared.dispstat9 = 0x0008;
+        nds.shared.dispstat7 = 0x0008;
+        nds.shared.irq9.write_ie(Irq::VBlank.bit());
+        nds.shared.irq7.write_ie(Irq::VBlank.bit());
+        // IME is 0 by default — make it explicit.
+        nds.shared.irq9.write_ime(0);
+        nds.shared.irq7.write_ime(0);
+
+        // Halt both CPUs (as if they just called SWI 0x05 VBlankIntrWait).
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+
+        // Pre-fix: run_frame() never wakes either CPU even though
+        // VBlank fires at line 192 and sets IF.VBlank on both controllers.
+        // Post-fix: halt-wake clears `halted` after dispatch_event drains
+        // the queue with a VBlank pending.
+        nds.run_frame();
+
+        assert!(nds.shared.irq9.read_if() & Irq::VBlank.bit() != 0,
+            "ARM9 IF should have VBlank pending");
+        assert!(nds.shared.irq7.read_if() & Irq::VBlank.bit() != 0,
+            "ARM7 IF should have VBlank pending");
+        assert!(!nds.cpu9.halted,
+            "ARM9 should be woken: IE & IF != 0 even with IME=0");
+        assert!(!nds.cpu7.halted,
+            "ARM7 should be woken: IE & IF != 0 even with IME=0");
+    }
+
+    /// Negative case: halt-wake must NOT fire when no IRQ source is enabled.
+    /// The CPU should stay halted, otherwise we've broken the basic halt
+    /// behavior.
+    #[test]
+    fn test_halt_stays_halted_when_no_irq_enabled() {
+        let mut nds = Nds::new(None, None);
+        // No IE bits set, no DISPSTAT enables.
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.run_frame();
+        assert!(nds.cpu9.halted, "ARM9 should remain halted (no IRQ enabled)");
+        assert!(nds.cpu7.halted, "ARM7 should remain halted (no IRQ enabled)");
     }
 
     #[test]

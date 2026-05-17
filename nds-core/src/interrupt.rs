@@ -100,6 +100,16 @@ impl InterruptController {
         self.ime && (self.ie & self.iflag) != 0
     }
 
+    /// True when any enabled IRQ is pending, **ignoring** IME and CPSR.I.
+    ///
+    /// IME and CPSR.I gate IRQ *delivery* but not halt *exit*. Real
+    /// ARM7TDMI / ARM946E-S wake from `SWI Halt` / `IntrWait` /
+    /// `VBlankIntrWait` as soon as `(IE & IF) != 0`, regardless of those
+    /// two masks. Used by the top-level run loop's halt-wake check.
+    pub fn has_unmasked_irq(&self) -> bool {
+        (self.ie & self.iflag) != 0
+    }
+
     pub fn read_ie(&self) -> u32 { self.ie }
     pub fn write_ie(&mut self, v: u32) { self.ie = v; }
     pub fn read_if(&self) -> u32 { self.iflag }
