@@ -17,7 +17,7 @@ GBATEK (https://problemkaputt.de/gbatek.htm) is the primary reference. Where GBA
 | Phase 5: SPI (firmware + TSC + PMIC) + AUXSPI cart backup | **Done** | 161 |
 | Phase 6: 3D geometry pipeline (matrix stacks, vertex, clip, GXFIFO) | **Done** | 227 |
 | Phase 7: 3D rasterizer (depth, alpha, edge, fog, anti-alias, capture) | **Done** (textures + edge marking + fog landed; AA stubbed) | 244 |
-| Phase 8: Audio (16 ch, capture units) + save states + AUXSPI export | Not started | — |
+| Phase 8: Audio (16 ch, capture units) + save states + AUXSPI export | **Done** (16-ch mixer + PCM/ADPCM/PSG/Noise + F5/F8 hotkeys; capture + sound DMA deferred) | 261 |
 | Phase 9: Accuracy polish + debugger utilities | Not started | — |
 
 WiFi, RTC alarm, GBA-slot passthrough, and DS-Wireless multiplay are deliberately out of scope. RTC time-of-day **is** in scope (most cart games read it on boot).

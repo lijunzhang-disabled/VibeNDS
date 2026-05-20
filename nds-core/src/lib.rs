@@ -982,6 +982,49 @@ mod tests {
     /// red triangle, run a frame, verify the top framebuffer has red
     /// pixels (the rasterized 3D landing through Engine A BG0).
     #[test]
+    fn test_audio_drain_produces_samples_each_frame() {
+        let mut nds = Nds::new(None, None);
+        // Master enable + full master volume.
+        nds.shared.audio.master_cnt = (1 << 15) | 127;
+        // Plant a PCM8 sample buffer in main RAM at 0x100.
+        for i in 0..32 {
+            nds.shared.main_ram[0x100 + i] = (i as u8).wrapping_mul(8);
+        }
+        // Channel 0: PCM8, full ch volume, center pan, loop mode, start.
+        nds.shared.audio.channels[0].sad = 0x0200_0100;
+        nds.shared.audio.channels[0].tmr = 0xFF00; // ~256-cycle period
+        nds.shared.audio.channels[0].pnt = 0;
+        nds.shared.audio.channels[0].len = 8;
+        let cnt = (1 << 31) | (1 << 27) | (64 << 16) | 127; // start+loop+pan64+vol127
+        nds.shared.audio.write_cnt(0, cnt);
+
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.run_frame();
+
+        // After a frame, drain — we should get a bunch of samples.
+        let mut buf = [0i16; 2048];
+        let n = nds.drain_audio(&mut buf);
+        assert!(n >= 1024, "expected at least 1024 samples per frame, got {}", n);
+        // Some samples should be non-zero (the PCM8 buffer has variation).
+        let nonzero = buf[..n].iter().filter(|&&s| s != 0).count();
+        assert!(nonzero > 100, "expected non-silent samples; got only {} nonzero", nonzero);
+    }
+
+    #[test]
+    fn test_audio_register_round_trip_via_arm7_bus() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
+        // Write SOUND0CNT_L = 0x12345678
+        bus.write32(0x0400_0400, 0x1234_5678);
+        // Read back through the bus.
+        let v = bus.read32(0x0400_0400);
+        // High bit (31) reflects active state; if no start transition,
+        // CNT reads back as written.
+        assert_eq!(v & 0x7FFF_FFFF, 0x1234_5678 & 0x7FFF_FFFF);
+    }
+
+    #[test]
     fn test_3d_rasterized_triangle_lands_on_top_framebuffer() {
         let mut nds = Nds::new(None, None);
 

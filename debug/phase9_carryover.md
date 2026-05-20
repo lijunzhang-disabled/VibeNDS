@@ -95,15 +95,23 @@ This file is the canonical "what's left" list. Each entry has: where it was defe
 
 ---
 
-## Audio — Phase 8 (when it lands)
+## Audio — Phase 8 part 3 / Phase 9
 
-### Audio-1. Sound DMA cross-trigger discipline (lesson from `../gba/`)
-- See [`debug/README.md#lessons-for-later-phases`](README.md). One sound channel asking for data must not fire DMA channels feeding *other* sound channels.
+### Audio-1. Sound DMA `Special` start mode wiring
+- **Current**: Phase 8 implemented all 16 channels reading samples directly from main RAM via the bus_read8 closure. ARM7 DMA channels 1-3 armed for `DmaTiming::Special` don't fire from sound channels yet.
+- **Hardware**: when a sound channel's loop point is hit (or first-fill on restart), a configured ARM7 DMA channel can be triggered to refill the buffer.
+- **Trigger**: streaming audio (background music with multi-buffer ping-pong) doesn't get refilled, so it cuts off after one buffer.
+- **Note**: per the cross-trigger lesson from `../gba/debug/2026-05-05_srtog-fifo-b-cross-trigger.md`, gate by per-channel demand, not by class.
 
-### Audio-2. ADPCM block-loop edge cases
-- The ADPCM step-index can wrap if a sample loops over a block boundary mid-step. Easy to miss, common to handle wrong.
+### Audio-2. VRAM-resident audio samples
+- **Current**: `mixer::tick` reads sample data only from main RAM (the `bus_read8` closure masks to `addr & 0x3F_FFFF`).
+- **Hardware**: sample data can live in VRAM (typically bank C/D when ARM7-mapped). Games doing streaming audio often DMA into VRAM and play from there.
+- **Trigger**: VRAM-resident audio plays silence.
 
-### Audio-3. Capture units
+### Audio-3. ADPCM block-loop edge cases
+- The ADPCM step-index can wrap if a sample loops over a block boundary mid-step. The current loop-point predictor snapshot helps but doesn't cover every edge case.
+
+### Audio-4. Capture units
 - Two capture units that record either the mixer output or a single channel into a buffer. Used for echo/reverb effects.
 
 ---

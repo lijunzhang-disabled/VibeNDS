@@ -4,6 +4,7 @@
 //! a 90 px gap, clears to black, and steps the core. Rendering of the
 //! actual framebuffers is deferred to Phase 3.
 
+mod audio;
 mod video;
 
 use clap::Parser;
@@ -13,7 +14,7 @@ use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Scancode};
 use sdl2::mouse::MouseButton;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use video::SCREEN_GAP;
 
@@ -46,6 +47,52 @@ struct Args {
     /// Default: `eeprom-64k` (heuristic).
     #[arg(long)]
     save_type: Option<String>,
+
+    /// Disable audio output.
+    #[arg(long)]
+    no_audio: bool,
+}
+
+fn save_state_path(rom: Option<&Path>) -> Option<PathBuf> {
+    rom.map(|p| p.with_extension("state"))
+}
+
+/// F5 — serialize the entire emulator, zstd-compress, write to `.state`.
+fn save_state(nds: &Nds, path: &Path) {
+    let bytes = match bincode::serialize(nds) {
+        Ok(b) => b,
+        Err(e) => { eprintln!("save_state: serialize failed: {}", e); return; }
+    };
+    let compressed = match zstd::encode_all(bytes.as_slice(), 3) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("save_state: compress failed: {}", e); return; }
+    };
+    match fs::write(path, &compressed) {
+        Ok(()) => eprintln!("Save state written to {} ({} → {} bytes)", path.display(), bytes.len(), compressed.len()),
+        Err(e) => eprintln!("save_state: write failed: {}", e),
+    }
+}
+
+/// F8 — read `.state`, zstd-decompress, deserialize, assign in place.
+fn load_state(nds: &mut Nds, path: &Path) {
+    if !path.exists() {
+        eprintln!("No save state at {}", path.display());
+        return;
+    }
+    let compressed = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => { eprintln!("load_state: read failed: {}", e); return; }
+    };
+    let bytes = match zstd::decode_all(compressed.as_slice()) {
+        Ok(b) => b,
+        Err(e) => { eprintln!("load_state: decompress failed: {}", e); return; }
+    };
+    let restored: Nds = match bincode::deserialize(&bytes) {
+        Ok(n) => n,
+        Err(e) => { eprintln!("load_state: deserialize failed: {}", e); return; }
+    };
+    *nds = restored;
+    eprintln!("Loaded save state from {}", path.display());
 }
 
 fn parse_backup_kind(s: &str) -> Option<BackupKind> {
@@ -169,7 +216,12 @@ fn main() {
 
     let sdl = sdl2::init().expect("failed to init SDL2");
     let mut display = video::DualScreen::new(&sdl, args.scale);
+    let audio_out = if args.no_audio { None } else { audio::AudioOutput::new(&sdl) };
     let mut events = sdl.event_pump().expect("event pump");
+    let state_path = save_state_path(args.rom.as_deref());
+
+    // Frontend-side audio drain buffer.
+    let mut audio_buf = vec![0i16; 4096];
 
     let frame_target = Duration::from_micros(16_715); // ~59.83 Hz
     'main_loop: loop {
@@ -179,6 +231,14 @@ fn main() {
             match event {
                 Event::Quit { .. } => break 'main_loop,
                 Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'main_loop,
+                Event::KeyDown { keycode: Some(Keycode::F5), .. } => {
+                    if let Some(p) = &state_path { save_state(&nds, p); }
+                    else { eprintln!("Save state needs a --rom path to derive .state file"); }
+                }
+                Event::KeyDown { keycode: Some(Keycode::F8), .. } => {
+                    if let Some(p) = &state_path { load_state(&mut nds, p); }
+                    else { eprintln!("Load state needs a --rom path to derive .state file"); }
+                }
                 _ => {}
             }
         }
@@ -210,6 +270,12 @@ fn main() {
 
         nds.run_frame();
         display.present(&nds.framebuffer_top, &nds.framebuffer_bot);
+
+        // Pump audio samples from the core to the SDL2 callback queue.
+        if let Some(out) = &audio_out {
+            let n = nds.drain_audio(&mut audio_buf);
+            if n > 0 { out.push(&audio_buf[..n]); }
+        }
 
         let elapsed = frame_start.elapsed();
         if elapsed < frame_target {
