@@ -234,23 +234,21 @@ Each `VRAMCNT_x` byte: `[7]=enable, [6:5]=offset, [4:3]=reserved, [2:0]=mst (mod
 - Fog table darkens distant pixels.
 - A first commercial 3D ROM (e.g. a homebrew like `osmash` or `nds-bootstrap`'s test patterns) boots to a recognizable 3D scene.
 
-### Phase 8: Audio + Save States
+### Phase 8: Audio + Save States — **Done**
 
-**Goal**: 16-channel mixed audio output; AUXSPI save export/import; full-state save/load.
+**Goal (met)**: 16-channel mixed audio output; AUXSPI save export/import; full-state save/load.
 
-**Plan:**
-- **Audio engine** (`audio/mod.rs`) — 16 channels each with: format (PCM8/PCM16/IMA-ADPCM/PSG), source address, length, loop start/length, volume (0-127, with shift), pan (0-127), repeat mode (manual/loop/one-shot).
-- **PSG channels** — channels 8-13 can be square-wave PSG with duty (8 duty values), channels 14-15 are noise (LFSR).
-- **IMA-ADPCM** — 4-bit ADPCM with 1-word header per block (16-bit predictor + 16-bit step index); decoder advances per sample.
-- **Sound DMA** — when `CHCNT.format == ADPCM` and the loop start/total length are configured, the channel cycles through the source address; we don't actually need DMA for sample fetch (channels read directly from main RAM/VRAM via the bus). The "sound DMA" label refers to the 4 ARM7 DMA start modes triggered by sound channels.
-- **Capture units** — 2 capture units that record either the mixer output or a specific channel into a buffer in main RAM. Used for echo/reverb.
-- **Save states** — `Nds::save_state()` / `load_state()` via bincode + zstd, mirrors GBA approach.
-- **AUXSPI export/import** — `Nds::export_save()` returns the raw backup bytes; `import_save()` accepts a `.sav` file.
+**What landed:**
+- **Audio engine** (`audio/mod.rs`) — 16 `Channel`s + master `SOUNDCNT`/`SOUNDBIAS` + interleaved-stereo `VecDeque` output ring. Per-channel state covers `cnt`/`sad`/`tmr`/`pnt`/`len` plus internal `pos_word`/`pos_frac`, current sample, ADPCM predictor + step index + loop snapshots, PSG phase, noise LFSR.
+- **Sample formats** (`audio/sample.rs`) — PCM8 (signed byte amplified ×256), PCM16 (direct halfword), IMA-ADPCM (4-byte block header + 4-bit nibbles + 89-entry step table + 8-entry index table + loop-point predictor snapshots), PSG square waves (channels 8-13, 8 duty cycles), 15-bit LFSR noise (channels 14-15). End-of-buffer handling for OneShot vs Loop modes.
+- **Mixer** (`audio/mixer.rs`) — per-output-sample mix at 32768 Hz (one tick every `ARM7_CYCLES_PER_SAMPLE` ARM7 cycles). Per-channel volume mul/div + pan, master volume, clamp to i16 stereo.
+- **`Nds::drain_audio`** — frontend pulls samples; underflow pads with silence.
+- **Save states** — bincode `serialize`/`deserialize` over the entire `Nds` struct, zstd-compressed in the frontend. F5 saves to `<rom>.state`, F8 loads. Already covered the AUXSPI export/import API in Phase 5.
+- **SDL2 audio output** (`nds-frontend/src/audio.rs`) — 32768 Hz stereo i16 device + shared queue between callback and main loop. `--no-audio` flag for silent runs. Bounded queue drops oldest on overflow (latency ≤ 1 s).
 
-**Tests planned:**
-- Play a sine wave through one PCM16 channel, verify mixer output.
-- Save state mid-frame, load, run another frame, compare framebuffer.
-- ADPCM round-trip: encode-then-decode a known signal.
+**Tests landed**: PCM8 read from main RAM produces non-zero stereo samples after a frame; ARM7-bus round-trip of `SOUND0CNT`; per-format decoders unit-tested (ADPCM advance, PSG duty, LFSR step); mixer pan/volume; save-state bincode round-trip (already tested since Phase 1).
+
+**Deferred to Phase 9** (see `debug/phase9_carryover.md`): sound DMA `Special` start mode wiring, VRAM-resident sample fetch (mixer currently reads main RAM only), capture units, ADPCM block-loop edge cases.
 
 ### Phase 9: Accuracy Polish + Debugger Utilities
 
@@ -355,11 +353,16 @@ nds/
 
 ## Testing Strategy
 
-- **Unit tests** per subsystem, same model as GBA: barrel shifter, every ARM/THUMB/v5TE instruction, every BIOS SWI, BG/OBJ rendering, window, blending, VRAM routing, IPC FIFO ordering, GXFIFO command queue, matrix stack, clipping math, ADPCM round-trip.
-- **Integration tests** at the `Nds` top-level: hand-assembled ARM9/ARM7 binaries that exercise a specific path (e.g. ARM9 writes a value to Main RAM, ARM7 reads it).
-- **Test ROMs**: rockwrestler, bigredpimp's NDS test, jsmolka armwrestler-ds (has both ARM7 and ARM9 modes), gbatek's 3D demos.
+- **Unit tests** per subsystem (we have **261** as of Phase 8): barrel shifter, every ARM/THUMB/v5TE instruction, every BIOS SWI, BG/OBJ rendering, window, blending, VRAM routing, IPC FIFO ordering, GXFIFO command queue, matrix stack, clipping math, ADPCM step, mixer pan, edge marking, fog, etc.
+- **Integration tests** at the `Nds` top-level: hand-assembled ARM9/ARM7 binaries / direct register pokes that exercise a specific path end-to-end (3D triangle → BG0=3D → framebuffer; ARM9 writes IPC FIFO → ARM7 reads; PCM8 sample → mixer → drain).
+- **Test ROMs** for Phase 9 polish:
+  - **CPU**: jsmolka [`armwrestler-ds`](https://github.com/destoer/armwrestler-fix) — ARMv4T + ARMv5TE instruction validation, distinct ARM7/ARM9 modes.
+  - **Memory/timing**: `rockwrestler` (homebrew) — memory access widths, timer/IRQ edges.
+  - **3D**: GBATEK example demos; small homebrew like `nehe-ds` (NeHe OpenGL tutorial ports).
+  - **Sound**: small ADPCM streamer homebrew + sine-wave PCM tests.
+  - **Compat sweep**: a handful of commercial titles (e.g. *Phoenix Wright* — heavy IPC; *NSMB* — 3D BG0; *Mario Kart DS* — 3D + audio + slot-1; *Pokémon* — RTC, AUXSPI saves).
 - **Screenshot comparison** against melonDS / no$gba reference frames.
-- **Trace comparison** against melonDS instruction logs for bring-up.
+- **Trace comparison** against melonDS instruction logs when chasing CPU-level divergences.
 
 ## Dependencies
 
@@ -374,13 +377,16 @@ nds-core = { path = "../nds-core" }
 sdl2 = { version = "0.37", features = ["bundled", "static-link"] }
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
+log = "0.4"
 zstd = "0.13"
+bincode = "1"
 ```
 
 ## Reference
 
-- GBATEK: https://problemkaputt.de/gbatek.htm (primary spec)
-- melonDS source (cross-check on ambiguous behavior)
-- jsmolka armwrestler-ds (CPU validation)
-- TONC (carries over for many 2D concepts since Engine A is GBA-PPU-like)
-- The sibling GBA project at `../gba` (architectural reference)
+- **GBATEK** — https://problemkaputt.de/gbatek.htm (primary spec)
+- **melonDS source** — cross-check on ambiguous behavior
+- **jsmolka armwrestler-ds** — CPU validation test ROM
+- **TONC** — carries over for many 2D concepts since Engine A is GBA-PPU-like
+- **The sibling GBA project at `../gba`** — architectural reference + canonical bug-fix history (see `debug/2026-04-27_irq-pipeline-refill-inherited.md` and `debug/2026-05-08_halt-wake-inherited.md` for two bugs we inherited and caught via upstream audit)
+- **Concept docs** under [`docs/concepts/`](docs/concepts/) — 6 deep-dives: cpus, ipc, spi, 3d-graphics-basics, gpu-command-flow, rasterization
