@@ -13,6 +13,7 @@ pub mod timer;
 pub mod dma;
 pub mod spi;
 pub mod gpu3d;
+pub mod audio;
 
 pub use cpu::{Cpu, CpuMode, Psr};
 pub use cpu::bus::CpuBus;
@@ -134,6 +135,15 @@ impl Nds {
             // the ARM9 clock; ARM7 timers at the ARM7 clock.
             self.tick_timers(arm9_cycles_total, arm7_consumed);
 
+            // Audio mixer ticks in the ARM7 clock domain. Disjoint-borrow
+            // the audio and main_ram fields so the bus_read8 closure can
+            // pull sample data while the mixer mutates channel state.
+            let SharedState { audio, main_ram, .. } = &mut self.shared;
+            let main_ram_slice = &main_ram[..];
+            audio::mixer::tick(audio, arm7_consumed, &mut |addr| {
+                main_ram_slice[(addr as usize) & 0x3F_FFFF]
+            });
+
             self.scheduler.add_cycles(arm7_consumed as u64);
 
             while let Some(event) = self.scheduler.pop_if_ready() {
@@ -234,6 +244,13 @@ impl Nds {
     /// kind has been set.
     pub fn export_save(&self) -> Option<Vec<u8>> {
         self.shared.auxspi.export_save()
+    }
+
+    /// Drain stereo audio samples (interleaved L/R, signed 16-bit) into
+    /// `out`. Returns the number of samples written. Padded with silence
+    /// on underflow.
+    pub fn drain_audio(&mut self, out: &mut [i16]) -> usize {
+        self.shared.audio.drain(out)
     }
 
     fn check_keypad_irq(&mut self) {

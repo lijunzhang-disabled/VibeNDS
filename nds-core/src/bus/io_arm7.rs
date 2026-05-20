@@ -24,6 +24,18 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
             shared.timers7.read_control(id)
         };
     }
+
+    // Audio channel block: 0x0400..0x04FF (16 channels × 16 bytes each)
+    if (0x0400..0x0500).contains(&local) {
+        let ch = ((local - 0x0400) / 0x10) as usize;
+        let reg = (local - 0x0400) & 0xF;
+        return read_audio_channel_u16(shared, ch, reg);
+    }
+
+    // Audio control:
+    if local == 0x0500 { return shared.audio.master_cnt; }
+    if local == 0x0504 { return shared.audio.bias; }
+
     match local {
         0x0004 => shared.dispstat7,
         0x0006 => shared.vcount,
@@ -140,6 +152,49 @@ fn write_fifosend(shared: &mut SharedState, val: u32) {
     }
 }
 
+/// Read a 16-bit halfword from one of the 16 audio channels' register
+/// blocks. `reg` is the offset within the 16-byte block (0..15).
+fn read_audio_channel_u16(shared: &SharedState, ch: usize, reg: u32) -> u16 {
+    if ch >= 16 { return 0; }
+    let c = &shared.audio.channels[ch];
+    match reg {
+        0x0 => c.cnt as u16,
+        0x2 => (shared.audio.read_cnt(ch) >> 16) as u16,
+        0x4 => c.sad as u16,
+        0x6 => (c.sad >> 16) as u16,
+        0x8 => c.tmr,
+        0xA => c.pnt,
+        0xC => c.len as u16,
+        0xE => (c.len >> 16) as u16,
+        _ => 0,
+    }
+}
+
+fn write_audio_channel_u16(shared: &mut SharedState, ch: usize, reg: u32, val: u16) {
+    if ch >= 16 { return; }
+    let c = &mut shared.audio.channels[ch];
+    match reg {
+        0x0 => {
+            // CNT low half — merge into the 32-bit register.
+            let new_cnt = (c.cnt & 0xFFFF_0000) | val as u32;
+            // The start bit is in the high half; this write doesn't restart.
+            c.cnt = new_cnt;
+        }
+        0x2 => {
+            // CNT high half — contains the start bit (bit 31 of CNT = bit 15 of this half).
+            let new_cnt = (c.cnt & 0x0000_FFFF) | ((val as u32) << 16);
+            shared.audio.write_cnt(ch, new_cnt);
+        }
+        0x4 => c.sad = (c.sad & 0xFFFF_0000) | val as u32,
+        0x6 => c.sad = (c.sad & 0x0000_FFFF) | ((val as u32) << 16),
+        0x8 => c.tmr = val,
+        0xA => c.pnt = val,
+        0xC => c.len = (c.len & 0xFFFF_0000) | val as u32,
+        0xE => c.len = (c.len & 0x0000_FFFF) | ((val as u32) << 16),
+        _ => {}
+    }
+}
+
 pub fn write_io8(shared: &mut SharedState, addr: u32, val: u8) {
     let aligned = addr & !1;
     let mut cur = read_io16(shared, aligned);
@@ -162,6 +217,16 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         }
         return;
     }
+
+    if (0x0400..0x0500).contains(&local) {
+        let ch = ((local - 0x0400) / 0x10) as usize;
+        let reg = (local - 0x0400) & 0xF;
+        write_audio_channel_u16(shared, ch, reg, val);
+        return;
+    }
+    if local == 0x0500 { shared.audio.master_cnt = val; return; }
+    if local == 0x0504 { shared.audio.bias = val & 0x3FF; return; }
+
     match local {
         0x0004 => {
             shared.dispstat7 = (shared.dispstat7 & 0x0007) | (val & !0x0007);

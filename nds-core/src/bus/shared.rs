@@ -15,6 +15,7 @@ use crate::dma::DmaController;
 use crate::spi::SpiBus;
 use crate::cart::AuxSpi;
 use crate::gpu3d::Engine3d;
+use crate::audio::Audio;
 
 pub const MAIN_RAM_SIZE: usize = 4 * 1024 * 1024;
 pub const SHARED_WRAM_SIZE: usize = 32 * 1024;
@@ -109,6 +110,9 @@ pub struct SharedState {
     /// 3D engine — matrix stacks + vertex pipeline + lighting + clipper +
     /// viewport transform + GXFIFO. ARM9-only.
     pub gpu3d: Engine3d,
+
+    /// Audio — 16 channels + mixer. ARM7-only.
+    pub audio: Audio,
 }
 
 impl SharedState {
@@ -140,6 +144,7 @@ impl SharedState {
             spi: SpiBus::new(),
             auxspi: AuxSpi::new(),
             gpu3d: Engine3d::new(),
+            audio: Audio::new(),
         }
     }
 
