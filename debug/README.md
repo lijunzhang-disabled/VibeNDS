@@ -13,9 +13,10 @@ regression test → verification.
 | 2026-04-27 | [IRQ pipeline-refill ordering inherited from GBA port](2026-04-27_irq-pipeline-refill-inherited.md) | **Fixed** |
 | 2026-05-08 | [Halt-wake — halted CPU never woken by pending IRQ (inherited)](2026-05-08_halt-wake-inherited.md) | **Fixed** |
 
-## Phase 9 carry-over checklist
+## Phase 9 working docs
 
-[`phase9_carryover.md`](phase9_carryover.md) — consolidated list of every item deferred during Phases 1-7. 21 items across 3D engine, CPU/bus accuracy, cart/boot, audio (pending Phase 8), and diagnostics. Pull entries into dated investigation logs as you work them.
+- **[`phase9_carryover.md`](phase9_carryover.md)** — consolidated list of every item deferred during Phases 1-7. ~22 items across 3D engine, CPU/bus accuracy, cart/boot, audio, and diagnostics. Pull entries into dated investigation logs as you work them.
+- **[`test-plan.md`](test-plan.md)** — ordered test-ROM plan for Phase 9: armwrestler-ds → rockwrestler → devkitPro 3D examples → commercial titles (Phoenix Wright first). Each stage assumes the previous is passing.
 
 ## Lessons for later phases (from upstream audit)
 
