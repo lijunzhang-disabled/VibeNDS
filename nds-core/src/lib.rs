@@ -160,11 +160,33 @@ impl Nds {
             // IRQ. The next iteration's step() then delivers the IRQ
             // through the normal path. See
             // debug/2026-05-08_halt-wake-inherited.md.
-            if self.cpu9.halted && self.shared.irq9.has_unmasked_irq() {
-                self.cpu9.halted = false;
+            //
+            // IntrWait gate: if `intrwait_mask != 0`, the CPU is parked
+            // by SWI 0x04 / 0x05 and only an IRQ whose bit is in the
+            // mask should wake it. Any other IRQ keeps it halted (real
+            // BIOS re-enters HALT in its loop). Mask is cleared on wake.
+            // See debug/2026-05-29_intrwait-mask-inherited.md.
+            if self.cpu9.halted {
+                let wake = if self.cpu9.intrwait_mask != 0 {
+                    self.shared.irq9.has_matching_irq(self.cpu9.intrwait_mask)
+                } else {
+                    self.shared.irq9.has_unmasked_irq()
+                };
+                if wake {
+                    self.cpu9.halted = false;
+                    self.cpu9.intrwait_mask = 0;
+                }
             }
-            if self.cpu7.halted && self.shared.irq7.has_unmasked_irq() {
-                self.cpu7.halted = false;
+            if self.cpu7.halted {
+                let wake = if self.cpu7.intrwait_mask != 0 {
+                    self.shared.irq7.has_matching_irq(self.cpu7.intrwait_mask)
+                } else {
+                    self.shared.irq7.has_unmasked_irq()
+                };
+                if wake {
+                    self.cpu7.halted = false;
+                    self.cpu7.intrwait_mask = 0;
+                }
             }
         }
     }
@@ -652,6 +674,66 @@ mod tests {
         nds.run_frame();
         assert!(nds.cpu9.halted, "ARM9 should remain halted (no IRQ enabled)");
         assert!(nds.cpu7.halted, "ARM7 should remain halted (no IRQ enabled)");
+    }
+
+    /// Regression for the IntrWait bug inherited from `../gba`
+    /// (their commit `bb4b916`, FE7 cascade). Real BIOS implements SWI 0x04
+    /// / 0x05 as `loop { HALT; if BIOS_IF & mask: break; }` — only an IRQ
+    /// whose bit matches the wait-mask wakes the CPU. Without this gate,
+    /// any unrelated IRQ (HBlank, Timer, IPC) wakes the CPU prematurely and
+    /// the game's main loop iterates many times per frame instead of once.
+    ///
+    /// Here we park the CPU under VBlankIntrWait semantics (mask = VBlank
+    /// bit), then raise an HBlank IRQ. The CPU must stay halted.
+    #[test]
+    fn test_intrwait_mask_blocks_non_matching_irq() {
+        let mut nds = Nds::new(None, None);
+        // Enable both VBlank and HBlank IRQs so a real IRQ source could be
+        // pending. The mask, not IE, is what gates the wake.
+        nds.shared.dispstat9 = 0x0018; // VBlank + HBlank enabled
+        nds.shared.irq9.write_ie(Irq::VBlank.bit() | Irq::HBlank.bit());
+
+        // Park CPU as if SWI 0x05 just ran — mask = VBlank only.
+        nds.cpu9.halted = true;
+        nds.cpu9.intrwait_mask = Irq::VBlank.bit();
+
+        // Raise HBlank, NOT VBlank. (Direct request to avoid running enough
+        // cycles to hit line 192 and trigger VBlank too.)
+        nds.shared.irq9.request(Irq::HBlank);
+
+        // Step one of the halt-wake checks: we don't want VBlank to actually
+        // fire from the scheduler, so just poke the halt-wake path by
+        // running a tiny chunk of cycles. HBlank fires every 1118 cycles on
+        // ARM7-domain; 100 cycles is short enough that no scheduled event
+        // races us.
+        nds.run_cycles(100);
+
+        assert!(nds.cpu9.halted,
+            "ARM9 should stay halted: HBlank fired but mask only matches VBlank");
+        assert_eq!(nds.cpu9.intrwait_mask, Irq::VBlank.bit(),
+            "Mask should remain set while waiting");
+    }
+
+    /// Companion to the above: when the *matching* IRQ fires, the CPU
+    /// must wake AND the mask must clear (so a subsequent HALTCNT-style
+    /// halt isn't gated by a stale mask).
+    #[test]
+    fn test_intrwait_mask_wakes_on_matching_irq() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.dispstat9 = 0x0008; // VBlank IRQ enabled
+        nds.shared.irq9.write_ie(Irq::VBlank.bit());
+
+        nds.cpu9.halted = true;
+        nds.cpu9.intrwait_mask = Irq::VBlank.bit();
+
+        // Raise VBlank directly.
+        nds.shared.irq9.request(Irq::VBlank);
+        nds.run_cycles(100);
+
+        assert!(!nds.cpu9.halted,
+            "ARM9 should wake: VBlank matches the IntrWait mask");
+        assert_eq!(nds.cpu9.intrwait_mask, 0,
+            "Mask should clear on wake so future HALTCNT halts aren't gated");
     }
 
     #[test]

@@ -12,6 +12,7 @@ regression test → verification.
 |---|---|---|
 | 2026-04-27 | [IRQ pipeline-refill ordering inherited from GBA port](2026-04-27_irq-pipeline-refill-inherited.md) | **Fixed** |
 | 2026-05-08 | [Halt-wake — halted CPU never woken by pending IRQ (inherited)](2026-05-08_halt-wake-inherited.md) | **Fixed** |
+| 2026-05-29 | [IntrWait — SWI 0x04/0x05 wake on any IRQ instead of mask (inherited)](2026-05-29_intrwait-mask-inherited.md) | **Fixed** |
 
 ## Phase 9 working docs
 

@@ -110,6 +110,15 @@ impl InterruptController {
         (self.ie & self.iflag) != 0
     }
 
+    /// Same as `has_unmasked_irq` but additionally requires the pending
+    /// IRQ to be in `mask`. Used to honor SWI 0x04 / 0x05 IntrWait
+    /// semantics — only an IRQ whose bit is in the wait-mask should wake
+    /// the CPU; any other IRQ keeps the CPU halted (real BIOS re-enters
+    /// HALT in its loop). See `debug/2026-05-29_intrwait-mask-inherited.md`.
+    pub fn has_matching_irq(&self, mask: u32) -> bool {
+        (self.ie & self.iflag & mask) != 0
+    }
+
     pub fn read_ie(&self) -> u32 { self.ie }
     pub fn write_ie(&mut self, v: u32) { self.ie = v; }
     pub fn read_if(&self) -> u32 { self.iflag }

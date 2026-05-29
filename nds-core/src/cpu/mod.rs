@@ -126,6 +126,13 @@ pub struct Cpu {
     pipeline: [u32; 2],
     pub pipeline_flushed: bool,
     pub halted: bool,
+    /// IntrWait mask. `0` = HALTCNT-style wake (any pending IRQ clears `halted`).
+    /// Non-zero = SWI 0x04 / 0x05 semantics: only an IRQ whose bit is in the
+    /// mask clears `halted`. Cleared automatically on wake. Real BIOS
+    /// implements this as a HALT-recheck loop; we collapse the loop into a
+    /// gated halt-wake check. See `debug/2026-05-29_intrwait-mask-inherited.md`.
+    #[serde(default)]
+    pub intrwait_mask: u32,
     pub(crate) pending_swi: Option<u8>,
 
     /// True for the ARM946E-S core; false for ARM7TDMI. Gates ARMv5TE
@@ -170,6 +177,7 @@ impl Cpu {
             pipeline: [0; 2],
             pipeline_flushed: true,
             halted: false,
+            intrwait_mask: 0,
             pending_swi: None,
             is_arm9,
             exception_base: 0,
@@ -207,6 +215,7 @@ impl Cpu {
             self.irq_entries += 1;
             self.handle_interrupt();
             self.halted = false;
+            self.intrwait_mask = 0;
         }
 
         if self.halted {

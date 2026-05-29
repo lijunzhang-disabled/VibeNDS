@@ -22,11 +22,17 @@ pub fn handle_swi<B: CpuBus>(cpu: &mut Cpu, bus: &mut B, comment: u8) -> bool {
     }
 }
 
-/// Wait until any flag in R1 is set in IF (then auto-acknowledge it).
-/// HLE shortcut: just halt the CPU. The IRQ controller's pending bit will
-/// wake it; the kernel's IRQ handler clears IF. This works because we
-/// already gate IRQ delivery on IF & IE & IME.
+/// Wait until any flag in R1 is set in IF, then auto-acknowledge it.
+///
+/// Real BIOS implements this as a `loop { HALT; if BIOS_IF & mask: return }`
+/// loop — only a *matching* IRQ wakes; any other IRQ re-enters HALT. We
+/// collapse the loop into a gated halt-wake check using `cpu.intrwait_mask`.
+/// A zero `R1` mask is treated as "wake on any IRQ" so the BIOS doesn't
+/// park forever (matches `gba/debug/2026-05-24_fe7-hblank-irq-cascade.md`).
+/// See `debug/2026-05-29_intrwait-mask-inherited.md`.
 fn swi_intr_wait(cpu: &mut Cpu) -> bool {
+    let mask = cpu.regs[1];
+    cpu.intrwait_mask = if mask != 0 { mask } else { 0xFFFF_FFFF };
     cpu.halted = true;
     true
 }

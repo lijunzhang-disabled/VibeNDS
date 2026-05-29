@@ -22,7 +22,12 @@ pub fn handle_swi<B: CpuBus>(cpu: &mut Cpu, bus: &mut B, comment: u8) -> bool {
     }
 }
 
+/// See `debug/2026-05-29_intrwait-mask-inherited.md` and the ARM9 sibling
+/// for the rationale: real BIOS only wakes on a matching IRQ, so we gate
+/// halt-wake on `cpu.intrwait_mask`.
 fn swi_intr_wait(cpu: &mut Cpu) {
+    let mask = cpu.regs[1];
+    cpu.intrwait_mask = if mask != 0 { mask } else { 0xFFFF_FFFF };
     cpu.halted = true;
 }
 

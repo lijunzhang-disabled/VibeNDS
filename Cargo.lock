@@ -273,6 +273,7 @@ dependencies = [
 name = "nds-frontend"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "clap",
  "env_logger",
  "log",
