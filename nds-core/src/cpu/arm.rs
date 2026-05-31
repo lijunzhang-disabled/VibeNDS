@@ -8,13 +8,12 @@
 //! ARMv5TE encodings only execute when `cpu.is_arm9` is true. On the ARM7
 //! they fall through to the undefined-instruction handler.
 
-use super::Cpu;
 use super::alu::{
-    AluOp, ShiftType,
-    add_with_carry, barrel_shift, sub_with_carry,
-    signed_sat_add, signed_sat_sub, signed_sat_double,
+    add_with_carry, barrel_shift, signed_sat_add, signed_sat_double, signed_sat_sub,
+    sub_with_carry, AluOp, ShiftType,
 };
 use super::bus::CpuBus;
+use super::Cpu;
 use super::CpuMode;
 
 impl Cpu {
@@ -41,28 +40,40 @@ impl Cpu {
                     self.arm_branch_exchange(opcode)
                 } else if bits_27_20 == 0x12 && bits_7_4 == 0x3 {
                     // BLX register (ARMv5TE)
-                    if self.is_arm9 { self.arm_branch_link_exchange_reg(opcode) }
-                    else { self.arm_undefined(opcode) }
+                    if self.is_arm9 {
+                        self.arm_branch_link_exchange_reg(opcode)
+                    } else {
+                        self.arm_undefined(opcode)
+                    }
                 } else if bits_27_20 == 0x16 && bits_7_4 == 0x1 {
                     // CLZ (ARMv5TE)
-                    if self.is_arm9 { self.arm_clz(opcode) }
-                    else { self.arm_undefined(opcode) }
+                    if self.is_arm9 {
+                        self.arm_clz(opcode)
+                    } else {
+                        self.arm_undefined(opcode)
+                    }
                 } else if bits_7_4 == 0x5
-                    && (bits_27_20 == 0x10 || bits_27_20 == 0x12
-                        || bits_27_20 == 0x14 || bits_27_20 == 0x16)
+                    && (bits_27_20 == 0x10
+                        || bits_27_20 == 0x12
+                        || bits_27_20 == 0x14
+                        || bits_27_20 == 0x16)
                 {
                     // QADD / QSUB / QDADD / QDSUB (ARMv5TE)
-                    if self.is_arm9 { self.arm_q_arith(opcode) }
-                    else { self.arm_undefined(opcode) }
-                } else if (bits_7_4 & 0x9) == 0x8
-                    && (bits_27_20 & 0xF9) == 0x10
-                {
+                    if self.is_arm9 {
+                        self.arm_q_arith(opcode)
+                    } else {
+                        self.arm_undefined(opcode)
+                    }
+                } else if (bits_7_4 & 0x9) == 0x8 && (bits_27_20 & 0xF9) == 0x10 {
                     // DSP multiply family: bit 7 = 1, bit 4 = 0,
                     // bits[27:20] are 0x10/0x12/0x14/0x16. Ordinary
                     // shifted-register data-processing instructions also use
                     // bit 7, so keep the high opcode mask tight.
-                    if self.is_arm9 { self.arm_dsp_multiply(opcode) }
-                    else { self.arm_undefined(opcode) }
+                    if self.is_arm9 {
+                        self.arm_dsp_multiply(opcode)
+                    } else {
+                        1
+                    }
                 } else if (bits_7_4 & 0x9) == 0x9 && (bits_27_20 & 0xE0) == 0 {
                     // Multiply / multiply-long / SWP / halfword / LDRD/STRD
                     match bits_7_4 {
@@ -123,16 +134,20 @@ impl Cpu {
             0b101 => self.arm_branch(opcode),
             0b110 => {
                 // Coprocessor LDC/STC (ARMv5+). NDS doesn't use them; NOP.
-                if self.is_arm9 { 1 } else { self.arm_undefined(opcode) }
+                if self.is_arm9 {
+                    1
+                } else {
+                    self.arm_undefined(opcode)
+                }
             }
             0b111 => {
                 if (opcode >> 24) & 0xF == 0xF {
                     self.arm_swi(opcode)
-                } else if self.is_arm9 {
-                    // Coprocessor MCR/MRC/CDP. Only CP15 exists on the NDS.
-                    self.arm_coprocessor(opcode)
                 } else {
-                    self.arm_undefined(opcode)
+                    // Coprocessor MCR/MRC/CDP. ARM9 has CP15; ARM7 exposes
+                    // the debug coprocessor enough that old tests expect CP14
+                    // MRC to act as a harmless no-op.
+                    self.arm_coprocessor(opcode)
                 }
             }
             _ => self.arm_undefined(opcode),
@@ -153,7 +168,7 @@ impl Cpu {
                 let target = (self.regs[15] as i32).wrapping_add(offset) as u32;
 
                 self.regs[14] = self.regs[15].wrapping_sub(4); // LR = next instruction
-                // Switch to THUMB regardless of target bit 0 (BLX always interworks).
+                                                               // Switch to THUMB regardless of target bit 0 (BLX always interworks).
                 self.cpsr.set_thumb(true);
                 self.regs[15] = target;
                 self.pipeline_flushed = true;
@@ -202,7 +217,11 @@ impl Cpu {
 
             let shift_amount = if shift_by_reg {
                 let rs = ((opcode >> 8) & 0xF) as u8;
-                let rs_val = if rs == 15 { self.reg(15).wrapping_add(4) } else { self.reg(rs) };
+                let rs_val = if rs == 15 {
+                    self.reg(15).wrapping_add(4)
+                } else {
+                    self.reg(rs)
+                };
                 rs_val as u8
             } else {
                 ((opcode >> 7) & 0x1F) as u8
@@ -215,7 +234,13 @@ impl Cpu {
             };
 
             let immediate_shift = !shift_by_reg;
-            barrel_shift(rm_val, shift_type, shift_amount, self.cpsr.c(), immediate_shift)
+            barrel_shift(
+                rm_val,
+                shift_type,
+                shift_amount,
+                self.cpsr.c(),
+                immediate_shift,
+            )
         };
 
         let (result, carry, overflow) = match op {
@@ -271,7 +296,9 @@ impl Cpu {
         let rm = (opcode & 0xF) as u8;
 
         let result = if a {
-            self.reg(rm).wrapping_mul(self.reg(rs)).wrapping_add(self.reg(rn))
+            self.reg(rm)
+                .wrapping_mul(self.reg(rs))
+                .wrapping_add(self.reg(rn))
         } else {
             self.reg(rm).wrapping_mul(self.reg(rs))
         };
@@ -342,11 +369,16 @@ impl Cpu {
             let rm = (opcode & 0xF) as u8;
             let shift_type = ShiftType::from_u8(((opcode >> 5) & 3) as u8);
             let shift_amount = ((opcode >> 7) & 0x1F) as u8;
-            let (shifted, _) = barrel_shift(self.reg(rm), shift_type, shift_amount, self.cpsr.c(), true);
+            let (shifted, _) =
+                barrel_shift(self.reg(rm), shift_type, shift_amount, self.cpsr.c(), true);
             shifted
         };
 
-        let offset_addr = if u { base.wrapping_add(offset) } else { base.wrapping_sub(offset) };
+        let offset_addr = if u {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
         let addr = if p { offset_addr } else { base };
 
         let mut cycles = 1;
@@ -363,7 +395,11 @@ impl Cpu {
             self.set_reg(rd, val);
             cycles += 1;
         } else {
-            let val = if rd == 15 { self.reg(15).wrapping_add(4) } else { self.reg(rd) };
+            let val = if rd == 15 {
+                self.reg(15).wrapping_add(4)
+            } else {
+                self.reg(rd)
+            };
             if b {
                 bus.write8(addr, val as u8);
             } else {
@@ -401,14 +437,22 @@ impl Cpu {
             self.reg(rm)
         };
 
-        let offset_addr = if u { base.wrapping_add(offset) } else { base.wrapping_sub(offset) };
+        let offset_addr = if u {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
         let addr = if p { offset_addr } else { base };
 
         if l {
             let val = match sh {
                 0x1 => {
                     let val = bus.read16(addr & !1) as u32;
-                    if !self.is_arm9 && addr & 1 != 0 { val.rotate_right(8) } else { val }
+                    if !self.is_arm9 && addr & 1 != 0 {
+                        val.rotate_right(8)
+                    } else {
+                        val
+                    }
                 }
                 0x2 => bus.read8(addr) as i8 as i32 as u32,
                 0x3 => {
@@ -432,7 +476,11 @@ impl Cpu {
             }
         }
 
-        if l { 3 } else { 2 }
+        if l {
+            3
+        } else {
+            2
+        }
     }
 
     // ─── Doubleword Transfer (LDRD/STRD, ARMv5TE) ────────────────
@@ -459,7 +507,11 @@ impl Cpu {
             let rm = (opcode & 0xF) as u8;
             self.reg(rm)
         };
-        let offset_addr = if u { base.wrapping_add(offset) } else { base.wrapping_sub(offset) };
+        let offset_addr = if u {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
         let addr = if p { offset_addr } else { base };
         let aligned = addr & !7;
 
@@ -475,7 +527,11 @@ impl Cpu {
             self.regs[rn as usize] = offset_addr;
         }
 
-        if store { 3 } else { 4 }
+        if store {
+            3
+        } else {
+            4
+        }
     }
 
     // ─── Block Data Transfer (LDM/STM) ───────────────────────────
@@ -497,10 +553,10 @@ impl Cpu {
             // ARMv5 makes this UNPREDICTABLE; we keep the v4 behavior since
             // it never appears in real ARM9 code anyway.
             let xfer_addr = match (u, p) {
-                (true,  false) => base,
-                (true,  true)  => base.wrapping_add(4),
+                (true, false) => base,
+                (true, true) => base.wrapping_add(4),
                 (false, false) => base.wrapping_sub(0x3C),
-                (false, true)  => base.wrapping_sub(0x40),
+                (false, true) => base.wrapping_sub(0x40),
             };
             if l {
                 let val = bus.read32(xfer_addr);
@@ -519,10 +575,18 @@ impl Cpu {
         }
 
         let mut addr = if u {
-            if p { base.wrapping_add(4) } else { base }
+            if p {
+                base.wrapping_add(4)
+            } else {
+                base
+            }
         } else {
             let total = reg_count * 4;
-            if p { base.wrapping_sub(total) } else { base.wrapping_sub(total).wrapping_add(4) }
+            if p {
+                base.wrapping_sub(total)
+            } else {
+                base.wrapping_sub(total).wrapping_add(4)
+            }
         };
 
         let final_addr = if u {
@@ -532,10 +596,11 @@ impl Cpu {
         };
 
         let r15_in_list = rlist & (1 << 15) != 0;
-        let use_user_bank = s && !(l && r15_in_list);
-
         let rn_in_list = rlist & (1 << rn) != 0;
         let rn_is_lowest = rn_in_list && rlist.trailing_zeros() as u8 == rn;
+        let use_user_bank = s && !(l && r15_in_list);
+        let should_writeback = w && (!l || !rn_in_list || (self.is_arm9 && rn_is_lowest));
+        let mut did_writeback = false;
 
         for i in 0..16u8 {
             if rlist & (1 << i) == 0 {
@@ -546,20 +611,23 @@ impl Cpu {
                 let val = bus.read32(addr & !3);
                 if s && r15_in_list {
                     if i == 15 {
+                        if should_writeback {
+                            self.regs[rn as usize] = final_addr;
+                            did_writeback = true;
+                        }
                         let spsr = self.spsr();
                         let new_mode = spsr.mode();
                         self.switch_mode(new_mode);
                         self.cpsr = spsr;
-                        // ARMv5 interworks; ARMv4 ignores bit 0.
-                        if self.is_arm9 {
-                            self.branch_exchange(val);
-                        } else {
-                            self.branch(val & !1);
-                        }
+                        self.branch(val & !1);
                     } else {
                         self.regs[i as usize] = val;
                     }
                 } else if i == 15 {
+                    if should_writeback {
+                        self.regs[rn as usize] = final_addr;
+                        did_writeback = true;
+                    }
                     if self.is_arm9 {
                         self.branch_exchange(val);
                     } else {
@@ -586,11 +654,15 @@ impl Cpu {
             addr = addr.wrapping_add(4);
         }
 
-        if w && (!l || !rn_in_list || rn_is_lowest) {
+        if should_writeback && !did_writeback {
             self.regs[rn as usize] = final_addr;
         }
 
-        if l { reg_count + 2 } else { reg_count + 1 }
+        if l {
+            reg_count + 2
+        } else {
+            reg_count + 1
+        }
     }
 
     // ─── Branch / Branch with Link ───────────────────────────────
@@ -650,14 +722,16 @@ impl Cpu {
         let b = self.reg(rn) as i32;
 
         let (result, sat) = match kind {
-            0b00 => signed_sat_add(a, b),                       // QADD
-            0b01 => signed_sat_sub(a, b),                       // QSUB
-            0b10 => {                                           // QDADD
+            0b00 => signed_sat_add(a, b), // QADD
+            0b01 => signed_sat_sub(a, b), // QSUB
+            0b10 => {
+                // QDADD
                 let (db, sat1) = signed_sat_double(b);
                 let (sum, sat2) = signed_sat_add(a, db);
                 (sum, sat1 || sat2)
             }
-            0b11 => {                                           // QDSUB
+            0b11 => {
+                // QDSUB
                 let (db, sat1) = signed_sat_double(b);
                 let (diff, sat2) = signed_sat_sub(a, db);
                 (diff, sat1 || sat2)
@@ -684,7 +758,11 @@ impl Cpu {
         let y = (opcode >> 6) & 1 != 0; // selects high (1) or low (0) half of Rs
 
         let half = |word: u32, top: bool| -> i32 {
-            if top { (word as i32) >> 16 } else { (word as i16) as i32 }
+            if top {
+                (word as i32) >> 16
+            } else {
+                (word as i16) as i32
+            }
         };
 
         match op {
@@ -694,7 +772,9 @@ impl Cpu {
                 let acc = self.reg(rn) as i32;
                 let (sum, sat) = signed_sat_add(prod as i32, acc);
                 self.regs[rd as usize] = sum as u32;
-                if sat { self.cpsr.set_q(true); }
+                if sat {
+                    self.cpsr.set_q(true);
+                }
             }
             0b01 => {
                 // Either SMLAW<y> (bit 5 = 0) or SMULW<y> (bit 5 = 1).
@@ -705,7 +785,9 @@ impl Cpu {
                     let acc = self.reg(rn) as i32;
                     let (sum, sat) = signed_sat_add(prod as i32, acc);
                     self.regs[rd as usize] = sum as u32;
-                    if sat { self.cpsr.set_q(true); }
+                    if sat {
+                        self.cpsr.set_q(true);
+                    }
                 } else {
                     // SMULW<y>: Rd = (Rm * Rs.half) >> 16
                     self.regs[rd as usize] = prod as u32;
@@ -734,6 +816,13 @@ impl Cpu {
 
     fn arm_coprocessor(&mut self, opcode: u32) -> u32 {
         let cp_num = (opcode >> 8) & 0xF;
+        if !self.is_arm9 {
+            return if cp_num == 14 {
+                1
+            } else {
+                self.arm_undefined(opcode)
+            };
+        }
         if cp_num != 15 {
             return self.arm_undefined(opcode);
         }
@@ -763,6 +852,13 @@ impl Cpu {
         } else {
             // MCR: write Rd → CP15
             let val = self.reg(rd);
+            if crn == 7 && crm == 0 && op2 == 4 {
+                // CP15 wait-for-interrupt. libnds/calico uses this in the
+                // idle path; treating it as a NOP runs into adjacent ITCM
+                // exception stubs instead of parking until IF&IE wakes us.
+                self.halted = true;
+                return 2;
+            }
             self.cp15.write(crn, crm, op1, op2, val);
             // Refresh derived state on the CPU side (exception base).
             self.refresh_exception_base();
@@ -814,10 +910,18 @@ impl Cpu {
 
         let field_mask = (opcode >> 16) & 0xF;
         let mut mask = 0u32;
-        if field_mask & 1 != 0 { mask |= 0x0000_00FF; }
-        if field_mask & 2 != 0 { mask |= 0x0000_FF00; }
-        if field_mask & 4 != 0 { mask |= 0x00FF_0000; }
-        if field_mask & 8 != 0 { mask |= 0xFF00_0000; }
+        if field_mask & 1 != 0 {
+            mask |= 0x0000_00FF;
+        }
+        if field_mask & 2 != 0 {
+            mask |= 0x0000_FF00;
+        }
+        if field_mask & 4 != 0 {
+            mask |= 0x00FF_0000;
+        }
+        if field_mask & 8 != 0 {
+            mask |= 0xFF00_0000;
+        }
 
         if self.cpsr.mode() == CpuMode::User {
             mask &= 0xFF00_0000;
@@ -859,7 +963,11 @@ impl Cpu {
     // ─── Undefined ───────────────────────────────────────────────
 
     fn arm_undefined(&mut self, opcode: u32) -> u32 {
-        log::warn!("ARM undefined: 0x{:08X} at PC=0x{:08X}", opcode, self.regs[15].wrapping_sub(8));
+        log::warn!(
+            "ARM undefined: 0x{:08X} at PC=0x{:08X}",
+            opcode,
+            self.regs[15].wrapping_sub(8)
+        );
         self.undefined_instruction();
         3
     }
@@ -913,6 +1021,16 @@ mod tests {
     }
 
     #[test]
+    fn test_arm9_cp15_wait_for_interrupt_halts_cpu() {
+        let (mut cpu, mut bus) = arm9_with(0x100);
+        cpu.regs[0] = 0;
+
+        cpu.execute_arm(&mut bus, 0xEE07_0F90); // MCR p15,0,r0,c7,c0,4
+
+        assert!(cpu.halted);
+    }
+
+    #[test]
     fn test_arm9_unaligned_ldr_rotates_aligned_word() {
         let (mut cpu, mut bus) = arm9_with(0x100);
         bus.mem[0x40..0x44].copy_from_slice(&0xFF00_8F00u32.to_le_bytes());
@@ -937,6 +1055,19 @@ mod tests {
     }
 
     #[test]
+    fn test_arm7_ldm_base_in_list_never_writes_back() {
+        let (mut cpu, mut bus) = arm7_with(0x100);
+        bus.mem[0x40..0x44].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+        bus.mem[0x44..0x48].copy_from_slice(&0x5566_7788u32.to_le_bytes());
+        cpu.regs[3] = 0x3C;
+
+        cpu.execute_arm(&mut bus, 0xE9B3_0028); // LDMIB R3!, {R3,R5}
+
+        assert_eq!(cpu.regs[3], 0x1122_3344);
+        assert_eq!(cpu.regs[5], 0x5566_7788);
+    }
+
+    #[test]
     fn test_ldm_base_in_list_not_lowest_keeps_loaded_value() {
         let (mut cpu, mut bus) = arm9_with(0x100);
         bus.mem[0x40..0x44].copy_from_slice(&0x1122_3344u32.to_le_bytes());
@@ -947,6 +1078,42 @@ mod tests {
 
         assert_eq!(cpu.regs[2], 0x1122_3344);
         assert_eq!(cpu.regs[3], 0x5566_7788);
+    }
+
+    #[test]
+    fn test_ldm_pc_spsr_writeback_updates_original_mode_sp() {
+        let (mut cpu, mut bus) = arm9_with(0x100);
+        cpu.cpsr = super::super::Psr::new(super::super::CpuMode::Supervisor);
+        cpu.regs[13] = 0x80;
+        cpu.switch_mode(super::super::CpuMode::Irq);
+        cpu.regs[13] = 0x40;
+        let mut spsr = super::super::Psr::new(super::super::CpuMode::Supervisor);
+        spsr.set_thumb(true);
+        cpu.set_spsr(spsr);
+
+        for (idx, value) in [
+            0x1111_1111, // r0
+            0x2222_2222, // r1
+            0x3333_3333, // r2
+            0x4444_4444, // r3
+            0xCCCC_CCCC, // r12
+            0x0000_0088, // pc
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let value: u32 = value;
+            let off = 0x40 + idx * 4;
+            bus.mem[off..off + 4].copy_from_slice(&value.to_le_bytes());
+        }
+
+        cpu.execute_arm(&mut bus, 0xE8FD_900F); // LDMIA SP!, {R0-R3,R12,PC}^
+
+        assert_eq!(cpu.cpsr.mode(), super::super::CpuMode::Supervisor);
+        assert!(cpu.cpsr.thumb());
+        assert_eq!(cpu.regs[15], 0x88);
+        assert_eq!(cpu.regs[13], 0x80);
+        assert_eq!(cpu.banked.sp[super::super::CpuMode::Irq.bank_index()], 0x58);
     }
 
     #[test]
@@ -999,12 +1166,41 @@ mod tests {
     }
 
     #[test]
+    fn test_arm7_cp14_mrc_is_noop_but_cp15_undefined() {
+        let (mut cpu, mut bus) = arm7_with(0x100);
+        cpu.regs[2] = 0xAAAA_5555;
+        cpu.execute_arm(&mut bus, 0xEE10_2E10); // MRC p14,0,R2,c0,c0,0
+
+        assert_eq!(cpu.regs[2], 0xAAAA_5555);
+        assert_eq!(cpu.cpsr.mode(), super::CpuMode::System);
+
+        cpu.execute_arm(&mut bus, 0xEE10_2F10); // MRC p15,0,R2,c0,c0,0
+        assert_eq!(cpu.cpsr.mode(), super::CpuMode::Undefined);
+    }
+
+    #[test]
+    fn test_arm7_dsp_multiply_is_noop() {
+        let (mut cpu, mut bus) = arm7_with(0x100);
+        cpu.regs[2] = 0x0000_7000;
+        cpu.regs[3] = 0x0000_7000;
+        cpu.regs[4] = 0x5000_0000;
+        cpu.regs[5] = 0xAAAA_5555;
+        cpu.cpsr.set_q(false);
+
+        cpu.execute_arm(&mut bus, 0xE105_4382); // SMLABB R5,R2,R3,R4
+
+        assert_eq!(cpu.regs[5], 0xAAAA_5555);
+        assert!(!cpu.cpsr.q());
+        assert_eq!(cpu.cpsr.mode(), super::CpuMode::System);
+    }
+
+    #[test]
     fn test_qadd_saturates_positive() {
         let (mut cpu, mut bus) = arm9_with(0x100);
         cpu.regs[0] = i32::MAX as u32; // Rm
-        cpu.regs[1] = 1;               // Rn
-        // QADD R2, R0, R1 → cond=AL, op=0x10, opcode 7:4 = 0x5
-        // Encoding: cond[31:28]=E, [27:20]=0x10, [19:16]=Rn=1, [15:12]=Rd=2, [11:8]=0, [7:4]=5, [3:0]=Rm=0
+        cpu.regs[1] = 1; // Rn
+                         // QADD R2, R0, R1 → cond=AL, op=0x10, opcode 7:4 = 0x5
+                         // Encoding: cond[31:28]=E, [27:20]=0x10, [19:16]=Rn=1, [15:12]=Rd=2, [11:8]=0, [7:4]=5, [3:0]=Rm=0
         let op = 0xE101_2050;
         cpu.execute_arm(&mut bus, op);
         assert_eq!(cpu.regs[2], i32::MAX as u32);
@@ -1015,7 +1211,7 @@ mod tests {
     fn test_qsub_no_saturation() {
         let (mut cpu, mut bus) = arm9_with(0x100);
         cpu.regs[0] = 10; // Rm
-        cpu.regs[1] = 3;  // Rn
+        cpu.regs[1] = 3; // Rn
         cpu.cpsr.set_q(false);
         // QSUB R2, Rm=R0, Rn=R1 → Rd = SAT(Rm - Rn) = 7
         // bits[27:20]=0x12, bits[19:16]=Rn=1, bits[15:12]=Rd=2, bits[7:4]=5, bits[3:0]=Rm=0
@@ -1029,7 +1225,7 @@ mod tests {
     fn test_qsub_saturates_negative() {
         let (mut cpu, mut bus) = arm9_with(0x100);
         cpu.regs[0] = i32::MIN as u32; // Rm
-        cpu.regs[1] = 1;                // Rn
+        cpu.regs[1] = 1; // Rn
         cpu.cpsr.set_q(false);
         let op = 0xE121_2050;
         cpu.execute_arm(&mut bus, op);
@@ -1042,9 +1238,9 @@ mod tests {
         let (mut cpu, mut bus) = arm9_with(0x100);
         cpu.regs[0] = 0x0000_0003; // Rm low half = 3
         cpu.regs[1] = 0x0000_0005; // Rs low half = 5
-        // SMULBB R2, R0, R1 (op=11, x=0 (B), y=0 (B))
-        // bits[27:20] = 0x16, bits[7:4] = 0b1000 = 8
-        // [31:28]=E, [27:20]=0x16, [19:16]=Rd=2, [15:12]=0, [11:8]=Rs=1, [7:4]=8, [3:0]=Rm=0
+                                   // SMULBB R2, R0, R1 (op=11, x=0 (B), y=0 (B))
+                                   // bits[27:20] = 0x16, bits[7:4] = 0b1000 = 8
+                                   // [31:28]=E, [27:20]=0x16, [19:16]=Rd=2, [15:12]=0, [11:8]=Rs=1, [7:4]=8, [3:0]=Rm=0
         let op = 0xE162_0180;
         cpu.execute_arm(&mut bus, op);
         assert_eq!(cpu.regs[2], 15);
@@ -1054,8 +1250,8 @@ mod tests {
     fn test_blx_register_arm9() {
         let (mut cpu, mut bus) = arm9_with(0x100);
         cpu.regs[15] = 0x0800_0008; // PC = exec+8
-        cpu.regs[0] = 0x40 | 1;     // target with thumb bit
-        // BLX R0: cond=AL, [27:20]=0x12, [19:16]=F, [15:12]=F, [11:8]=F, [7:4]=3, [3:0]=Rm=0
+        cpu.regs[0] = 0x40 | 1; // target with thumb bit
+                                // BLX R0: cond=AL, [27:20]=0x12, [19:16]=F, [15:12]=F, [11:8]=F, [7:4]=3, [3:0]=Rm=0
         let op = 0xE12F_FF30;
         cpu.execute_arm(&mut bus, op);
         assert_eq!(cpu.regs[14], 0x0800_0004); // LR = PC - 4 (next instr)

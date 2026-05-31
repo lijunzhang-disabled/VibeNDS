@@ -52,7 +52,7 @@ pub struct Rasterizer {
     pub clear_depth: u16,
     /// `DISP3DCNT` register. Bit assignments per GBATEK:
     /// ```text
-    /// [0]  3D enable
+    /// [0]  Texture mapping enable
     /// [1]  Highlight mode (vs Toon)
     /// [2]  Alpha-test enable
     /// [3]  Alpha-blend enable
@@ -99,10 +99,6 @@ impl Rasterizer {
         }
     }
 
-    /// 3D-enable bit. When 0, the rasterizer should produce a blank
-    /// (clear-color) framebuffer regardless of polygons.
-    pub fn enabled(&self) -> bool { self.disp3dcnt & 0x1 != 0 }
-
     /// Clear framebuffer + depth + id buffers from the clear registers.
     pub fn clear(&mut self) {
         // BGR555 from CLEAR_COLOR low 15 bits; bit 15 = alpha (0 means
@@ -128,7 +124,6 @@ impl Rasterizer {
     ///   color paths; `Some(...)` for the real pipeline so textures work.
     pub fn render_frame(&mut self, polygons: &[ScreenPolygon], vram: Option<&VramRouter>) {
         self.clear();
-        if !self.enabled() { return; }
 
         let (opaque, translucent): (Vec<_>, Vec<_>) =
             polygons.iter().partition(|p| !is_translucent(p));

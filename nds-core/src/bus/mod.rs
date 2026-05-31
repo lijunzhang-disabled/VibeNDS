@@ -4,6 +4,7 @@
 pub mod shared;
 pub mod arm9;
 pub mod arm7;
+pub mod math;
 pub mod io_arm9;
 pub mod io_arm7;
 

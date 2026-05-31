@@ -165,7 +165,263 @@ Each new title typically surfaces 1–3 new bugs. Track each as a dated debug lo
 - Work **top to bottom**. Don't start commercial titles until rockwrestler and a devkitPro 3D demo work — failures past that point are otherwise impossible to attribute.
 - Each test failure → a dated `debug/YYYY-MM-DD_<slug>.md` log following the template in `debug/README.md` (symptom → investigation → root cause → fix → regression test → verification).
 - When a Phase 9 carry-over item turns out to be the root cause, delete it from `debug/phase9_carryover.md`.
-- After every fix, re-run the prior stages to make sure nothing regressed. The unit-test suite (currently 261) catches most regressions; the test-ROM suite catches the ones that need a real ROM context to surface.
+- After every fix, re-run the prior stages to make sure nothing regressed. The unit-test suite (currently 323) catches most regressions; the test-ROM suite catches the ones that need a real ROM context to surface.
+
+## Current campaign notes (2026-05-31)
+
+User-requested sweep order:
+
+1. `armwrestler-fixed` — **done**. All pages pass via direct boot. See
+   `debug/2026-05-31_armwrestler-fixed-direct-boot.md`.
+2. `arm7wrestler` — **all seven menu pages pass** on the locally patched
+   build at `/private/tmp/arm7wrestler/source.nds`. The upstream source needs
+   temporary build compatibility patches with modern devkitPro:
+   `arm7/Makefile` must allow ARMv5TE opcodes so the ARM7 undefined/no-op
+   tests can assemble; obsolete ARM7 library links must be removed; minimal
+   modern crt0 symbols must be supplied; ARM9 helper was patched to copy the
+   ARM7 draw buffer from `0x02300000` and poll VBlank instead of relying on
+   `SWI 0x05`.
+   - Page sweep evidence: `ARM ALU`, `ARM LDR/STR`, `ARM LDM/STM`,
+     `THUMB ALU`, `THUMB LDR/STR`, `THUMB LDM/STM`, and `ARM V5TE` each
+     rendered visible `OK` rows with nonzero bottom framebuffer.
+   - Failures fixed during the sweep:
+     - ARM7 `LDM rN!, {...rN...}` now suppresses writeback whenever the base
+       register is in the load list. ARM9 keeps its previous lowest-register
+       writeback behavior.
+     - Direct-boot ARM7 now initializes an Undefined-mode stack.
+     - The synthetic no-BIOS ARM7 undefined vector now jumps through the
+       handler slot at `0x0380FFDC`, matching the handler installed by
+       `arm7wrestler`.
+     - When that handler slot is absent, the synthetic no-BIOS ARM7
+       undefined vector returns immediately. This preserves modern libnds
+       direct-boot startup, which does not install the old arm7wrestler
+       undefined-handler slot.
+     - ARM7 CP14 `MRC` acts as a harmless no-op while CP15 still raises
+       undefined, matching the test's ARM7 expectation.
+     - ARM7 DSP multiply encodings (`SMLA*` family as tested) act as no-ops
+       instead of raising undefined.
+3. devkitPro `hello_world`, `input/Touch_Pad`, `time/*`, `pxi` — **basic
+   startup smoke now passes for the built set**. Initial failure mode was a
+   white frame with no VRAM writes and ARM9 stuck in the bootstub IPC/FIFO
+   startup path. Current fixes/progress:
+   - ARM9/ARM7 `SWI 0x0F` HLE now reports the normal DS boot path.
+   - ARM7 `SWI 0x0E` HLE reports no debugger.
+   - No-BIOS ARM7 direct boot now supplies a synthetic IRQ vector that jumps
+     through the calico/libnds handler slot at `0x0380FFFC`.
+   - ARM9 CP15 wait-for-interrupt (`MCR p15,0,Rd,c7,c0,4`) now parks the CPU
+     instead of running into adjacent ITCM exception stubs.
+   - ARM7 `HALTCNT` writes at `0x04000301` now request CPU halt through the
+     top-level run loop.
+   - IPC FIFO send-empty IRQ is now raised when the send FIFO drains to empty
+     and when the IRQ is enabled while the send FIFO is already empty.
+   - ARM7 `0x0381xxxx`/`0x0382xxxx`/`0x0383xxxx` accesses no longer alias the
+     canonical private WRAM window at `0x03800000..0x0380FFFF`; in WRAMCNT
+     mode 3 those mirrors route to shared WRAM. This prevents modern libnds
+     startup code from clearing ARM7 runtime code copied to private WRAM.
+   - In direct-boot mode, unhandled ARM9/ARM7 SWIs now return instead of
+     jumping into absent BIOS vectors. This avoids the ARM7 looping through
+     synthetic IRQ-vector code after hitting libnds BIOS-call veneers.
+   - ARM9 no-BIOS ITCM reads now recognize the compact calico vector layout
+     used by modern libnds and redirect IRQ vector fetches to calico's IRQ
+     handler instead of the reset/prefetch-abort stubs.
+   - ARM `LDM...^` exception returns now perform writeback before restoring
+     CPSR on a load-to-PC, so `ldmia sp!, {...,pc}^` updates IRQ-mode `SP`
+     instead of corrupting the restored mode's `SP`.
+   - ARM7 synthetic IRQ vector now preserves interrupted `R0-R3`, `R12`, and
+     `LR` even when the libnds handler slot is still null. This fixed the
+     firmware-read loop corruption where `R0=0x1ff` was replaced by the IRQ
+     handler-slot address.
+   - Direct-boot BIOS HLE now covers the libnds startup calls seen so far:
+     `SWI 0x02`/`0x06` halt-style waits, `SWI 0x03` delay/WaitByLoop,
+     `SWI 0x07` ARM7 sleep, `SWI 0x09` divide, and `SWI 0x0D` sqrt.
+     `SWI 0x03` is a delay loop used by ARM7 SPI/PXI startup code; treating
+     it as Halt parked ARM7 before it could wake ARM9.
+   - ARM9 CP15 c13,c0,1 now round-trips. Calico's IRQ trampoline uses it as
+     a scratch IRQ-mask register before waking scheduler waiters.
+   - ARM exception returns (`MOVS PC,LR` and `LDM...PC^`) now preserve the
+     restored SPSR Thumb bit instead of re-interworking from the even return
+     address. This fixed a `pxi` crash where Thumb console code was resumed
+     as ARM.
+   - Direct boot now clears the ARM9 high-vector bit and, in synthetic-BIOS
+     mode, high-vector fetches use an installed low-ITCM vector table before
+     falling back to the no-BIOS IRQ wrapper. This helps old homebrew that
+     toggles CP15 high vectors without a real BIOS image available.
+   Smoke results from the temporary probe:
+   - `hello_world` reaches `main()`, `consoleDemoInit`, and display setup.
+   - `pxi` reaches `main()`/`consoleDemoInit` and no longer falls into the
+     calico exception loop.
+   - `time/RealTimeClock`, `time/timercallback`, and `time/stopwatch` reach
+     main/display with no exception stack.
+   - `input/Touch_Pad/touch_look` and `input/Touch_Pad/touch_test` reach
+     display setup, produce nonzero pixels, and do not hit the suspected
+     low-vector/ITCM exception paths.
+   Fresh regression smoke after the arm7wrestler fixes:
+   - `hello_world` at 600 frames: top nonzero `1933`, bottom nonzero `49152`,
+     `DISPCNT_B=0x00010100`, ARM9/ARM7 both halted in the expected calico
+     wait path.
+   - `pxi` at 600 frames: top nonzero `1121`, bottom nonzero `49152`,
+     `DISPCNT_B=0x00010100`, ARM9/ARM7 both halted in the expected calico
+     wait path.
+4. Representative devkitPro Graphics examples — **startup/display smoke now
+   passes for the built set, with initial bitmap/3D rendering evidence**:
+   `Backgrounds/16bit_color_bmp`, `Backgrounds/256_color_bmp`,
+   `Backgrounds/rotation`, `Sprites/simple`, `3D/Simple_Tri`,
+   `3D/Simple_Quad`.
+   - Fixed during this pass:
+     - ARM9 hardware divide/square-root registers at `0x04000280..0x040002BF`
+       are now implemented. This lets libnds fixed-point helpers build a
+       real `gluPerspective` matrix instead of sending zero scale terms to
+       the 3D engine.
+     - GPU3D matrices now use the NDS row-vector/row-major command
+       convention, with clip composition as position then projection.
+     - `DISP3DCNT` bit 0 is no longer treated as a global 3D-enable bit; it
+       is a texture-mapping feature bit. `Simple_Tri` sets anti-aliasing
+       (`0x0010`) and should still rasterize.
+     - Mode 3-5 extended affine bitmap BG rendering now covers BG2/BG3
+       256-color and direct-color bitmap forms, including mode 5 BG3 cases
+       used by the devkitPro bitmap samples.
+   - Fresh 600-frame probes:
+     - `3D/Simple_Tri`: `fb3d_nonzero=9350`, displayed framebuffer
+       nonzero `9350`, `DISPCNT_A=0x00010108`, `DISP3DCNT=0x0010`.
+     - `3D/Simple_Quad`: `fb3d_nonzero=18768`, displayed framebuffer
+       nonzero `18768`, `DISPCNT_A=0x00010108`, `DISP3DCNT=0x0010`.
+     - `Backgrounds/16bit_color_bmp`: displayed framebuffer nonzero
+       `45364`, unique colors `3285`, `BG3CNT_A=0x4084`.
+     - `Backgrounds/256_color_bmp`: displayed framebuffer nonzero `48419`,
+       unique colors `256`, `BG3CNT_A=0x4080`.
+     - `Backgrounds/rotation`: displayed framebuffer nonzero `47601`,
+       unique colors `234`, `BG3CNT_A=0x4080`.
+   The smoke checks still do not prove pixel-perfect rendering, texture
+   correctness, every BG size, or post-effect accuracy.
+5. devkitPro audio and filesystem/card groups — **representative behavior
+   now passes where the emulator has a backing device**:
+   - `audio/maxmod/basic_sound` responds to injected `KEY_A`/`KEY_B`, starts
+     multiple sound channels, and produces nonzero mixed PCM output through
+     frame 239. `KEY_A` probe: `master=8064`, `active=5`,
+     `max_active=7`, `audio_written=263102`, `audio_nonzero=197788`.
+     `KEY_B` probe: `active=4`, `max_active=6`, `audio_nonzero=187388`.
+   - `audio/maxmod/audio_modes` also produces sustained output:
+     `master=8064`, `active=8`, `max_active=8`,
+     `audio_written=263102`, `audio_nonzero=238366`.
+   - `filesystem/nitrofs/nitrodir` now mounts NitroFS through direct Slot-1
+     card reads and lists the embedded directory tree/files. A 600-frame
+     console probe shows `nitro://file1.txt`, `nitro://dir1`,
+     `nitro://dir1/test.txt`, `nitro://dir2/subdir1/file2.txt`, etc.,
+     instead of the previous `nitroFSInit failure: terminating`.
+   - The NitroFS fix required two emulator-side pieces:
+     - Direct boot now clears the modern Calico argv header overlay at
+       `0x02FFFE70` and points `argv` at a null slot before ARM9 can race
+       ARM7 startup. Otherwise ARM9 can read stale NDS header bytes as a
+       non-null `argv[0]` and skip direct card access.
+     - `EXMEMCNT` at `0x04000204` now defaults Slot-1 ownership to ARM7
+       and is writable by ARM9. Calico's `ntrcardOpen()` uses bit 11 to
+       decide whether it must initialize Slot-1 main-mode card reads.
+   - Minimal Slot-1 ROM command support now covers command registers,
+     `ROMCTRL`, `CARD_DATA_RD`, header reads, chip-ID reads, and `0xB7`
+     main-data reads from the loaded ROM image. Unit coverage exercises
+     command byte order, data read offsets, status clearing, and EXMEMCNT
+     ownership.
+   - `card/eeprom` now opens Slot-1, reads the cart header, detects the
+     configured EEPROM through old-libnds AUXSPI probes, and reads backup
+     bytes. A 600-frame probe reports `Reading cart info...`,
+     `Game ID: HOMEBREW`, `Type: 2`, and `Size: 8192`. With an injected
+     `KEY_A` press it advances to `First 160 bytes of EEPROM` and dumps
+     erased `ff` bytes from the emulated backup storage.
+   - The EEPROM behavior fix required AUXSPI transaction reset on chip
+     deselect via `AUXSPICNT` writes. Old libnds ends commands by writing
+     `AUXSPICNT = 0x40`; without treating that as deselect, the next command
+     was interpreted as a dummy byte for the previous command. EEPROM
+     `RDID` now returns `0xFFFFFF` while flash chips keep the placeholder
+     JEDEC ID path, matching libnds' type probe expectations.
+   - `filesystem/libfat/libfatdir` still reports
+     `fatInitDefault failure: terminating`. This is expected with the
+     current emulator setup because there is no DLDI-patched FAT block device
+     or mounted FAT image backing libfat yet. Modern libfat/libdvm reaches
+     the ARM9 block-device path, then talks to ARM7 over the Calico PXI
+     block-device channel; ARM7 only advertises a usable DLDI disk interface
+     when `_blkShelterDldi` has installed a real patched driver. The test ROM
+     currently contains only the DLDI stub, so this needs a real DLDI/FAT
+     backing implementation rather than another Slot-1 command tweak.
+   - Current core regression count after these fixes: `cargo test -p
+     nds-core` reports `323 passed; 0 failed`.
+6. Homebrew games/demos — **first broad candidates tested**:
+   - Shared startup fix: direct-boot/no-BIOS ARM9 IRQ delivery now
+     acknowledges enabled pending IRQs when the libnds handler slot at
+     `0x02FF3FFC` is still null. Several older homebrew ROMs enable VBlank
+     before installing a handler; without this synthetic-BIOS behavior they
+     repeatedly re-entered the high-vector IRQ wrapper during startup.
+     The same path now also sets the old-libnds DTCM IRQ shadow word before
+     acknowledging the hardware IF bit. This lets old ARM-side
+     `swiWaitForVBlank` loops observe VBlank even when no BIOS/libnds IRQ
+     trampoline has been installed yet.
+   - Engine B BG/OBJ extended palettes are now rendered. Flappy uses
+     `VRAM_H` as Engine B BG extended palette and `VRAM_I` as Engine B OBJ
+     extended palette, with normal BG/OBJ palette memory left zero; without
+     these paths the game was black or had black sprite silhouettes.
+   - hbmenu `argvTest` now renders the expected `No arguments!` text and both
+     CPUs halt cleanly by 600 frames: top nonzero `263`, bottom nonzero
+     `49152`, `DISPCNT_B=0x00010100`, `pc9=0x02001fee`,
+     `pc7=0x03802300`.
+   - `cellsDS` now reaches visible startup text instead of the previous
+     flat-frame/reset-like state. The current capture shows title text plus
+     `Unable to open the directory. Please make sure that /cellsds/snapshots
+     exists` and `loading default engines...`; top nonzero `1506`, bottom
+     nonzero `3000`, `DISPCNT_A/B=0xc0211953`. This is a useful startup pass,
+     but not an end-to-end app pass because it needs expected files/directories
+     on a filesystem path the emulator does not yet provide.
+   - `neo-engine/neo` now reaches a proper title/splash screen instead of the
+     previous barcode-like/text-fragment output. A 600-frame capture shows the
+     Pokemon Neo splash with version/date text; top nonzero `48371`, bottom
+     nonzero `48194`, `DISPCNT_A/B=0x00011d15`, both CPUs halted in runtime
+     wait paths.
+   - `Fewnity/Flappy-Bird-Nintendo-DS` now reaches a visible title/get-ready
+     screen with colored BG and sprites. A 600-frame capture reports top
+     nonzero `49152`, top unique colors `81`, `DISPCNT_A=0x40010000`,
+     `DISPCNT_B=0xc0111c10`, BG2/BG3 active on Engine B, and both CPUs
+     halted in VBlank wait paths.
+   - `Spelunky DS` now reaches its title/menu screen. A 600-frame capture
+     shows the cave/title art plus menu text; top nonzero `49152`, bottom
+     nonzero `49152`, `DISPCNT_A=0x00111910`,
+     `DISPCNT_B=0x00111810`, and both CPUs halted in VBlank wait paths.
+   - `cellsDS.sc.nds` is not a direct-boot candidate in its current form:
+     the header load values point outside the ROM image and the emulator
+     rejects it with `OutOfRangeRom`.
+
+Tooling used:
+
+- `devkitpro/devkitarm:20260221` Docker image for builds.
+- `/private/tmp/arm7wrestler` and `/private/tmp/nds-examples` as source
+  checkouts.
+- `/private/tmp/nds-homebrew-flappy` and `/private/tmp/nds-homebrew-neo` as
+  first homebrew-game checkouts.
+- Built ROMs copied or run from ignored/temp paths; `test-roms/` remains
+  ignored.
+
+EmuDev resource check:
+
+- `https://github.com/emudev-org/discord-resources` mirrors the EmuDev
+  Discord system resources. Its Nintendo DS section confirms the current
+  queue: GBATEK, Shonumi's NDS docs, `mic-/armwrestler`,
+  `Arisotura/arm7wrestler`, devkitPro `nds-examples`, and melonDS research.
+- The same section links targeted hardware references for RTC, touchscreen,
+  and firmware flash. Use those when the `time/*`, `input/Touch_Pad`, and
+  firmware/SPI paths move from "boots" to behavioral validation.
+- Its ARM section links the ARM7TDMI, ARM9E-S, ARM946E-S, and ARMv5TE
+  manuals. These are the right references when CPU fixes disagree with
+  armwrestler/arm7wrestler results.
+- The listed Discord CDN built-ROM links for armwrestler/arm7wrestler are not
+  reliable long-term. Prefer source builds or locally archived ROMs under
+  ignored `test-roms/`.
+- It also lists `https://tcrf.net/Aging_Card_NTR` as a possible diagnostic
+  target. Treat this as a later reference/hardware-test path only; it may
+  require legally sourced Nintendo diagnostic media rather than open homebrew.
+- `https://github.com/asiekierka/awesome-dsdev` is a useful index for
+  additional open homebrew, demos, tools, and libraries. It is less of a
+  conformance-test suite, but good for broadening the post-devkitPro
+  compatibility set with legal ROMs we can build from source.
+- `https://github.com/devkitPro/nds-examples` remains the best structured
+  homebrew regression source because its directories cover graphics, audio,
+  card/filesystem, input, PXI, and time in small focused programs.
 
 ## What "Phase 9 done" looks like
 

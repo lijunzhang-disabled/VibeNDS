@@ -7,6 +7,7 @@
 use super::SharedState;
 use crate::gpu2d::Engine2d;
 use crate::gpu3d::{GxCmd};
+use crate::interrupt::Irq;
 use crate::ipc::{self, Side};
 
 /// Returns Some((engine, local_offset)) if `offset` falls within an engine's
@@ -150,6 +151,9 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
     if let Some((sel, off)) = classify_engine(local) {
         return read_engine_reg16(engine(shared, sel), off);
     }
+    if let Some(v) = shared.math.read16(local) {
+        return v;
+    }
 
     // Timer block: 0x100..0x110 (4 timers × 4 bytes).
     if (0x0100..0x0110).contains(&local) {
@@ -166,8 +170,13 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x0006 => shared.vcount,
         0x0130 => shared.keyinput,
         0x0132 => shared.keycnt9,
+        0x01A0 => shared.auxspi.read_cnt(),
+        0x01A2 => shared.auxspi.read_data() as u16,
+        0x01A4 => shared.slot1_romctrl as u16,
+        0x01A6 => (slot1_romctrl_status(shared) >> 16) as u16,
         0x0180 => shared.ipc.read_sync(Side::Arm9),
         0x0184 => shared.ipc.read_fifocnt(Side::Arm9),
+        0x0204 => shared.exmemcnt,
         0x0208 => shared.irq9.read_ime() as u16,
         0x0210 => shared.irq9.read_ie() as u16,
         0x0212 => (shared.irq9.read_ie() >> 16) as u16,
@@ -199,6 +208,9 @@ pub fn read_io32(shared: &SharedState, addr: u32) -> u32 {
         let eng = engine(shared, sel);
         if off == 0x00 { return eng.dispcnt; }
     }
+    if let Some(v) = shared.math.read32(local) {
+        return v;
+    }
     if let Some((ch, kind)) = decode_dma_reg(local) {
         return match kind {
             // Real hardware: SAD/DAD readback is undefined / zero. We
@@ -210,6 +222,7 @@ pub fn read_io32(shared: &SharedState, addr: u32) -> u32 {
         };
     }
     match local {
+        0x01A4 => slot1_romctrl_status(shared),
         0x0210 => shared.irq9.read_ie(),
         0x0214 => shared.irq9.read_if(),
         0x0208 => shared.irq9.read_ime(),
@@ -227,6 +240,7 @@ pub fn read_io32_mut(shared: &mut SharedState, addr: u32) -> u32 {
     let local = addr & 0x00FF_FFFC;
     match local {
         0x0010_0000 => read_fiforecv(shared),
+        0x0010_0010 => read_slot1_data(shared),
         _ => read_io32(shared, addr),
     }
 }
@@ -255,6 +269,86 @@ fn read_fiforecv(shared: &mut SharedState) -> u32 {
         ipc::raise_send_empty(&mut shared.irq7);
     }
     val
+}
+
+fn slot1_romctrl_status(shared: &SharedState) -> u32 {
+    let mut v = shared.slot1_romctrl & !((1 << 31) | (1 << 23));
+    if !shared.slot1_data.is_empty() {
+        v |= (1 << 31) | (1 << 23);
+    }
+    v
+}
+
+fn read_slot1_data(shared: &mut SharedState) -> u32 {
+    let v = shared.slot1_data.pop_front().unwrap_or(0xFFFF_FFFF);
+    if shared.slot1_data.is_empty() {
+        shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
+    }
+    v
+}
+
+fn start_slot1_transfer(shared: &mut SharedState, val: u32) {
+    shared.slot1_romctrl = val;
+    shared.slot1_data.clear();
+
+    if val & (1 << 31) == 0 {
+        return;
+    }
+
+    let cmd = shared.slot1_command[0];
+    let param = ((shared.slot1_command[1] as u32) << 24)
+        | ((shared.slot1_command[2] as u32) << 16)
+        | ((shared.slot1_command[3] as u32) << 8)
+        | shared.slot1_command[4] as u32;
+    let bytes = slot1_transfer_len(val);
+
+    match cmd {
+        0x00 => queue_rom_bytes(shared, 0, bytes),      // header read
+        0x9F => queue_repeat(shared, 0xFFFF_FFFF, bytes), // dummy/reset stream
+        0x90 | 0xB8 => queue_repeat(shared, 0x0000_7FC2, bytes.max(4)),
+        0xA0 => {}
+        0xB7 => queue_rom_bytes(shared, param, bytes), // normal data read
+        _ => queue_repeat(shared, 0xFFFF_FFFF, bytes),
+    }
+
+    if !shared.slot1_data.is_empty() {
+        shared.slot1_romctrl |= (1 << 31) | (1 << 23);
+    } else {
+        shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
+    }
+}
+
+fn slot1_transfer_len(romctrl: u32) -> usize {
+    match (romctrl >> 24) & 0x7 {
+        0 => 0,
+        1 => 0x200,
+        2 => 0x400,
+        3 => 0x800,
+        4 => 0x1000,
+        5 => 0x2000,
+        6 => 0x4000,
+        _ => 4,
+    }
+}
+
+fn queue_rom_bytes(shared: &mut SharedState, addr: u32, bytes: usize) {
+    let words = (bytes + 3) / 4;
+    for word_idx in 0..words {
+        let base = addr as usize + word_idx * 4;
+        let mut b = [0xFFu8; 4];
+        for (i, slot) in b.iter_mut().enumerate() {
+            if let Some(&rom_byte) = shared.slot1_rom.get(base + i) {
+                *slot = rom_byte;
+            }
+        }
+        shared.slot1_data.push_back(u32::from_le_bytes(b));
+    }
+}
+
+fn queue_repeat(shared: &mut SharedState, word: u32, bytes: usize) {
+    for _ in 0..((bytes + 3) / 4) {
+        shared.slot1_data.push_back(word);
+    }
 }
 
 /// IPCSYNC write helper.
@@ -288,6 +382,9 @@ pub fn write_io8(shared: &mut SharedState, addr: u32, val: u8) {
         0x0247 => shared.wramcnt = val,
         0x0248 => shared.vram.write_cnt(BankId::H, val),
         0x0249 => shared.vram.write_cnt(BankId::I, val),
+        0x01A8..=0x01AF => {
+            shared.slot1_command[(addr as usize) & 7] = val;
+        }
         _ => {
             // 8-bit write of an unrecognized register: read-modify-write the
             // 16-bit register so we don't drop the half we don't address.
@@ -307,6 +404,9 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
     let local = addr & 0x00FF_FFFE;
     if let Some((sel, off)) = classify_engine(local) {
         write_engine_reg16(engine_mut(shared, sel), off, val);
+        return;
+    }
+    if shared.math.write16(local, val) {
         return;
     }
     if (0x0100..0x0110).contains(&local) {
@@ -335,8 +435,22 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0214 => shared.irq9.write_if(val as u32),
         0x0216 => shared.irq9.write_if((val as u32) << 16),
         0x0132 => shared.keycnt9 = val,
+        0x01A0 => shared.auxspi.write_cnt(val),
+        0x01A2 => {
+            if shared.auxspi.write_data(val as u8) {
+                shared.irq9.request(Irq::Slot1Data);
+            }
+        }
+        0x01A4 => {
+            shared.slot1_romctrl = (shared.slot1_romctrl & 0xFFFF_0000) | val as u32;
+        }
+        0x01A6 => {
+            let new = (shared.slot1_romctrl & 0x0000_FFFF) | ((val as u32) << 16);
+            start_slot1_transfer(shared, new);
+        }
         0x0180 => write_sync(shared, val),
         0x0184 => write_fifocnt(shared, val),
+        0x0204 => shared.exmemcnt = val,
         0x0246 => shared.wramcnt = val as u8,
         0x0060 => shared.gpu3d.rasterizer.disp3dcnt = val,
         0x0304 => shared.powcnt1 = val,
@@ -399,6 +513,9 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
     if let Some((ch, kind)) = decode_dma_reg(local) {
         return write_dma_reg(shared, ch, kind, val);
     }
+    if shared.math.write32(local, val) {
+        return Write32Effect::None;
+    }
 
     // GXFIFO (packed format) at 0x04000400 + the direct-port range
     // 0x04000440..0x040005FF.
@@ -425,6 +542,13 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
 
     match local {
         0x0188 => { write_fifosend(shared, val); Write32Effect::None }
+        0x01A4 => { start_slot1_transfer(shared, val); Write32Effect::None }
+        0x01A8 | 0x01AC => {
+            for i in 0..4 {
+                shared.slot1_command[(local - 0x01A8) as usize + i] = (val >> (i * 8)) as u8;
+            }
+            Write32Effect::None
+        }
         0x0208 => { shared.irq9.write_ime(val); Write32Effect::None }
         0x0210 => { shared.irq9.write_ie(val); Write32Effect::None }
         0x0214 => { shared.irq9.write_if(val); Write32Effect::None }

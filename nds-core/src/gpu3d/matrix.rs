@@ -1,22 +1,22 @@
 //! 4×4 matrix in 1.19.12 fixed-point.
 //!
-//! Storage is **column-major** to match the NDS GPU convention:
+//! Storage is **row-major** to match the NDS GPU command parameter order:
 //!
 //! ```text
-//! storage index:    0   1   2   3      ← column 0
-//!                   4   5   6   7      ← column 1
-//!                   8   9  10  11      ← column 2
-//!                  12  13  14  15      ← column 3
+//! storage index:    0   1   2   3      ← row 0
+//!                   4   5   6   7      ← row 1
+//!                   8   9  10  11      ← row 2
+//!                  12  13  14  15      ← row 3
 //!
 //! mathematical layout:  M[row, col]
-//!     [ M[0]  M[4]  M[8]  M[12] ]   row 0
-//!     [ M[1]  M[5]  M[9]  M[13] ]   row 1
-//!     [ M[2]  M[6]  M[10] M[14] ]   row 2
-//!     [ M[3]  M[7]  M[11] M[15] ]   row 3
+//!     [ M[0]  M[1]  M[2]  M[3]  ]   row 0
+//!     [ M[4]  M[5]  M[6]  M[7]  ]   row 1
+//!     [ M[8]  M[9]  M[10] M[11] ]   row 2
+//!     [ M[12] M[13] M[14] M[15] ]   row 3
 //! ```
 //!
 //! The NDS GX command set sends matrix data as 16 consecutive 32-bit
-//! parameter words in this same column-major order, so `Matrix::load_4x4`
+//! parameter words in this same row-major order, so `Matrix::load_4x4`
 //! just copies the slice.
 //!
 //! All entries are 1.19.12 signed fixed-point (`i32`). Multiplication
@@ -35,7 +35,7 @@ pub fn fmul(a: i32, b: i32) -> i32 {
     ((a as i64 * b as i64) >> 12) as i32
 }
 
-/// 4×4 column-major matrix of 1.19.12 fixed-point values.
+/// 4×4 row-major matrix of 1.19.12 fixed-point values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Matrix {
     pub m: [i32; 16],
@@ -56,15 +56,15 @@ impl Matrix {
     /// Get the element at `[row, col]`.
     #[inline]
     pub fn at(&self, row: usize, col: usize) -> i32 {
-        self.m[col * 4 + row]
+        self.m[row * 4 + col]
     }
 
     #[inline]
     fn at_mut(&mut self, row: usize, col: usize) -> &mut i32 {
-        &mut self.m[col * 4 + row]
+        &mut self.m[row * 4 + col]
     }
 
-    /// Load all 16 entries from a column-major slice (NDS `MTX_LOAD_4x4`).
+    /// Load all 16 entries from a row-major slice (NDS `MTX_LOAD_4x4`).
     pub fn load_4x4(words: &[i32; 16]) -> Self {
         Matrix { m: *words }
     }
@@ -73,15 +73,14 @@ impl Matrix {
     /// This is the NDS `MTX_LOAD_4x3` and `MTX_MULT_4x3` parameter shape.
     pub fn load_4x3(words: &[i32; 12]) -> Self {
         let mut m = [0i32; 16];
-        // Source is column-major 4×3: column k provides 3 values for rows 0..3
-        // (entry m[k*4+3] of a 4×4 — the "w" component — is left as 0 for
-        // columns 0..2 and 1 for column 3).
-        for col in 0..4 {
-            for row in 0..3 {
-                m[col * 4 + row] = words[col * 3 + row];
+        // Source is row-major 4×3:
+        // [m0 m1 m2 0; m3 m4 m5 0; m6 m7 m8 0; m9 m10 m11 1].
+        for row in 0..4 {
+            for col in 0..3 {
+                m[row * 4 + col] = words[row * 3 + col];
             }
         }
-        // Bottom row (w-row) = [0, 0, 0, 1] for affine matrices
+        // Last column = [0, 0, 0, 1] for affine matrices.
         m[3] = 0;
         m[7] = 0;
         m[11] = 0;
@@ -94,9 +93,9 @@ impl Matrix {
     /// identity in row 3 and column 3.
     pub fn load_3x3(words: &[i32; 9]) -> Self {
         let mut m = Self::IDENTITY.m;
-        for col in 0..3 {
-            for row in 0..3 {
-                m[col * 4 + row] = words[col * 3 + row];
+        for row in 0..3 {
+            for col in 0..3 {
+                m[row * 4 + col] = words[row * 3 + col];
             }
         }
         Matrix { m }
@@ -113,22 +112,22 @@ impl Matrix {
                 for k in 0..4 {
                     acc += (self.at(row, k) as i64) * (other.at(k, col) as i64);
                 }
-                out[col * 4 + row] = (acc >> 12) as i32;
+                out[row * 4 + col] = (acc >> 12) as i32;
             }
         }
         Matrix { m: out }
     }
 
-    /// Multiply the matrix by a 4-component vector `(x, y, z, w)`. Returns
-    /// the transformed `(x', y', z', w')`.
+    /// Multiply a row-vector `(x, y, z, w)` by the matrix. Returns the
+    /// transformed `(x', y', z', w')`.
     pub fn mul_vec4(&self, v: [i32; 4]) -> [i32; 4] {
         let mut out = [0i32; 4];
-        for row in 0..4 {
+        for col in 0..4 {
             let mut acc: i64 = 0;
-            for col in 0..4 {
-                acc += (self.at(row, col) as i64) * (v[col] as i64);
+            for row in 0..4 {
+                acc += (v[row] as i64) * (self.at(row, col) as i64);
             }
-            out[row] = (acc >> 12) as i32;
+            out[col] = (acc >> 12) as i32;
         }
         out
     }
@@ -224,13 +223,13 @@ mod tests {
             13, 14, 15, 16,
         ];
         let m = Matrix::load_4x4(&words);
-        // Column 0 is M[0..3]
+        // Row 0 is M[0..3].
         assert_eq!(m.at(0, 0), 1);
-        assert_eq!(m.at(1, 0), 2);
-        assert_eq!(m.at(2, 0), 3);
-        assert_eq!(m.at(3, 0), 4);
-        // Column 3 is M[12..15]
-        assert_eq!(m.at(0, 3), 13);
+        assert_eq!(m.at(0, 1), 2);
+        assert_eq!(m.at(0, 2), 3);
+        assert_eq!(m.at(0, 3), 4);
+        // Row 3 is M[12..15].
+        assert_eq!(m.at(3, 0), 13);
         assert_eq!(m.at(3, 3), 16);
     }
 
@@ -243,11 +242,13 @@ mod tests {
             10, 11, 12,
         ];
         let m = Matrix::load_4x3(&words);
-        // Bottom row: [0, 0, 0, ONE]
-        assert_eq!(m.at(3, 0), 0);
-        assert_eq!(m.at(3, 1), 0);
-        assert_eq!(m.at(3, 2), 0);
+        assert_eq!(m.at(3, 0), 10);
+        assert_eq!(m.at(3, 1), 11);
+        assert_eq!(m.at(3, 2), 12);
         assert_eq!(m.at(3, 3), ONE);
+        assert_eq!(m.at(0, 3), 0);
+        assert_eq!(m.at(1, 3), 0);
+        assert_eq!(m.at(2, 3), 0);
         // Top-left should be 1
         assert_eq!(m.at(0, 0), 1);
     }
@@ -287,17 +288,14 @@ mod tests {
 
     #[test]
     fn test_mul_matrix_rotates_then_scales() {
-        // Verify ordering: M × v means "apply M to v in object space".
-        // S(2) × T(5, 0, 0) applied to (1, 0, 0, 1) → scale(translate(...)) → (12, 0, 0, 1)?
+        // Verify ordering: row-vector v × M means "apply M to v in object space".
         // We post-multiply in NDS semantics: current = current × param, so
-        // applying this composite to a vector v gives (current × param) × v
-        // = S × T × v = scale(translate(v)).
+        // applying this composite to a row vector v gives v × (S × T):
+        // scale first, then translate.
         let s = Matrix::identity().mul_scale(2 * ONE, 2 * ONE, 2 * ONE);
         let c = s.mul_matrix(&Matrix::identity().mul_translate(5 * ONE, 0, 0));
         let r = c.mul_vec4([ONE, 0, 0, ONE]);
-        // First translate v by (5, 0, 0) → (6, 0, 0, 1), then scale by 2 → (12, 0, 0, 1).
-        // (Note: w-row stays at 1; scale doesn't touch w.)
-        assert_eq!(r[0], 12 * ONE);
+        assert_eq!(r[0], 7 * ONE);
         let _ = approx_eq;
     }
 }

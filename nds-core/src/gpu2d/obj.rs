@@ -53,6 +53,7 @@ pub fn render_objs(
     let one_d_mapping = engine.dispcnt & (1 << 4) != 0;
     let one_d_boundary_shift = (engine.dispcnt >> 20) & 0x3;
     let boundary = 32u32 << one_d_boundary_shift;
+    let obj_ext_palette = engine.dispcnt & (1 << 31) != 0;
     let line_i32 = line as i32;
 
     for sprite_idx in 0..128 {
@@ -128,7 +129,7 @@ pub fn render_objs(
                     engine.which, vram, palette,
                     tile_num, tex_x as u32, tex_y as u32,
                     w, h, bpp_8, palette_num, priority, gfx_mode,
-                    one_d_mapping, boundary,
+                    one_d_mapping, boundary, obj_ext_palette,
                     screen_x as usize, out,
                 );
             }
@@ -144,7 +145,7 @@ pub fn render_objs(
                     engine.which, vram, palette,
                     tile_num, col, row, w, h, bpp_8,
                     palette_num, priority, gfx_mode,
-                    one_d_mapping, boundary,
+                    one_d_mapping, boundary, obj_ext_palette,
                     screen_x as usize, out,
                 );
             }
@@ -175,6 +176,7 @@ fn emit_obj_pixel(
     gfx_mode: u8,
     one_d_mapping: bool,
     boundary: u32,
+    obj_ext_palette: bool,
     screen_x: usize,
     out: &mut ObjLine,
 ) {
@@ -226,9 +228,7 @@ fn emit_obj_pixel(
         return;
     }
 
-    // OBJ palette lives at +0x200 inside the engine's 1 KB palette half.
-    let off = 0x200 + (index as usize * 2);
-    let color = u16::from_le_bytes([palette[off], palette[off + 1]]);
+    let color = obj_palette_color(which, vram, palette, index, palette_num, bpp_8, obj_ext_palette);
 
     // Lower OAM index wins on ties — only overwrite if currently unset.
     if out.pixel[screen_x].is_none() {
@@ -240,5 +240,63 @@ fn read_obj_u8(which: Which, vram: &VramRouter, addr: u32) -> u8 {
     match which {
         Which::A => vram.read_engine_a_obj(addr),
         Which::B => vram.read_engine_b_obj(addr),
+    }
+}
+
+fn obj_palette_color(
+    which: Which,
+    vram: &VramRouter,
+    palette: &[u8],
+    index: u8,
+    palette_num: u8,
+    bpp_8: bool,
+    obj_ext_palette: bool,
+) -> u16 {
+    if obj_ext_palette {
+        let addr = if bpp_8 {
+            palette_num as u32 * 0x200 + index as u32 * 2
+        } else {
+            index as u32 * 2
+        };
+        let color = vram.read_obj_ext_palette_u16(which == Which::B, addr);
+        if color != 0 {
+            return color;
+        }
+    }
+
+    // OBJ palette lives at +0x200 inside the engine's 1 KB palette half.
+    let off = 0x200 + (index as usize * 2);
+    u16::from_le_bytes([palette[off], palette[off + 1]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vram::{BankId, VramRouter};
+
+    #[test]
+    fn test_obj_uses_engine_b_extended_palette() {
+        let mut engine = Engine2d::new(Which::B);
+        engine.dispcnt = (1 << 31) | (1 << 12) | (1 << 4);
+        let mut vram = VramRouter::new();
+        vram.write_cnt(BankId::D, 0x80 | 4);
+        vram.write_cnt(BankId::I, 0x80 | 3);
+
+        vram.banks[BankId::D as usize].data[0] = 3;
+        let pal_off = 2 * 0x200 + 3 * 2;
+        vram.banks[BankId::I as usize].data[pal_off] = 0xe0;
+        vram.banks[BankId::I as usize].data[pal_off + 1] = 0x03;
+
+        let mut oam = [0u8; 0x400];
+        let attr0 = (1 << 13) as u16;
+        let attr1 = 0u16;
+        let attr2 = 2u16 << 12;
+        oam[0..2].copy_from_slice(&attr0.to_le_bytes());
+        oam[2..4].copy_from_slice(&attr1.to_le_bytes());
+        oam[4..6].copy_from_slice(&attr2.to_le_bytes());
+
+        let mut out = ObjLine::default();
+        render_objs(&engine, 0, &[0; 0x400], &oam, &vram, &mut out);
+        assert_eq!(out.pixel[0].expect("obj pixel").color, 0x03e0);
     }
 }

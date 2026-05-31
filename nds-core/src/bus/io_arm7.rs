@@ -1,8 +1,8 @@
 //! ARM7 I/O register read/write dispatch (0x04000000 page).
 
 use super::SharedState;
-use crate::ipc::{self, Side};
 use crate::interrupt::Irq;
+use crate::ipc::{self, Side};
 
 #[inline]
 pub fn in_io_page(addr: u32) -> bool {
@@ -11,7 +11,11 @@ pub fn in_io_page(addr: u32) -> bool {
 
 pub fn read_io8(shared: &SharedState, addr: u32) -> u8 {
     let r = read_io16(shared, addr & !1);
-    if addr & 1 != 0 { (r >> 8) as u8 } else { r as u8 }
+    if addr & 1 != 0 {
+        (r >> 8) as u8
+    } else {
+        r as u8
+    }
 }
 
 pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
@@ -33,8 +37,12 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
     }
 
     // Audio control:
-    if local == 0x0500 { return shared.audio.master_cnt; }
-    if local == 0x0504 { return shared.audio.bias; }
+    if local == 0x0500 {
+        return shared.audio.master_cnt;
+    }
+    if local == 0x0504 {
+        return shared.audio.bias;
+    }
 
     match local {
         0x0004 => shared.dispstat7,
@@ -48,6 +56,7 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x01A2 => shared.auxspi.read_data() as u16,
         0x01C0 => shared.spi.read_cnt(),
         0x01C2 => shared.spi.read_data() as u16,
+        0x0204 => shared.exmemcnt,
         0x0208 => shared.irq7.read_ime() as u16,
         0x0210 => shared.irq7.read_ie() as u16,
         0x0212 => (shared.irq7.read_ie() >> 16) as u16,
@@ -96,7 +105,9 @@ pub fn read_io32_mut(shared: &mut SharedState, addr: u32) -> u32 {
 }
 
 fn decode_dma_reg(local: u32) -> Option<(usize, u32)> {
-    if !(0xB0..0xE0).contains(&local) { return None; }
+    if !(0xB0..0xE0).contains(&local) {
+        return None;
+    }
     let off = local - 0xB0;
     let ch = (off / 0xC) as usize;
     let kind = (off % 0xC) / 4;
@@ -113,8 +124,14 @@ pub enum Write32Effect {
 fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Write32Effect {
     use crate::dma::WriteControlEffect;
     match kind {
-        0 => { shared.dma7.write_sad(ch, val); Write32Effect::None }
-        1 => { shared.dma7.write_dad(ch, val); Write32Effect::None }
+        0 => {
+            shared.dma7.write_sad(ch, val);
+            Write32Effect::None
+        }
+        1 => {
+            shared.dma7.write_dad(ch, val);
+            Write32Effect::None
+        }
         2 => {
             // ARM7 count is in CNT_L (low 16 bits). DMA3 uses 16 bits;
             // DMA0-2 use 14 bits but our generic mask & max_count handle it.
@@ -155,7 +172,9 @@ fn write_fifosend(shared: &mut SharedState, val: u32) {
 /// Read a 16-bit halfword from one of the 16 audio channels' register
 /// blocks. `reg` is the offset within the 16-byte block (0..15).
 fn read_audio_channel_u16(shared: &SharedState, ch: usize, reg: u32) -> u16 {
-    if ch >= 16 { return 0; }
+    if ch >= 16 {
+        return 0;
+    }
     let c = &shared.audio.channels[ch];
     match reg {
         0x0 => c.cnt as u16,
@@ -171,7 +190,9 @@ fn read_audio_channel_u16(shared: &SharedState, ch: usize, reg: u32) -> u16 {
 }
 
 fn write_audio_channel_u16(shared: &mut SharedState, ch: usize, reg: u32, val: u16) {
-    if ch >= 16 { return; }
+    if ch >= 16 {
+        return;
+    }
     let c = &mut shared.audio.channels[ch];
     match reg {
         0x0 => {
@@ -196,6 +217,15 @@ fn write_audio_channel_u16(shared: &mut SharedState, ch: usize, reg: u32, val: u
 }
 
 pub fn write_io8(shared: &mut SharedState, addr: u32, val: u8) {
+    if (addr & 0x00FF_FFFF) == 0x0301 {
+        // HALTCNT: bit 7 enters low-power halt until an enabled IRQ wakes ARM7.
+        // Sleep/POSTFLG details are outside the current direct-boot scope.
+        if val & 0x80 != 0 {
+            shared.halt7_requested = true;
+        }
+        return;
+    }
+
     let aligned = addr & !1;
     let mut cur = read_io16(shared, aligned);
     if addr & 1 != 0 {
@@ -224,8 +254,14 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         write_audio_channel_u16(shared, ch, reg, val);
         return;
     }
-    if local == 0x0500 { shared.audio.master_cnt = val; return; }
-    if local == 0x0504 { shared.audio.bias = val & 0x3FF; return; }
+    if local == 0x0500 {
+        shared.audio.master_cnt = val;
+        return;
+    }
+    if local == 0x0504 {
+        shared.audio.bias = val & 0x3FF;
+        return;
+    }
 
     match local {
         0x0004 => {
@@ -250,6 +286,7 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
                 shared.irq7.request(Irq::Spi);
             }
         }
+        0x0204 => shared.exmemcnt = val,
         0x0208 => shared.irq7.write_ime(val as u32),
         0x0210 => {
             let prev = shared.irq7.read_ie();
@@ -257,12 +294,18 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         }
         0x0212 => {
             let prev = shared.irq7.read_ie();
-            shared.irq7.write_ie((prev & 0x0000_FFFF) | ((val as u32) << 16));
+            shared
+                .irq7
+                .write_ie((prev & 0x0000_FFFF) | ((val as u32) << 16));
         }
         0x0214 => shared.irq7.write_if(val as u32),
         0x0216 => shared.irq7.write_if((val as u32) << 16),
         _ => {
-            log::trace!("ARM7 I/O write16 to unhandled 0x{:08X} = 0x{:04X}", addr, val);
+            log::trace!(
+                "ARM7 I/O write16 to unhandled 0x{:08X} = 0x{:04X}",
+                addr,
+                val
+            );
         }
     }
 }
@@ -273,10 +316,22 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
         return write_dma_reg(shared, ch, kind, val);
     }
     match local {
-        0x0188 => { write_fifosend(shared, val); Write32Effect::None }
-        0x0208 => { shared.irq7.write_ime(val); Write32Effect::None }
-        0x0210 => { shared.irq7.write_ie(val); Write32Effect::None }
-        0x0214 => { shared.irq7.write_if(val); Write32Effect::None }
+        0x0188 => {
+            write_fifosend(shared, val);
+            Write32Effect::None
+        }
+        0x0208 => {
+            shared.irq7.write_ime(val);
+            Write32Effect::None
+        }
+        0x0210 => {
+            shared.irq7.write_ie(val);
+            Write32Effect::None
+        }
+        0x0214 => {
+            shared.irq7.write_if(val);
+            Write32Effect::None
+        }
         _ => {
             write_io16(shared, addr, val as u16);
             write_io16(shared, addr.wrapping_add(2), (val >> 16) as u16);

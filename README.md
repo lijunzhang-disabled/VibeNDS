@@ -1,9 +1,10 @@
 # NDS Emulator — A Rust Nintendo DS Emulator
 
-A Nintendo DS emulator built from scratch in Rust, sibling to the GBA
-emulator at `../gba`. This project follows the same AI-human pair
-programming approach: the human steers design and compatibility priorities,
-while the AI handles much of the implementation and debugging.
+A Nintendo DS emulator built from scratch in Rust, sibling to
+[VibeGBA](https://github.com/lijunzhang-disabled/VibeGBA). This project
+follows the same AI-human pair programming approach: the human steers design
+and compatibility priorities, while the AI handles much of the implementation
+and debugging.
 
 ```
 ┌──────────────────────────────────────┐
@@ -28,7 +29,7 @@ project history is useful rather than just a pile of patches.
 
 ```sh
 cargo build --release
-cargo run --release -p nds-frontend -- --rom path/to/game.nds
+./target/release/nds-frontend --rom path/to/game.nds
 ```
 
 Useful flags:

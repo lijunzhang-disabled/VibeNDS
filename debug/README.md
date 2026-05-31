@@ -14,6 +14,7 @@ regression test → verification.
 | 2026-05-08 | [Halt-wake — halted CPU never woken by pending IRQ (inherited)](2026-05-08_halt-wake-inherited.md) | **Fixed** |
 | 2026-05-29 | [IntrWait — SWI 0x04/0x05 wake on any IRQ instead of mask (inherited)](2026-05-29_intrwait-mask-inherited.md) | **Fixed** |
 | 2026-05-31 | [Armwrestler fixed — direct boot and ARM core fixes](2026-05-31_armwrestler-fixed-direct-boot.md) | **Fixed** |
+| 2026-05-31 | [Test campaign — runtime compatibility sweep](2026-05-31_test-campaign-runtime-compat.md) | **In progress** |
 
 ## Phase 9 working docs
 

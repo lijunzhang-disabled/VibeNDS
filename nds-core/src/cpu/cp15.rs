@@ -80,6 +80,11 @@ pub struct Cp15 {
     /// c9, c1, opcode2=1: I-TCM region register.
     itcm_raw: u32,
 
+    /// c13, c0, opcode2=1: context ID / thread-local scratch register.
+    /// Modern libnds/calico uses this in its IRQ trampoline to carry the
+    /// handled IRQ mask across handler calls before waking scheduler waiters.
+    context_id: u32,
+
     /// Computed TCM views — recomputed whenever `dtcm_raw`/`itcm_raw`/control
     /// change.
     pub itcm: TcmRegion,
@@ -104,6 +109,7 @@ impl Cp15 {
             regions: [MpuRegion::default(); 8],
             dtcm_raw: 0,
             itcm_raw: 0,
+            context_id: 0,
             itcm: TcmRegion::disabled(),
             dtcm: TcmRegion::disabled(),
         };
@@ -153,6 +159,7 @@ impl Cp15 {
             (6, n @ 0..=7, 0) => self.regions[n as usize].raw,
             (9, 1, 0) => self.dtcm_raw,
             (9, 1, 1) => self.itcm_raw,
+            (13, 0, 1) => self.context_id,
             _ => 0,
         }
     }
@@ -188,6 +195,7 @@ impl Cp15 {
                 self.itcm_raw = val;
                 self.recompute_tcm();
             }
+            (13, 0, 1) => self.context_id = val,
             _ => {
                 log::trace!("CP15 write to unhandled c{},c{},opc2={}: 0x{:08X}", crn, crm, op2, val);
             }
@@ -290,6 +298,13 @@ mod tests {
     fn test_main_id_register() {
         let cp = Cp15::new();
         assert_eq!(cp.read(0, 0, 0, 0), 0x4105_9461);
+    }
+
+    #[test]
+    fn test_context_id_round_trip() {
+        let mut cp = Cp15::new();
+        cp.write(13, 0, 0, 1, 0x0001_0000);
+        assert_eq!(cp.read(13, 0, 0, 1), 0x0001_0000);
     }
 
     #[test]

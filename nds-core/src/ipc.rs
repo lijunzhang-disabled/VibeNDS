@@ -21,7 +21,10 @@ pub enum Side {
 
 impl Side {
     pub fn other(self) -> Side {
-        match self { Side::Arm9 => Side::Arm7, Side::Arm7 => Side::Arm9 }
+        match self {
+            Side::Arm9 => Side::Arm7,
+            Side::Arm7 => Side::Arm9,
+        }
     }
 }
 
@@ -61,22 +64,33 @@ pub struct Ipc {
 }
 
 impl Ipc {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     // ─── IPCSYNC ─────────────────────────────────────────────────
 
     /// Read IPCSYNC from `side`'s perspective.
     pub fn read_sync(&self, side: Side) -> u16 {
         let (mine, others, my_irq_en) = match side {
-            Side::Arm9 => (self.sync_arm9_send, self.sync_arm7_send, self.sync_arm9_recv_irq_en),
-            Side::Arm7 => (self.sync_arm7_send, self.sync_arm9_send, self.sync_arm7_recv_irq_en),
+            Side::Arm9 => (
+                self.sync_arm9_send,
+                self.sync_arm7_send,
+                self.sync_arm9_recv_irq_en,
+            ),
+            Side::Arm7 => (
+                self.sync_arm7_send,
+                self.sync_arm9_send,
+                self.sync_arm7_recv_irq_en,
+            ),
         };
         // bits[3:0] = recv_data (other CPU's send half),
         // bits[11:8] = my send half,
         // bit 14 = my receive IRQ enable.
-        let mut v = (others as u16 & 0xF)
-                  | ((mine as u16 & 0xF) << 8);
-        if my_irq_en { v |= 1 << 14; }
+        let mut v = (others as u16 & 0xF) | ((mine as u16 & 0xF) << 8);
+        if my_irq_en {
+            v |= 1 << 14;
+        }
         v
     }
 
@@ -122,8 +136,8 @@ impl Ipc {
                 self.fifo_arm9_send_empty_irq,
                 self.fifo_arm9_recv_irq,
                 self.fifo_arm9_error,
-                &self.fifo_9to7,  // ARM9's send queue
-                &self.fifo_7to9,  // ARM9's recv queue
+                &self.fifo_9to7, // ARM9's send queue
+                &self.fifo_7to9, // ARM9's recv queue
             ),
             Side::Arm7 => (
                 self.fifo_arm7_enable,
@@ -135,14 +149,30 @@ impl Ipc {
             ),
         };
         let mut v = 0u16;
-        if send_q.is_empty()        { v |= 1 << 0; }
-        if send_q.len() == FIFO_DEPTH { v |= 1 << 1; }
-        if send_irq                 { v |= 1 << 2; }
-        if recv_q.is_empty()        { v |= 1 << 8; }
-        if recv_q.len() == FIFO_DEPTH { v |= 1 << 9; }
-        if recv_irq                 { v |= 1 << 10; }
-        if error                    { v |= 1 << 14; }
-        if enable                   { v |= 1 << 15; }
+        if send_q.is_empty() {
+            v |= 1 << 0;
+        }
+        if send_q.len() == FIFO_DEPTH {
+            v |= 1 << 1;
+        }
+        if send_irq {
+            v |= 1 << 2;
+        }
+        if recv_q.is_empty() {
+            v |= 1 << 8;
+        }
+        if recv_q.len() == FIFO_DEPTH {
+            v |= 1 << 9;
+        }
+        if recv_irq {
+            v |= 1 << 10;
+        }
+        if error {
+            v |= 1 << 14;
+        }
+        if enable {
+            v |= 1 << 15;
+        }
         v
     }
 
@@ -168,17 +198,17 @@ impl Ipc {
 
         match side {
             Side::Arm9 => {
-                let was_send_irq = self.fifo_arm9_send_empty_irq;
+                let send_empty = self.fifo_9to7.is_empty();
                 let was_recv_irq = self.fifo_arm9_recv_irq;
+                let was_send_irq = self.fifo_arm9_send_empty_irq;
                 self.fifo_arm9_send_empty_irq = new_send_irq_en;
                 self.fifo_arm9_recv_irq = new_recv_irq_en;
                 self.fifo_arm9_enable = new_enable;
-                if write_clear_error { self.fifo_arm9_error = false; }
+                if write_clear_error {
+                    self.fifo_arm9_error = false;
+                }
 
-                // Enabling an IRQ while its condition is already satisfied
-                // immediately raises the IRQ — matches real hardware which
-                // is level-triggered, not edge-triggered, on the FIFO bits.
-                if !was_send_irq && new_send_irq_en && self.fifo_9to7.is_empty() {
+                if !was_send_irq && new_send_irq_en && send_empty {
                     effects.raise_send_empty_on_self = true;
                 }
                 if !was_recv_irq && new_recv_irq_en && !self.fifo_7to9.is_empty() {
@@ -186,14 +216,17 @@ impl Ipc {
                 }
             }
             Side::Arm7 => {
-                let was_send_irq = self.fifo_arm7_send_empty_irq;
+                let send_empty = self.fifo_7to9.is_empty();
                 let was_recv_irq = self.fifo_arm7_recv_irq;
+                let was_send_irq = self.fifo_arm7_send_empty_irq;
                 self.fifo_arm7_send_empty_irq = new_send_irq_en;
                 self.fifo_arm7_recv_irq = new_recv_irq_en;
                 self.fifo_arm7_enable = new_enable;
-                if write_clear_error { self.fifo_arm7_error = false; }
+                if write_clear_error {
+                    self.fifo_arm7_error = false;
+                }
 
-                if !was_send_irq && new_send_irq_en && self.fifo_7to9.is_empty() {
+                if !was_send_irq && new_send_irq_en && send_empty {
                     effects.raise_send_empty_on_self = true;
                 }
                 if !was_recv_irq && new_recv_irq_en && !self.fifo_9to7.is_empty() {
@@ -438,6 +471,16 @@ mod tests {
     }
 
     #[test]
+    fn test_enabling_send_empty_irq_raises_if_fifo_already_empty() {
+        let mut ipc = Ipc::new();
+        enable_both(&mut ipc);
+
+        let effects = ipc.write_fifocnt(Side::Arm9, (1 << 15) | (1 << 2));
+
+        assert!(effects.raise_send_empty_on_self);
+    }
+
+    #[test]
     fn test_fifocnt_status_bits() {
         let mut ipc = Ipc::new();
         enable_both(&mut ipc);
@@ -459,7 +502,9 @@ mod tests {
     fn test_clear_send_fifo_via_bit3() {
         let mut ipc = Ipc::new();
         enable_both(&mut ipc);
-        for i in 0..5 { ipc.write_send(Side::Arm9, i); }
+        for i in 0..5 {
+            ipc.write_send(Side::Arm9, i);
+        }
         assert_eq!(ipc.fifo_9to7.len(), 5);
         // ARM9 writes bit 3 set → clears its OWN send FIFO.
         ipc.write_fifocnt(Side::Arm9, (1 << 15) | (1 << 3));
@@ -482,7 +527,9 @@ mod tests {
     fn test_in_order_delivery() {
         let mut ipc = Ipc::new();
         enable_both(&mut ipc);
-        for i in 0..4 { ipc.write_send(Side::Arm9, i + 100); }
+        for i in 0..4 {
+            ipc.write_send(Side::Arm9, i + 100);
+        }
         for i in 0..4 {
             let (v, _) = ipc.read_recv(Side::Arm7);
             assert_eq!(v, i + 100);

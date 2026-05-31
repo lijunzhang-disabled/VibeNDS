@@ -10,9 +10,9 @@
 
 pub mod alu;
 pub mod arm;
-pub mod thumb;
 pub mod bus;
 pub mod cp15;
+pub mod thumb;
 
 use serde::{Deserialize, Serialize};
 
@@ -67,24 +67,68 @@ pub struct Psr {
 
 impl Psr {
     pub fn new(mode: CpuMode) -> Self {
-        Psr { bits: mode as u32 | (1 << 7) | (1 << 6) }
+        Psr {
+            bits: mode as u32 | (1 << 7) | (1 << 6),
+        }
     }
 
-    #[inline] pub fn n(self) -> bool { self.bits >> 31 != 0 }
-    #[inline] pub fn z(self) -> bool { (self.bits >> 30) & 1 != 0 }
-    #[inline] pub fn c(self) -> bool { (self.bits >> 29) & 1 != 0 }
-    #[inline] pub fn v(self) -> bool { (self.bits >> 28) & 1 != 0 }
-    #[inline] pub fn q(self) -> bool { (self.bits >> 27) & 1 != 0 }
-    #[inline] pub fn irq_disabled(self) -> bool { (self.bits >> 7) & 1 != 0 }
-    #[inline] pub fn fiq_disabled(self) -> bool { (self.bits >> 6) & 1 != 0 }
-    #[inline] pub fn thumb(self) -> bool { (self.bits >> 5) & 1 != 0 }
-    #[inline] pub fn mode(self) -> CpuMode { CpuMode::from_bits(self.bits) }
+    #[inline]
+    pub fn n(self) -> bool {
+        self.bits >> 31 != 0
+    }
+    #[inline]
+    pub fn z(self) -> bool {
+        (self.bits >> 30) & 1 != 0
+    }
+    #[inline]
+    pub fn c(self) -> bool {
+        (self.bits >> 29) & 1 != 0
+    }
+    #[inline]
+    pub fn v(self) -> bool {
+        (self.bits >> 28) & 1 != 0
+    }
+    #[inline]
+    pub fn q(self) -> bool {
+        (self.bits >> 27) & 1 != 0
+    }
+    #[inline]
+    pub fn irq_disabled(self) -> bool {
+        (self.bits >> 7) & 1 != 0
+    }
+    #[inline]
+    pub fn fiq_disabled(self) -> bool {
+        (self.bits >> 6) & 1 != 0
+    }
+    #[inline]
+    pub fn thumb(self) -> bool {
+        (self.bits >> 5) & 1 != 0
+    }
+    #[inline]
+    pub fn mode(self) -> CpuMode {
+        CpuMode::from_bits(self.bits)
+    }
 
-    #[inline] pub fn set_n(&mut self, v: bool) { self.bits = (self.bits & !(1 << 31)) | ((v as u32) << 31); }
-    #[inline] pub fn set_z(&mut self, v: bool) { self.bits = (self.bits & !(1 << 30)) | ((v as u32) << 30); }
-    #[inline] pub fn set_c(&mut self, v: bool) { self.bits = (self.bits & !(1 << 29)) | ((v as u32) << 29); }
-    #[inline] pub fn set_v(&mut self, v: bool) { self.bits = (self.bits & !(1 << 28)) | ((v as u32) << 28); }
-    #[inline] pub fn set_q(&mut self, v: bool) { self.bits = (self.bits & !(1 << 27)) | ((v as u32) << 27); }
+    #[inline]
+    pub fn set_n(&mut self, v: bool) {
+        self.bits = (self.bits & !(1 << 31)) | ((v as u32) << 31);
+    }
+    #[inline]
+    pub fn set_z(&mut self, v: bool) {
+        self.bits = (self.bits & !(1 << 30)) | ((v as u32) << 30);
+    }
+    #[inline]
+    pub fn set_c(&mut self, v: bool) {
+        self.bits = (self.bits & !(1 << 29)) | ((v as u32) << 29);
+    }
+    #[inline]
+    pub fn set_v(&mut self, v: bool) {
+        self.bits = (self.bits & !(1 << 28)) | ((v as u32) << 28);
+    }
+    #[inline]
+    pub fn set_q(&mut self, v: bool) {
+        self.bits = (self.bits & !(1 << 27)) | ((v as u32) << 27);
+    }
 
     #[inline]
     pub fn set_nz(&mut self, result: u32) {
@@ -237,11 +281,8 @@ impl Cpu {
         let opcode = self.pipeline[0];
 
         if !self.check_condition(opcode >> 28) {
-            // ARMv5+ "unconditional" encodings (cond == 0xF) get their own
-            // dispatch: BLX immediate, PLD, etc. The ARMv4 baseline treats
-            // 0xF as "never execute" but check_condition() above returns true
-            // for AL/0xF — so any 0xF that is not handled here falls through
-            // to execute_arm() which routes it correctly.
+            // ARM7TDMI treats condition 0xF as NV ("never"). ARM9 uses that
+            // space for ARMv5 unconditional encodings and routes it below.
             self.advance_arm_pipeline(bus);
             return 1;
         }
@@ -285,12 +326,12 @@ impl Cpu {
             let pc = self.regs[15] & !1;
             self.pipeline[0] = bus.read16(pc) as u32;
             self.pipeline[1] = bus.read16(pc + 2) as u32;
-            self.regs[15] = pc + 4;
+            self.regs[15] = pc.wrapping_add(4);
         } else {
             let pc = self.regs[15] & !3;
             self.pipeline[0] = bus.read32(pc);
-            self.pipeline[1] = bus.read32(pc + 4);
-            self.regs[15] = pc + 8;
+            self.pipeline[1] = bus.read32(pc.wrapping_add(4));
+            self.regs[15] = pc.wrapping_add(8);
         }
         self.pipeline_flushed = false;
     }
@@ -312,7 +353,7 @@ impl Cpu {
             0xC => !self.cpsr.z() && (self.cpsr.n() == self.cpsr.v()),
             0xD => self.cpsr.z() || (self.cpsr.n() != self.cpsr.v()),
             0xE => true,
-            0xF => true, // ARMv5 "unconditional"; routed in execute_arm
+            0xF => self.is_arm9, // ARMv5 unconditional on ARM9; NV on ARM7.
             _ => unreachable!(),
         }
     }
@@ -378,7 +419,11 @@ impl Cpu {
     /// CP15 c1 at boot, and the value latches `0xFFFF_0000` here.
     pub fn refresh_exception_base(&mut self) {
         if self.is_arm9 {
-            self.exception_base = if self.cp15.high_vectors() { 0xFFFF_0000 } else { 0x0000_0000 };
+            self.exception_base = if self.cp15.high_vectors() {
+                0xFFFF_0000
+            } else {
+                0x0000_0000
+            };
         } else {
             self.exception_base = 0;
         }
@@ -489,8 +534,20 @@ impl Cpu {
                     self.regs[r]
                 }
             }
-            13 => if mode.bank_index() == 0 { self.regs[13] } else { self.banked.sp[0] },
-            14 => if mode.bank_index() == 0 { self.regs[14] } else { self.banked.lr[0] },
+            13 => {
+                if mode.bank_index() == 0 {
+                    self.regs[13]
+                } else {
+                    self.banked.sp[0]
+                }
+            }
+            14 => {
+                if mode.bank_index() == 0 {
+                    self.regs[14]
+                } else {
+                    self.banked.lr[0]
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -534,8 +591,12 @@ impl Cpu {
                 let new_mode = spsr.mode();
                 self.switch_mode(new_mode);
                 self.cpsr = spsr;
+                self.branch(val & !1);
+                return;
             }
-            // On ARMv5, the result is interworked; on ARMv4, bit 0 is masked.
+            // On ordinary ARMv5 PC writes, the result is interworked; on
+            // exception returns (`S` set), CPSR.T came from SPSR and must not
+            // be overwritten by bit 0 of the restored PC value.
             if self.is_arm9 {
                 self.branch_exchange(val);
             } else {
@@ -549,8 +610,8 @@ impl Cpu {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
     use super::bus::CpuBus;
+    use super::*;
 
     /// A tiny RAM-only bus for unit tests.
     pub(crate) struct TestBus {
@@ -560,7 +621,10 @@ pub(crate) mod tests {
 
     impl TestBus {
         pub fn new(size: usize) -> Self {
-            TestBus { mem: vec![0u8; size], irq: false }
+            TestBus {
+                mem: vec![0u8; size],
+                irq: false,
+            }
         }
     }
 
@@ -570,50 +634,79 @@ pub(crate) mod tests {
         }
         fn read16(&mut self, addr: u32) -> u16 {
             let a = addr as usize;
-            if a + 1 >= self.mem.len() { return 0; }
+            if a + 1 >= self.mem.len() {
+                return 0;
+            }
             u16::from_le_bytes([self.mem[a], self.mem[a + 1]])
         }
         fn read32(&mut self, addr: u32) -> u32 {
             let a = addr as usize;
-            if a + 3 >= self.mem.len() { return 0; }
-            u32::from_le_bytes([self.mem[a], self.mem[a + 1], self.mem[a + 2], self.mem[a + 3]])
+            if a + 3 >= self.mem.len() {
+                return 0;
+            }
+            u32::from_le_bytes([
+                self.mem[a],
+                self.mem[a + 1],
+                self.mem[a + 2],
+                self.mem[a + 3],
+            ])
         }
         fn write8(&mut self, addr: u32, val: u8) {
-            if let Some(b) = self.mem.get_mut(addr as usize) { *b = val; }
+            if let Some(b) = self.mem.get_mut(addr as usize) {
+                *b = val;
+            }
         }
         fn write16(&mut self, addr: u32, val: u16) {
             let bytes = val.to_le_bytes();
             let a = addr as usize;
             if a + 1 < self.mem.len() {
-                self.mem[a] = bytes[0]; self.mem[a + 1] = bytes[1];
+                self.mem[a] = bytes[0];
+                self.mem[a + 1] = bytes[1];
             }
         }
         fn write32(&mut self, addr: u32, val: u32) {
             let bytes = val.to_le_bytes();
             let a = addr as usize;
             if a + 3 < self.mem.len() {
-                for i in 0..4 { self.mem[a + i] = bytes[i]; }
+                for i in 0..4 {
+                    self.mem[a + i] = bytes[i];
+                }
             }
         }
-        fn irq_pending(&self) -> bool { self.irq }
+        fn irq_pending(&self) -> bool {
+            self.irq
+        }
     }
 
     #[test]
     fn test_psr_flags() {
         let mut psr = Psr { bits: 0 };
-        psr.set_n(true); assert!(psr.n());
-        psr.set_z(true); assert!(psr.z());
-        psr.set_c(true); assert!(psr.c());
-        psr.set_v(true); assert!(psr.v());
-        psr.set_q(true); assert!(psr.q());
-        psr.set_nz(0); assert!(!psr.n()); assert!(psr.z());
-        psr.set_nz(0x80000000); assert!(psr.n()); assert!(!psr.z());
+        psr.set_n(true);
+        assert!(psr.n());
+        psr.set_z(true);
+        assert!(psr.z());
+        psr.set_c(true);
+        assert!(psr.c());
+        psr.set_v(true);
+        assert!(psr.v());
+        psr.set_q(true);
+        assert!(psr.q());
+        psr.set_nz(0);
+        assert!(!psr.n());
+        assert!(psr.z());
+        psr.set_nz(0x80000000);
+        assert!(psr.n());
+        assert!(!psr.z());
     }
 
     #[test]
     fn test_condition_codes() {
         let cpu = Cpu::new_arm7();
         assert!(cpu.check_condition(0xE));
+        assert!(!cpu.check_condition(0xF));
+
+        let cpu = Cpu::new_arm9();
+        assert!(cpu.check_condition(0xF));
     }
 
     #[test]
@@ -629,6 +722,21 @@ pub(crate) mod tests {
         cpu.switch_mode(CpuMode::System);
         assert_eq!(cpu.regs[13], 0x1234);
         assert_eq!(cpu.regs[14], 0x5678);
+    }
+
+    #[test]
+    fn test_exception_return_pc_write_preserves_spsr_thumb_state() {
+        let mut cpu = Cpu::new_arm9();
+        cpu.cpsr = Psr::new(CpuMode::Irq);
+        let mut spsr = Psr::new(CpuMode::System);
+        spsr.set_thumb(true);
+        cpu.set_spsr(spsr);
+
+        cpu.set_reg_with_flags(15, 0x0200_1F4C, true);
+
+        assert_eq!(cpu.cpsr.mode(), CpuMode::System);
+        assert!(cpu.cpsr.thumb());
+        assert_eq!(cpu.regs[15], 0x0200_1F4C);
     }
 
     #[test]
@@ -706,20 +814,30 @@ pub(crate) mod tests {
 
         // Sanity check: SPSR_irq, banked away during SUBS-return, should
         // still hold the saved LR_irq value (0x11C post-fix, 0x114 pre-fix).
-        assert_eq!(cpu.banked.lr[CpuMode::Irq.bank_index()], 0x11C,
+        assert_eq!(
+            cpu.banked.lr[CpuMode::Irq.bank_index()],
+            0x11C,
             "banked LR_irq should be branch_target + 4 (= 0x11C); pre-fix \
-             bug saves 0x114 (stale regs[15] - 4)");
+             bug saves 0x114 (stale regs[15] - 4)"
+        );
 
-        assert_eq!(cpu.cpsr.mode(), CpuMode::System,
-            "SUBS PC,LR,#4 should have restored System mode via SPSR");
-        assert_eq!(cpu.regs[15], 0x118,
+        assert_eq!(
+            cpu.cpsr.mode(),
+            CpuMode::System,
+            "SUBS PC,LR,#4 should have restored System mode via SPSR"
+        );
+        assert_eq!(
+            cpu.regs[15], 0x118,
             "resumed PC should be the branch target 0x118; pre-fix bug \
-             would resume at 0x110 (inside the gap before the target)");
+             would resume at 0x110 (inside the gap before the target)"
+        );
 
         // ─── Step #3: execute MOV R5, #0x42 at the resumed PC ────
         cpu.step(&mut bus);
-        assert_eq!(cpu.regs[5], 0x42,
+        assert_eq!(
+            cpu.regs[5], 0x42,
             "MOV R5, #0x42 at branch target should set R5 — pre-fix bug \
-             would have decoded zeros at 0x110 instead and never set R5");
+             would have decoded zeros at 0x110 instead and never set R5"
+        );
     }
 }

@@ -5,22 +5,24 @@
 //! interrupt registers etc. are added in later phases.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
-use crate::interrupt::InterruptController;
-use crate::vram::VramRouter;
-use crate::gpu2d::{Engine2d, Which as EngineWhich};
-use crate::ipc::Ipc;
-use crate::timer::Timers;
-use crate::dma::DmaController;
-use crate::spi::SpiBus;
-use crate::cart::AuxSpi;
-use crate::gpu3d::Engine3d;
+use crate::bus::math::MathUnit;
 use crate::audio::Audio;
+use crate::cart::AuxSpi;
+use crate::dma::DmaController;
+use crate::gpu2d::{Engine2d, Which as EngineWhich};
+use crate::gpu3d::Engine3d;
+use crate::interrupt::InterruptController;
+use crate::ipc::Ipc;
+use crate::spi::SpiBus;
+use crate::timer::Timers;
+use crate::vram::VramRouter;
 
 pub const MAIN_RAM_SIZE: usize = 4 * 1024 * 1024;
 pub const SHARED_WRAM_SIZE: usize = 32 * 1024;
 pub const PALETTE_SIZE: usize = 2 * 1024; // 1 KB Engine A + 1 KB Engine B
-pub const OAM_SIZE: usize = 2 * 1024;     // 1 KB Engine A + 1 KB Engine B
+pub const OAM_SIZE: usize = 2 * 1024; // 1 KB Engine A + 1 KB Engine B
 
 /// Helper: store the 4 MB main RAM on the heap. We keep it as a `Vec<u8>`
 /// rather than a fixed-size array so `bincode::serialize` doesn't need to
@@ -84,6 +86,15 @@ pub struct SharedState {
     /// power; we mostly ignore them in Phase 3.
     pub powcnt1: u16,
 
+    /// ARM7 HALTCNT write latch. The bus can't directly mutate the CPU core,
+    /// so `Nds` consumes this after the instruction that wrote HALTCNT.
+    #[serde(default)]
+    pub halt7_requested: bool,
+
+    /// External memory control. Bit 11 selects Slot-1 ownership
+    /// (1 = ARM7, 0 = ARM9).
+    pub exmemcnt: u16,
+
     /// 2D engines A (full feature set) and B (subset).
     pub engine_a: Engine2d,
     pub engine_b: Engine2d,
@@ -107,9 +118,20 @@ pub struct SharedState {
     /// 11 can flip slot-1 over to ARM9; Phase 5 keeps it ARM7-only.
     pub auxspi: AuxSpi,
 
+    /// Minimal slot-1 ROM command state. This backs normal card reads used
+    /// by NitroFS and card header probes; AUXSPI backup remains separate.
+    #[serde(with = "serde_bytes_vec")]
+    pub slot1_rom: Vec<u8>,
+    pub slot1_romctrl: u32,
+    pub slot1_command: [u8; 8],
+    pub slot1_data: VecDeque<u32>,
+
     /// 3D engine — matrix stacks + vertex pipeline + lighting + clipper +
     /// viewport transform + GXFIFO. ARM9-only.
     pub gpu3d: Engine3d,
+
+    /// ARM9 integer divide/square-root coprocessor registers.
+    pub math: MathUnit,
 
     /// Audio — 16 channels + mixer. ARM7-only.
     pub audio: Audio,
@@ -134,6 +156,8 @@ impl SharedState {
             oam: boxed_zeroed(OAM_SIZE),
             vram: VramRouter::new(),
             powcnt1: 0x0001,
+            halt7_requested: false,
+            exmemcnt: 1 << 11,
             engine_a: Engine2d::new(EngineWhich::A),
             engine_b: Engine2d::new(EngineWhich::B),
             ipc: Ipc::new(),
@@ -143,7 +167,12 @@ impl SharedState {
             dma7: DmaController::new(false),
             spi: SpiBus::new(),
             auxspi: AuxSpi::new(),
+            slot1_rom: Vec::new(),
+            slot1_romctrl: 0,
+            slot1_command: [0; 8],
+            slot1_data: VecDeque::new(),
             gpu3d: Engine3d::new(),
+            math: MathUnit::new(),
             audio: Audio::new(),
         }
     }
@@ -195,7 +224,9 @@ impl SharedState {
 }
 
 impl Default for SharedState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// `Vec<u16>` serialized as a flat byte stream (length × 2 bytes,
@@ -229,9 +260,14 @@ pub(crate) mod serde_bytes_vec_u16 {
             fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u16>, E> {
                 self.visit_bytes(&v)
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u16>, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<u16>, A::Error> {
                 let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(w) = seq.next_element::<u16>()? { out.push(w); }
+                while let Some(w) = seq.next_element::<u16>()? {
+                    out.push(w);
+                }
                 Ok(out)
             }
         }
@@ -269,9 +305,14 @@ pub(crate) mod serde_bytes_vec_u32_i {
             fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<i32>, E> {
                 self.visit_bytes(&v)
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<i32>, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<i32>, A::Error> {
                 let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(w) = seq.next_element::<i32>()? { out.push(w); }
+                while let Some(w) = seq.next_element::<i32>()? {
+                    out.push(w);
+                }
                 Ok(out)
             }
         }
@@ -302,7 +343,10 @@ pub(crate) mod serde_bytes_vec {
             fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
                 Ok(v)
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<u8>, A::Error> {
                 let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
                 while let Some(b) = seq.next_element::<u8>()? {
                     out.push(b);
@@ -333,8 +377,8 @@ mod tests {
         assert_eq!(s.arm9_wram_view().unwrap().0.len(), 0x4000);
         assert_eq!(s.arm7_wram_view().unwrap().len(), 0x4000);
         // Distinct halves
-        s.shared_wram[0] = 0xAA;       // lower
-        s.shared_wram[0x4000] = 0xBB;  // upper
+        s.shared_wram[0] = 0xAA; // lower
+        s.shared_wram[0x4000] = 0xBB; // upper
         assert_eq!(s.arm7_wram_view().unwrap()[0], 0xAA);
         assert_eq!(s.arm9_wram_view().unwrap().0[0], 0xBB);
     }

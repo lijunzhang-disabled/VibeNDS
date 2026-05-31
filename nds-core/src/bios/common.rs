@@ -3,7 +3,7 @@
 
 use crate::cpu::{Cpu, CpuBus};
 
-/// SWI 0x06 — Div: signed 32-bit divide.
+/// NDS SWI 0x09 — Div: signed 32-bit divide.
 /// In: R0 = numerator, R1 = denominator.
 /// Out: R0 = quotient, R1 = remainder, R3 = abs(quotient).
 pub fn swi_div(cpu: &mut Cpu) {
@@ -20,7 +20,13 @@ pub fn swi_div(cpu: &mut Cpu) {
     cpu.regs[3] = q.unsigned_abs();
 }
 
-/// SWI 0x08 — Sqrt: integer square root of R0.
+/// GBA/compatibility DivArm helper: same as Div, but with R0/R1 input order reversed.
+pub fn swi_div_arm(cpu: &mut Cpu) {
+    cpu.regs.swap(0, 1);
+    swi_div(cpu);
+}
+
+/// NDS SWI 0x0D — Sqrt: integer square root of R0.
 pub fn swi_sqrt(cpu: &mut Cpu) {
     let n = cpu.regs[0];
     cpu.regs[0] = (n as f64).sqrt() as u32;
@@ -221,6 +227,17 @@ mod tests {
         cpu.regs[1] = 0;
         swi_div(&mut cpu);
         assert_eq!(cpu.regs[0], 0xCAFE);
+    }
+
+    #[test]
+    fn test_div_arm_uses_reversed_inputs() {
+        let mut cpu = Cpu::new_arm9();
+        cpu.regs[0] = 7;
+        cpu.regs[1] = 100;
+        swi_div_arm(&mut cpu);
+        assert_eq!(cpu.regs[0] as i32, 14);
+        assert_eq!(cpu.regs[1] as i32, 2);
+        assert_eq!(cpu.regs[3], 14);
     }
 
     #[test]

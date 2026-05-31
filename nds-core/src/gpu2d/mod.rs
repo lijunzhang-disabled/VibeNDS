@@ -189,7 +189,11 @@ pub fn render_scanline(
     for &n in affine_bgs {
         if dispcnt_bg_enable & (1 << n) == 0 { continue; }
         let mut layer = [None; 256];
-        bg::render_affine_bg(engine, n, palette, vram, &mut layer);
+        if mode >= 3 {
+            bg::render_bitmap_bg(engine, n, palette, vram, &mut layer);
+        } else {
+            bg::render_affine_bg(engine, n, palette, vram, &mut layer);
+        }
         bg_layers[n] = Some(layer);
     }
 
@@ -200,7 +204,7 @@ pub fn render_scanline(
     // Composite.
     compositor::compose_scanline(engine, line, palette, &bg_layers, &obj_line, framebuffer);
 
-    if mode == 1 || mode == 2 {
+    if (1..=5).contains(&mode) {
         engine.advance_affine_refs();
     }
 }

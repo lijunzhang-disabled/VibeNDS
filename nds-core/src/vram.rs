@@ -416,6 +416,56 @@ impl VramRouter {
         let hi = self.read_texture_palette(a + 1) as u16;
         lo | (hi << 8)
     }
+
+    pub fn read_bg_ext_palette(&self, engine_b: bool, addr: u32) -> u8 {
+        let addr = addr & 0x7_FFFF;
+        for bank in &self.banks {
+            let base = match bank.target {
+                VramTarget::BgExtPalA { slot } if !engine_b => (slot as u32) * 0x2000,
+                VramTarget::BgExtPalB { slot } if engine_b => (slot as u32) * 0x2000,
+                _ => continue,
+            };
+            let span = bank.id.size() as u32;
+            if addr >= base && addr < base + span {
+                return bank.data[(addr - base) as usize];
+            }
+        }
+        0
+    }
+
+    pub fn read_bg_ext_palette_u16(&self, engine_b: bool, addr: u32) -> u16 {
+        let a = addr & !1;
+        let lo = self.read_bg_ext_palette(engine_b, a) as u16;
+        let hi = self.read_bg_ext_palette(engine_b, a + 1) as u16;
+        lo | (hi << 8)
+    }
+
+    pub fn read_obj_ext_palette(&self, engine_b: bool, addr: u32) -> u8 {
+        let addr = addr & 0x1FFF;
+        for bank in &self.banks {
+            match bank.target {
+                VramTarget::ObjExtPalA if !engine_b => {
+                    if addr < bank.id.size() as u32 {
+                        return bank.data[addr as usize];
+                    }
+                }
+                VramTarget::ObjExtPalB if engine_b => {
+                    if addr < bank.id.size() as u32 {
+                        return bank.data[addr as usize];
+                    }
+                }
+                _ => {}
+            }
+        }
+        0
+    }
+
+    pub fn read_obj_ext_palette_u16(&self, engine_b: bool, addr: u32) -> u16 {
+        let a = addr & !1;
+        let lo = self.read_obj_ext_palette(engine_b, a) as u16;
+        let hi = self.read_obj_ext_palette(engine_b, a + 1) as u16;
+        lo | (hi << 8)
+    }
 }
 
 impl Default for VramRouter {
@@ -616,5 +666,27 @@ mod tests {
         r.write_cnt(BankId::A, 0x80); // mst=0 → LCDC
         r.cpu_write_arm9(0x06800010, 0x33);
         assert_eq!(r.cpu_read_arm9(0x06800010), 0x33);
+    }
+
+    #[test]
+    fn test_engine_b_bg_ext_palette_via_bank_h() {
+        let mut r = VramRouter::new();
+        r.write_cnt(BankId::H, 0x80 | 2);
+        r.banks[BankId::H as usize].data[0x4000] = 0x34;
+        r.banks[BankId::H as usize].data[0x4001] = 0x12;
+
+        assert_eq!(r.read_bg_ext_palette_u16(true, 0x4000), 0x1234);
+        assert_eq!(r.read_bg_ext_palette_u16(false, 0x4000), 0);
+    }
+
+    #[test]
+    fn test_engine_b_obj_ext_palette_via_bank_i() {
+        let mut r = VramRouter::new();
+        r.write_cnt(BankId::I, 0x80 | 3);
+        r.banks[BankId::I as usize].data[0x0200] = 0x78;
+        r.banks[BankId::I as usize].data[0x0201] = 0x56;
+
+        assert_eq!(r.read_obj_ext_palette_u16(true, 0x0200), 0x5678);
+        assert_eq!(r.read_obj_ext_palette_u16(false, 0x0200), 0);
     }
 }

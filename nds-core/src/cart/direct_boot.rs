@@ -17,6 +17,7 @@ pub const ARM9_SP_SVC: u32 = 0x0300_3FC0;
 pub const ARM7_SP_USR: u32 = 0x0380_FD80;
 pub const ARM7_SP_IRQ: u32 = 0x0380_FF80;
 pub const ARM7_SP_SVC: u32 = 0x0380_FFC0;
+pub const ARM7_SP_UND: u32 = 0x0380_FFD0;
 
 /// Where the firmware copies the cart header inside Main RAM. Many games
 /// read fields out of this block instead of out of the cart bus.
@@ -25,6 +26,13 @@ pub const HEADER_COPY_ADDR: u32 = 0x027F_FE00;
 /// Boot indicators block. The BIOS writes a handful of well-known values
 /// here for games to read.
 pub const BOOT_INDICATORS_BASE: u32 = 0x027F_F800;
+
+const ENV_ARGV_HEADER_ADDR: u32 = 0x02FF_FE70;
+const ENV_ARGV_SLOT_ADDR: u32 = 0x02FF_F000;
+
+const ARM7_LEGACY_WRAM_BASE: u32 = 0x037F_8000;
+const ARM7_PRIVATE_WRAM_BASE: u32 = 0x0380_0000;
+const ARM7_LEGACY_WRAM_END: u32 = 0x0381_0000;
 
 /// Apply direct-boot setup to both CPUs and `SharedState` from a parsed
 /// header + the raw ROM bytes.
@@ -39,6 +47,7 @@ pub fn apply(
     copy_binary(shared, mem7, rom, header.arm9_rom_offset, header.arm9_load, header.arm9_size, "ARM9")?;
     copy_binary(shared, mem7, rom, header.arm7_rom_offset, header.arm7_load, header.arm7_size, "ARM7")?;
     copy_header_into_ram(shared, rom);
+    initialize_argv_header(shared);
     write_boot_indicators(shared, header);
 
     setup_arm9(cpu9, header.arm9_entry);
@@ -88,17 +97,50 @@ fn copy_binary(
 
         shared.main_ram[dst_off..dst_off + size as usize]
             .copy_from_slice(&rom[src_start..src_end]);
-    } else if label == "ARM7" && (load_addr >> 24) == 0x03 && load_addr >= 0x0380_0000 {
-        let dst_off = arm7_wram_offset(load_addr);
-        if dst_off + size as usize > mem7.wram.len() {
-            return Err(DirectBootError::UnsupportedLoadRegion { label, addr: load_addr, size });
-        }
-
-        mem7.wram[dst_off..dst_off + size as usize]
-            .copy_from_slice(&rom[src_start..src_end]);
+    } else if label == "ARM7" && (load_addr >> 24) == 0x03 {
+        copy_arm7_wram_binary(shared, mem7, &rom[src_start..src_end], load_addr, size)?;
     } else {
         return Err(DirectBootError::UnsupportedLoadRegion { label, addr: load_addr, size });
     }
+    Ok(())
+}
+
+fn copy_arm7_wram_binary(
+    shared: &mut SharedState,
+    mem7: &mut Arm7Memory,
+    src: &[u8],
+    load_addr: u32,
+    size: u32,
+) -> Result<(), DirectBootError> {
+    let load_end = load_addr
+        .checked_add(size)
+        .ok_or(DirectBootError::ArithmeticOverflow)?;
+    if load_addr < ARM7_LEGACY_WRAM_BASE || load_end > ARM7_LEGACY_WRAM_END {
+        return Err(DirectBootError::UnsupportedLoadRegion {
+            label: "ARM7",
+            addr: load_addr,
+            size,
+        });
+    }
+
+    let mut src_pos = 0usize;
+    if load_addr < ARM7_PRIVATE_WRAM_BASE {
+        let shared_start = (load_addr - ARM7_LEGACY_WRAM_BASE) as usize;
+        let shared_end_addr = load_end.min(ARM7_PRIVATE_WRAM_BASE);
+        let shared_len = (shared_end_addr - load_addr) as usize;
+        shared.shared_wram[shared_start..shared_start + shared_len]
+            .copy_from_slice(&src[..shared_len]);
+        src_pos += shared_len;
+    }
+
+    if load_end > ARM7_PRIVATE_WRAM_BASE {
+        let private_start_addr = load_addr.max(ARM7_PRIVATE_WRAM_BASE);
+        let private_start = arm7_wram_offset(private_start_addr);
+        let private_len = (load_end - private_start_addr) as usize;
+        mem7.wram[private_start..private_start + private_len]
+            .copy_from_slice(&src[src_pos..src_pos + private_len]);
+    }
+
     Ok(())
 }
 
@@ -106,6 +148,19 @@ fn copy_header_into_ram(shared: &mut SharedState, rom: &[u8]) {
     let off = main_ram_offset(HEADER_COPY_ADDR);
     let copy_len = rom.len().min(super::header::HEADER_SIZE);
     shared.main_ram[off..off + copy_len].copy_from_slice(&rom[..copy_len]);
+}
+
+fn initialize_argv_header(shared: &mut SharedState) {
+    // Modern libnds/Calico places its argv header inside the copied NDS
+    // header region. Clear the loader-owned argv fields before ARM9 startup
+    // races ARM7's crt0 initializer, while keeping argv[0] safely NULL.
+    let hdr = main_ram_offset(ENV_ARGV_HEADER_ADDR);
+    shared.main_ram[hdr..hdr + 28].fill(0);
+    shared.main_ram[hdr + 16..hdr + 20].copy_from_slice(&ENV_ARGV_SLOT_ADDR.to_le_bytes());
+    shared.main_ram[hdr + 20..hdr + 24].copy_from_slice(&(ENV_ARGV_SLOT_ADDR + 4).to_le_bytes());
+
+    let slot = main_ram_offset(ENV_ARGV_SLOT_ADDR);
+    shared.main_ram[slot..slot + 4].fill(0);
 }
 
 /// Write the boot indicator words at `0x027FF800-0x027FFC00` that real DS
@@ -145,6 +200,8 @@ fn setup_arm9(cpu: &mut Cpu, entry: u32) {
     // Homebrew startup code expects ITCM to exist before entering ARM9 code.
     // Some test ROMs expand this into a larger low-address mirror themselves.
     cpu.cp15.write(9, 1, 0, 1, (6 << 1) | 1);
+    cpu.cp15.set_high_vectors(false);
+    cpu.refresh_exception_base();
     cpu.regs[13] = ARM9_SP_USR;
     cpu.banked.sp[CpuMode::Irq.bank_index()] = ARM9_SP_IRQ;
     cpu.banked.sp[CpuMode::Supervisor.bank_index()] = ARM9_SP_SVC;
@@ -159,6 +216,7 @@ fn setup_arm7(cpu: &mut Cpu, entry: u32) {
     cpu.regs[13] = ARM7_SP_USR;
     cpu.banked.sp[CpuMode::Irq.bank_index()] = ARM7_SP_IRQ;
     cpu.banked.sp[CpuMode::Supervisor.bank_index()] = ARM7_SP_SVC;
+    cpu.banked.sp[CpuMode::Undefined.bank_index()] = ARM7_SP_UND;
     cpu.regs[15] = entry;
     cpu.pipeline_flushed = true;
 }
@@ -251,6 +309,27 @@ mod tests {
     }
 
     #[test]
+    fn test_direct_boot_splits_legacy_arm7_wram_load() {
+        let (mut rom, mut header) = synth_rom();
+        header.arm7_load = 0x037F_FFFC;
+        header.arm7_entry = 0x037F_FFFC;
+        header.arm7_size = 8;
+        rom[0x4200..0x4208].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let mut cpu9 = Cpu::new_arm9();
+        let mut cpu7 = Cpu::new_arm7();
+        let mut mem7 = Arm7Memory::new(None);
+        let mut shared = SharedState::new();
+
+        apply(&mut cpu9, &mut cpu7, &mut mem7, &mut shared, &header, &rom).expect("direct boot");
+
+        assert_eq!(&shared.shared_wram[0x7FFC..0x8000], &[1, 2, 3, 4]);
+        assert_eq!(&mem7.wram[0..4], &[5, 6, 7, 8]);
+        assert_eq!(cpu7.regs[15], 0x037F_FFFC);
+        assert_eq!(shared.wramcnt, 3);
+    }
+
+    #[test]
     fn test_direct_boot_sets_pcs_and_sps() {
         let (rom, header) = synth_rom();
         let mut cpu9 = Cpu::new_arm9();
@@ -265,11 +344,14 @@ mod tests {
         assert_eq!(cpu9.banked.sp[CpuMode::Irq.bank_index()], ARM9_SP_IRQ);
         assert_eq!(cpu9.banked.sp[CpuMode::Supervisor.bank_index()], ARM9_SP_SVC);
         assert_eq!(cpu9.cp15.itcm.size_bytes, 32 * 1024);
+        assert_eq!(cpu9.exception_base, 0);
+        assert!(!cpu9.cp15.high_vectors());
 
         assert_eq!(cpu7.regs[15], 0x0238_0000);
         assert_eq!(cpu7.regs[13], ARM7_SP_USR);
         assert_eq!(cpu7.banked.sp[CpuMode::Irq.bank_index()], ARM7_SP_IRQ);
         assert_eq!(cpu7.banked.sp[CpuMode::Supervisor.bank_index()], ARM7_SP_SVC);
+        assert_eq!(cpu7.banked.sp[CpuMode::Undefined.bank_index()], ARM7_SP_UND);
     }
 
     #[test]
@@ -288,6 +370,31 @@ mod tests {
             shared.main_ram[off + 0x15E], shared.main_ram[off + 0x15F]
         ]);
         assert_eq!(crc_in_copy, header.header_crc);
+    }
+
+    #[test]
+    fn test_direct_boot_initializes_modern_argv_header() {
+        let (rom, header) = synth_rom();
+        let mut cpu9 = Cpu::new_arm9();
+        let mut cpu7 = Cpu::new_arm7();
+        let mut mem7 = Arm7Memory::new(None);
+        let mut shared = SharedState::new();
+
+        apply(&mut cpu9, &mut cpu7, &mut mem7, &mut shared, &header, &rom).expect("direct boot");
+
+        let read32 = |addr: u32, shared: &SharedState| {
+            let off = (addr & 0x003F_FFFF) as usize;
+            u32::from_le_bytes([
+                shared.main_ram[off],
+                shared.main_ram[off + 1],
+                shared.main_ram[off + 2],
+                shared.main_ram[off + 3],
+            ])
+        };
+
+        assert_eq!(read32(ENV_ARGV_HEADER_ADDR, &shared), 0);
+        assert_eq!(read32(ENV_ARGV_HEADER_ADDR + 16, &shared), ENV_ARGV_SLOT_ADDR);
+        assert_eq!(read32(ENV_ARGV_SLOT_ADDR, &shared), 0);
     }
 
     #[test]

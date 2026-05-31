@@ -33,6 +33,88 @@ impl Arm9Memory {
             bios: bios.unwrap_or_else(|| vec![0xFFu8; ARM9_BIOS_SIZE]),
         }
     }
+
+    fn read_itcm32(&self, off: usize) -> u32 {
+        let off = off & !3;
+        if off == 0x18 {
+            if self.has_calico_branch_to_compact_vectors() {
+                return 0xEA00_0005; // B ITCM[0x34], the compact IRQ vector stub.
+            }
+            // Modern libnds/calico copies a compact low-vector table to ITCM:
+            // reset, undef, swi, pabt, dabt, irq, then the six literals. ARM
+            // hardware still vectors IRQ at 0x18. Depending on the crt0 copy,
+            // the compact table may begin at ITCM[0] or ITCM[0x18]; in the
+            // latter case IRQ lands on the reset stub. Point it at the compact
+            // table's IRQ literal.
+            if self.has_compact_calico_vectors_at(0) {
+                return 0xE59F_F00C; // LDR PC, [PC, #0x0C] -> ITCM[0x2C]
+            }
+            if self.has_compact_calico_vectors_at(0x18) {
+                return 0xE59F_F024; // LDR PC, [PC, #0x24] -> ITCM[0x44]
+            }
+        }
+        if self.has_synthetic_bios() && self.low_vectors_are_blank() {
+            if let Some(word) = synthetic_irq_vector_word(off) {
+                return word;
+            }
+        }
+        u32::from_le_bytes([
+            self.itcm[off],
+            self.itcm[off + 1],
+            self.itcm[off + 2],
+            self.itcm[off + 3],
+        ])
+    }
+
+    fn has_compact_calico_vectors_at(&self, base: usize) -> bool {
+        let ldr_pc_pc_16 = 0xE59F_F010u32.to_le_bytes();
+        for off in (base..=base + 0x14).step_by(4) {
+            if self.itcm[off..off + 4] != ldr_pc_pc_16 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn has_calico_branch_to_compact_vectors(&self) -> bool {
+        let irq_branch = u32::from_le_bytes([
+            self.itcm[0x18],
+            self.itcm[0x19],
+            self.itcm[0x1A],
+            self.itcm[0x1B],
+        ]);
+        irq_branch == 0xEA7F_E005 && self.has_compact_calico_vectors_at(0x20)
+    }
+
+    fn has_synthetic_bios(&self) -> bool {
+        self.bios.first().copied() == Some(0xFF)
+    }
+
+    fn low_vectors_are_blank(&self) -> bool {
+        self.itcm[..0x18].iter().all(|&b| b == 0) && self.itcm[0x18..0x44].iter().all(|&b| b == 0)
+    }
+}
+
+fn synthetic_irq_vector_word(off: usize) -> Option<u32> {
+    match off {
+        0x18 => Some(0xE92D_500F), // STMDB SP!, {R0-R3, R12, LR}
+        0x1C => Some(0xE59F_0028), // LDR R0, [PC, #0x28] -> handler slot literal
+        0x20 => Some(0xE590_0000), // LDR R0, [R0]
+        0x24 => Some(0xE350_0000), // CMP R0, #0
+        0x28 => Some(0x0AFF_FFFF), // BEQ null-handler IRQ ack
+        0x2C => Some(0xE28F_E014), // ADD LR, PC, #0x14 -> wrapper epilogue
+        0x30 => Some(0xE12F_FF10), // BX R0
+        0x34 => Some(0xE59F_0018), // LDR R0, [PC, #0x18] -> ARM9 IE
+        0x38 => Some(0xE590_1000), // LDR R1, [R0]     ; IE
+        0x3C => Some(0xE590_2004), // LDR R2, [R0, #4] ; IF
+        0x40 => Some(0xE001_1002), // AND R1, R1, R2   ; enabled pending
+        0x44 => Some(0xE580_1004), // STR R1, [R0, #4] ; acknowledge
+        0x48 => Some(0xE8BD_500F), // LDMIA SP!, {R0-R3, R12, LR}
+        0x4C => Some(0xE25E_F004), // SUBS PC, LR, #4
+        0x50 => Some(0x02FF_3FFC),
+        0x54 => Some(0x0400_0210),
+        _ => None,
+    }
 }
 
 /// A borrow of ARM9 state suitable to step the CPU against.
@@ -52,7 +134,12 @@ impl<'a> Bus9<'a> {
         itcm_region: TcmRegion,
         dtcm_region: TcmRegion,
     ) -> Self {
-        Bus9 { mem, shared, itcm_region, dtcm_region }
+        Bus9 {
+            mem,
+            shared,
+            itcm_region,
+            dtcm_region,
+        }
     }
 
     /// Execute the next chunk of channel `id`'s DMA transfer to completion
@@ -82,8 +169,16 @@ impl<'a> Bus9<'a> {
                 let v = self.read16(sad);
                 self.write16(dad, v);
             }
-            advance(&mut self.shared.dma9.channels[id].internal_sad, src_ctrl, word_size);
-            advance(&mut self.shared.dma9.channels[id].internal_dad, dst_ctrl, word_size);
+            advance(
+                &mut self.shared.dma9.channels[id].internal_sad,
+                src_ctrl,
+                word_size,
+            );
+            advance(
+                &mut self.shared.dma9.channels[id].internal_dad,
+                dst_ctrl,
+                word_size,
+            );
         }
 
         self.shared.dma9.finish_transfer(id);
@@ -163,25 +258,26 @@ impl<'a> CpuBus for Bus9<'a> {
             let off = addr.wrapping_sub(self.dtcm_region.base) as usize & !3;
             let off = off % DTCM_SIZE;
             return u32::from_le_bytes([
-                self.mem.dtcm[off], self.mem.dtcm[off + 1],
-                self.mem.dtcm[off + 2], self.mem.dtcm[off + 3],
+                self.mem.dtcm[off],
+                self.mem.dtcm[off + 1],
+                self.mem.dtcm[off + 2],
+                self.mem.dtcm[off + 3],
             ]);
         }
         if self.itcm_region.contains(addr) {
             let off = (addr as usize) & !3;
             let off = off % ITCM_SIZE;
-            return u32::from_le_bytes([
-                self.mem.itcm[off], self.mem.itcm[off + 1],
-                self.mem.itcm[off + 2], self.mem.itcm[off + 3],
-            ]);
+            return self.mem.read_itcm32(off);
         }
 
         match addr >> 24 {
             0x02 => {
                 let off = (addr as usize) & 0x3F_FFFC;
                 u32::from_le_bytes([
-                    self.shared.main_ram[off], self.shared.main_ram[off + 1],
-                    self.shared.main_ram[off + 2], self.shared.main_ram[off + 3],
+                    self.shared.main_ram[off],
+                    self.shared.main_ram[off + 1],
+                    self.shared.main_ram[off + 2],
+                    self.shared.main_ram[off + 3],
                 ])
             }
             0x03 => {
@@ -190,16 +286,16 @@ impl<'a> CpuBus for Bus9<'a> {
                     None => return 0,
                 };
                 let off = wram_addr_in_view(view.len(), addr) & !3;
-                u32::from_le_bytes([
-                    view[off], view[off + 1], view[off + 2], view[off + 3],
-                ])
+                u32::from_le_bytes([view[off], view[off + 1], view[off + 2], view[off + 3]])
             }
             0x04 => super::io_arm9::read_io32_mut(self.shared, addr),
             0x05 => {
                 let off = (addr as usize) & 0x7FC;
                 u32::from_le_bytes([
-                    self.shared.palette[off], self.shared.palette[off + 1],
-                    self.shared.palette[off + 2], self.shared.palette[off + 3],
+                    self.shared.palette[off],
+                    self.shared.palette[off + 1],
+                    self.shared.palette[off + 2],
+                    self.shared.palette[off + 3],
                 ])
             }
             0x06 => {
@@ -213,16 +309,28 @@ impl<'a> CpuBus for Bus9<'a> {
             0x07 => {
                 let off = (addr as usize) & 0x7FC;
                 u32::from_le_bytes([
-                    self.shared.oam[off], self.shared.oam[off + 1],
-                    self.shared.oam[off + 2], self.shared.oam[off + 3],
+                    self.shared.oam[off],
+                    self.shared.oam[off + 1],
+                    self.shared.oam[off + 2],
+                    self.shared.oam[off + 3],
                 ])
             }
             0xFF => {
                 if addr & 0xFFFF_F000 == 0xFFFF_0000 {
                     let off = (addr as usize) & 0xFFC;
+                    if self.mem.has_synthetic_bios() {
+                        if !self.mem.low_vectors_are_blank() && off < ITCM_SIZE {
+                            return self.mem.read_itcm32(off);
+                        }
+                        if let Some(word) = synthetic_irq_vector_word(off) {
+                            return word;
+                        }
+                    }
                     u32::from_le_bytes([
-                        self.mem.bios[off], self.mem.bios[off + 1],
-                        self.mem.bios[off + 2], self.mem.bios[off + 3],
+                        self.mem.bios[off],
+                        self.mem.bios[off + 1],
+                        self.mem.bios[off + 2],
+                        self.mem.bios[off + 3],
                     ])
                 } else {
                     0
@@ -267,19 +375,19 @@ impl<'a> CpuBus for Bus9<'a> {
             0x05 => {
                 let off = (addr as usize) & 0x7FE;
                 let b = val.to_le_bytes();
-                self.shared.palette[off]     = b[0];
+                self.shared.palette[off] = b[0];
                 self.shared.palette[off + 1] = b[1];
             }
             0x06 => {
                 let a = addr & !1;
                 let b = val.to_le_bytes();
-                self.shared.vram.cpu_write_arm9(a,     b[0]);
+                self.shared.vram.cpu_write_arm9(a, b[0]);
                 self.shared.vram.cpu_write_arm9(a + 1, b[1]);
             }
             0x07 => {
                 let off = (addr as usize) & 0x7FE;
                 let b = val.to_le_bytes();
-                self.shared.oam[off]     = b[0];
+                self.shared.oam[off] = b[0];
                 self.shared.oam[off + 1] = b[1];
             }
             _ => {
@@ -295,7 +403,7 @@ impl<'a> CpuBus for Bus9<'a> {
             let off = addr.wrapping_sub(self.dtcm_region.base) as usize & !3;
             let off = off % DTCM_SIZE;
             let b = val.to_le_bytes();
-            self.mem.dtcm[off]     = b[0];
+            self.mem.dtcm[off] = b[0];
             self.mem.dtcm[off + 1] = b[1];
             self.mem.dtcm[off + 2] = b[2];
             self.mem.dtcm[off + 3] = b[3];
@@ -305,7 +413,7 @@ impl<'a> CpuBus for Bus9<'a> {
             let off = (addr as usize) & !3;
             let off = off % ITCM_SIZE;
             let b = val.to_le_bytes();
-            self.mem.itcm[off]     = b[0];
+            self.mem.itcm[off] = b[0];
             self.mem.itcm[off + 1] = b[1];
             self.mem.itcm[off + 2] = b[2];
             self.mem.itcm[off + 3] = b[3];
@@ -316,7 +424,7 @@ impl<'a> CpuBus for Bus9<'a> {
             0x02 => {
                 let off = (addr as usize) & 0x3F_FFFC;
                 let b = val.to_le_bytes();
-                self.shared.main_ram[off]     = b[0];
+                self.shared.main_ram[off] = b[0];
                 self.shared.main_ram[off + 1] = b[1];
                 self.shared.main_ram[off + 2] = b[2];
                 self.shared.main_ram[off + 3] = b[3];
@@ -325,7 +433,7 @@ impl<'a> CpuBus for Bus9<'a> {
                 if let Some(view) = self.shared.arm9_wram_view_mut() {
                     let off = wram_addr_in_view(view.len(), addr) & !3;
                     let b = val.to_le_bytes();
-                    view[off]     = b[0];
+                    view[off] = b[0];
                     view[off + 1] = b[1];
                     view[off + 2] = b[2];
                     view[off + 3] = b[3];
@@ -339,7 +447,10 @@ impl<'a> CpuBus for Bus9<'a> {
                         if irq {
                             use crate::interrupt::Irq;
                             let irq_bit = match ch {
-                                0 => Irq::Dma0, 1 => Irq::Dma1, 2 => Irq::Dma2, _ => Irq::Dma3,
+                                0 => Irq::Dma0,
+                                1 => Irq::Dma1,
+                                2 => Irq::Dma2,
+                                _ => Irq::Dma3,
                             };
                             self.shared.irq9.request(irq_bit);
                         }
@@ -347,14 +458,19 @@ impl<'a> CpuBus for Bus9<'a> {
                     super::io_arm9::Write32Effect::FireGxFifoDma => {
                         // Fire any ARM9 DMA channel armed for the GxFifo
                         // start mode. The carry-over from Phase 4.
-                        let channels = self.shared.dma9
+                        let channels = self
+                            .shared
+                            .dma9
                             .channels_for_timing(crate::dma::DmaTiming::GxFifo);
                         for ch in channels {
                             let irq = self.run_dma(ch);
                             if irq {
                                 use crate::interrupt::Irq;
                                 let irq_bit = match ch {
-                                    0 => Irq::Dma0, 1 => Irq::Dma1, 2 => Irq::Dma2, _ => Irq::Dma3,
+                                    0 => Irq::Dma0,
+                                    1 => Irq::Dma1,
+                                    2 => Irq::Dma2,
+                                    _ => Irq::Dma3,
                                 };
                                 self.shared.irq9.request(irq_bit);
                             }
@@ -366,17 +482,23 @@ impl<'a> CpuBus for Bus9<'a> {
             0x05 => {
                 let off = (addr as usize) & 0x7FC;
                 let b = val.to_le_bytes();
-                for i in 0..4 { self.shared.palette[off + i] = b[i]; }
+                for i in 0..4 {
+                    self.shared.palette[off + i] = b[i];
+                }
             }
             0x06 => {
                 let a = addr & !3;
                 let b = val.to_le_bytes();
-                for i in 0..4 { self.shared.vram.cpu_write_arm9(a + i as u32, b[i]); }
+                for i in 0..4 {
+                    self.shared.vram.cpu_write_arm9(a + i as u32, b[i]);
+                }
             }
             0x07 => {
                 let off = (addr as usize) & 0x7FC;
                 let b = val.to_le_bytes();
-                for i in 0..4 { self.shared.oam[off + i] = b[i]; }
+                for i in 0..4 {
+                    self.shared.oam[off + i] = b[i];
+                }
             }
             _ => {}
         }
@@ -395,7 +517,12 @@ mod tests {
     #[test]
     fn test_main_ram_round_trip() {
         let (mut mem, mut shared) = fresh();
-        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
         bus.write32(0x0200_1000, 0xDEAD_BEEF);
         assert_eq!(bus.read32(0x0200_1000), 0xDEAD_BEEF);
     }
@@ -403,7 +530,12 @@ mod tests {
     #[test]
     fn test_main_ram_mirrors() {
         let (mut mem, mut shared) = fresh();
-        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
         bus.write32(0x0200_0000, 0xAABB_CCDD);
         // 0x02400000 is +4MB and should mirror the same 4MB.
         assert_eq!(bus.read32(0x0240_0000), 0xAABB_CCDD);
@@ -414,7 +546,10 @@ mod tests {
         let (mut mem, mut shared) = fresh();
         // 64 KB ITCM window — physical ITCM is still 32 KB, so the second
         // 32 KB of the window mirrors the first.
-        let itcm = TcmRegion { base: 0, size_bytes: 64 * 1024 };
+        let itcm = TcmRegion {
+            base: 0,
+            size_bytes: 64 * 1024,
+        };
         let mut bus = Bus9::new(&mut mem, &mut shared, itcm, TcmRegion::disabled());
         bus.write32(0x0000_0010, 0x1234_5678);
         assert_eq!(bus.read32(0x0000_0010), 0x1234_5678);
@@ -425,10 +560,76 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_calico_irq_vector_fetch_points_to_irq_literal() {
+        let (mut mem, mut shared) = fresh();
+        let ldr = 0xE59F_F010u32.to_le_bytes();
+        for off in (0..=0x14).step_by(4) {
+            mem.itcm[off..off + 4].copy_from_slice(&ldr);
+        }
+        mem.itcm[0x18..0x1C].copy_from_slice(&0x01FF_84F0u32.to_le_bytes());
+        mem.itcm[0x2C..0x30].copy_from_slice(&0x01FF_8580u32.to_le_bytes());
+
+        let itcm = TcmRegion {
+            base: 0,
+            size_bytes: 32 * 1024,
+        };
+        let mut bus = Bus9::new(&mut mem, &mut shared, itcm, TcmRegion::disabled());
+
+        assert_eq!(bus.read32(0x0000_0018), 0xE59F_F00C);
+        assert_eq!(bus.read32(0x0000_002C), 0x01FF_8580);
+    }
+
+    #[test]
+    fn test_shifted_compact_calico_irq_vector_fetch_points_to_irq_literal() {
+        let (mut mem, mut shared) = fresh();
+        let ldr = 0xE59F_F010u32.to_le_bytes();
+        for off in (0x18..=0x2C).step_by(4) {
+            mem.itcm[off..off + 4].copy_from_slice(&ldr);
+        }
+        mem.itcm[0x30..0x34].copy_from_slice(&0x01FF_84F0u32.to_le_bytes());
+        mem.itcm[0x44..0x48].copy_from_slice(&0x01FF_8580u32.to_le_bytes());
+
+        let itcm = TcmRegion {
+            base: 0,
+            size_bytes: 32 * 1024,
+        };
+        let mut bus = Bus9::new(&mut mem, &mut shared, itcm, TcmRegion::disabled());
+
+        assert_eq!(bus.read32(0x0000_0018), 0xE59F_F024);
+        assert_eq!(bus.read32(0x0000_0044), 0x01FF_8580);
+    }
+
+    #[test]
+    fn test_calico_branch_table_irq_vector_fetch_points_to_irq_stub() {
+        let (mut mem, mut shared) = fresh();
+        mem.itcm[0x18..0x1C].copy_from_slice(&0xEA7F_E005u32.to_le_bytes());
+        let ldr = 0xE59F_F010u32.to_le_bytes();
+        for off in (0x20..=0x34).step_by(4) {
+            mem.itcm[off..off + 4].copy_from_slice(&ldr);
+        }
+        mem.itcm[0x4C..0x50].copy_from_slice(&0x01FF_8580u32.to_le_bytes());
+
+        let itcm = TcmRegion {
+            base: 0,
+            size_bytes: 32 * 1024,
+        };
+        let mut bus = Bus9::new(&mut mem, &mut shared, itcm, TcmRegion::disabled());
+
+        assert_eq!(bus.read32(0x0000_0018), 0xEA00_0005);
+        assert_eq!(bus.read32(0x0000_0034), 0xE59F_F010);
+        assert_eq!(bus.read32(0x0000_004C), 0x01FF_8580);
+    }
+
+    #[test]
     fn test_vram_byte_write_updates_lcdc_bank() {
         let (mut mem, mut shared) = fresh();
         shared.vram.write_cnt(crate::vram::BankId::A, 0x80);
-        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
 
         bus.write8(0x0680_0080, 0x7B);
 
@@ -438,7 +639,10 @@ mod tests {
     #[test]
     fn test_dtcm_at_high_base() {
         let (mut mem, mut shared) = fresh();
-        let dtcm = TcmRegion { base: 0x027C_0000, size_bytes: 16 * 1024 };
+        let dtcm = TcmRegion {
+            base: 0x027C_0000,
+            size_bytes: 16 * 1024,
+        };
         let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), dtcm);
         bus.write32(0x027C_0000, 0xCAFEBABE);
         assert_eq!(bus.read32(0x027C_0000), 0xCAFEBABE);
@@ -449,7 +653,12 @@ mod tests {
     #[test]
     fn test_wram_visible_in_mode_0() {
         let (mut mem, mut shared) = fresh();
-        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
         bus.write32(0x0300_0010, 0xABCD_EF01);
         assert_eq!(bus.read32(0x0300_0010), 0xABCD_EF01);
     }
@@ -458,7 +667,12 @@ mod tests {
     fn test_wram_invisible_in_mode_3() {
         let (mut mem, mut shared) = fresh();
         shared.wramcnt = 3;
-        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
         bus.write32(0x0300_0000, 0xDEAD);
         // Reads return 0 (open bus stub) when ARM9 has no WRAM mapping
         assert_eq!(bus.read32(0x0300_0000), 0);
@@ -468,7 +682,45 @@ mod tests {
     fn test_high_vector_bios_read() {
         let mut mem = Arm9Memory::new(Some(vec![0xAB; 4096]));
         let mut shared = SharedState::new();
-        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
         assert_eq!(bus.read32(0xFFFF_0000), 0xABAB_ABAB);
+    }
+
+    #[test]
+    fn test_synthetic_high_vectors_use_installed_itcm_vectors() {
+        let (mut mem, mut shared) = fresh();
+        mem.itcm[0x18..0x1C].copy_from_slice(&0xE59F_F00Cu32.to_le_bytes());
+
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
+
+        assert_eq!(bus.read32(0xFFFF_0018), 0xE59F_F00C);
+    }
+
+    #[test]
+    fn test_synthetic_high_vector_null_handler_path_acks_irq() {
+        let (mut mem, mut shared) = fresh();
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion::disabled(),
+            TcmRegion::disabled(),
+        );
+
+        assert_eq!(bus.read32(0xFFFF_001C), 0xE59F_0028);
+        assert_eq!(bus.read32(0xFFFF_0028), 0x0AFF_FFFF);
+        assert_eq!(bus.read32(0xFFFF_0034), 0xE59F_0018);
+        assert_eq!(bus.read32(0xFFFF_0044), 0xE580_1004);
+        assert_eq!(bus.read32(0xFFFF_0050), 0x02FF_3FFC);
+        assert_eq!(bus.read32(0xFFFF_0054), 0x0400_0210);
     }
 }

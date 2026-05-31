@@ -146,13 +146,11 @@ impl AuxSpi {
     pub fn read_cnt(&self) -> u16 { self.cnt & !(1 << 7) }
 
     pub fn write_cnt(&mut self, val: u16) {
-        let was_held = self.cnt & (1 << 6) != 0;
-        self.cnt = val;
-        let now_held = val & (1 << 6) != 0;
-        // CS deassert: reset state.
-        if was_held && !now_held {
+        let selected = val & (1 << 15) != 0 && val & (1 << 13) != 0;
+        if !selected {
             self.phase = Phase::Idle;
         }
+        self.cnt = val;
     }
 
     pub fn read_data(&self) -> u8 { self.data_reg }
@@ -204,6 +202,13 @@ impl AuxSpi {
     fn handle_command(&mut self, cmd: u8) -> u8 {
         let addr_bytes = self.kind.addr_bytes();
         match cmd {
+            0x00 => {
+                // Several old homebrew save routines use a single dummy byte
+                // with CS released before/after status polling. Returning
+                // status keeps the WIP bit meaningful instead of trapping
+                // them on an invalid-command 0xFF.
+                self.status
+            }
             0x03 => { // READ
                 self.phase = Phase::Addr { cmd, remaining: addr_bytes, addr: 0 };
                 0
@@ -289,17 +294,28 @@ impl AuxSpi {
                 0
             }
             0x05 => {
-                let s = self.status;
+                let s = self.read_status();
                 self.phase = Phase::Data { cmd, addr: 0 };
                 s
             }
             0x9F => {
-                let id: [u8; 3] = [0xC2, 0x11, 0x05]; // Macronix-style placeholder
-                let idx = (addr as usize) % 3;
+                let id: [u8; 3] = if self.kind.is_flash() {
+                    [0xC2, 0x11, 0x05] // Macronix-style placeholder
+                } else {
+                    [0xFF, 0xFF, 0xFF]
+                };
+                let idx = (addr as usize).min(2);
                 self.phase = Phase::Data { cmd, addr: addr.wrapping_add(1) };
                 id[idx]
             }
             _ => 0xFF,
+        }
+    }
+
+    fn read_status(&self) -> u8 {
+        match self.kind {
+            BackupKind::Eeprom512B => 0xF0 | (self.status & 0x03),
+            _ => self.status,
         }
     }
 }
@@ -383,6 +399,34 @@ mod tests {
         issue(&mut aux, &[0x06]); // WRITE_ENABLE
         let out = issue(&mut aux, &[0x05, 0]);
         assert_eq!(out[1] & 0x02, 0x02, "WEL bit should be set after 0x06");
+    }
+
+    #[test]
+    fn test_cnt_deselect_ends_transaction_between_libnds_commands() {
+        let mut aux = AuxSpi::new();
+        aux.set_backup_kind(BackupKind::Eeprom64K);
+        let selected = (1 << 15) | (1 << 13) | (1 << 6);
+
+        aux.write_cnt(selected);
+        aux.write_data(0x05);
+        aux.write_data(0);
+        assert_eq!(aux.read_data(), 0x00);
+        aux.write_cnt(1 << 6);
+
+        aux.write_cnt(selected);
+        aux.write_data(0x9F);
+        for _ in 0..3 {
+            aux.write_data(0);
+            assert_eq!(aux.read_data(), 0xFF);
+        }
+    }
+
+    #[test]
+    fn test_eeprom512_status_matches_old_libnds_type_probe() {
+        let mut aux = AuxSpi::new();
+        aux.set_backup_kind(BackupKind::Eeprom512B);
+        let out = issue(&mut aux, &[0x05, 0]);
+        assert_eq!(out[1], 0xF0);
     }
 
     #[test]

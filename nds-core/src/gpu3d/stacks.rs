@@ -267,11 +267,11 @@ impl MatrixStacks {
         }
     }
 
-    /// `clip = projection × position`. Used per vertex during the geometry
+    /// `clip = position × projection`. Used per vertex during the geometry
     /// pipeline. We cache neither — recomputed on every `VTX_*` because
     /// matrices change often relative to vertices per typical game patterns.
     pub fn clip_matrix(&self) -> Matrix {
-        self.projection.mul_matrix(&self.position)
+        self.position.mul_matrix(&self.projection)
     }
 }
 
@@ -290,7 +290,7 @@ mod tests {
         s.set_mode(MtxMode::Projection);
         let m = Matrix::identity().mul_translate(3 * ONE, 0, 0);
         s.load(m);
-        assert_eq!(s.projection.at(0, 3), 3 * ONE);
+        assert_eq!(s.projection.at(3, 0), 3 * ONE);
         // mult by T(2,0,0) → total translate (5,0,0)
         s.mult(Matrix::identity().mul_translate(2 * ONE, 0, 0));
         let r = s.projection.mul_vec4([0, 0, 0, ONE]);
@@ -303,8 +303,8 @@ mod tests {
         s.set_mode(MtxMode::PosVector);
         s.mult(Matrix::identity().mul_translate(7 * ONE, 0, 0));
         // Both position and vector got the multiply applied.
-        assert_eq!(s.position.at(0, 3), 7 * ONE);
-        assert_eq!(s.vector.at(0, 3), 7 * ONE);
+        assert_eq!(s.position.at(3, 0), 7 * ONE);
+        assert_eq!(s.vector.at(3, 0), 7 * ONE);
     }
 
     #[test]
@@ -378,14 +378,14 @@ mod tests {
     }
 
     #[test]
-    fn test_clip_matrix_is_proj_times_pos() {
+    fn test_clip_matrix_is_pos_times_proj() {
         let mut s = MatrixStacks::new();
         s.set_mode(MtxMode::Projection);
         s.load(Matrix::identity().mul_scale(2 * ONE, 2 * ONE, 2 * ONE));
         s.set_mode(MtxMode::Position);
         s.load(Matrix::identity().mul_translate(ONE, 0, 0));
-        // clip = proj × pos applied to origin: translate first → (1,0,0,1),
-        // then scale by 2 → (2,0,0,1).
+        // Row-vector clip = pos × proj applied to origin: translate first,
+        // then scale by 2.
         let clip = s.clip_matrix();
         let r = clip.mul_vec4([0, 0, 0, ONE]);
         assert_eq!(r[0], 2 * ONE);

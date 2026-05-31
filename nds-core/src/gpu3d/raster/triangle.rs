@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn test_solid_red_triangle_writes_red_pixels() {
         let mut r = Rasterizer::new();
-        r.disp3dcnt = 1; // 3D enable
+        r.disp3dcnt = 0;
         let p = poly(vec![
             sv(10, 10, 0x001F),   // red
             sv(50, 10, 0x001F),
@@ -353,9 +353,9 @@ mod tests {
     }
 
     #[test]
-    fn test_disabled_3d_produces_clear_only() {
+    fn test_disp3dcnt_bit0_does_not_gate_rasterization() {
         let mut r = Rasterizer::new();
-        // 3D disable bit clear.
+        // DISP3DCNT bit 0 is texture mapping enable, not a 3D enable bit.
         r.disp3dcnt = 0;
         let p = poly(vec![
             sv(10, 10, 0x001F),
@@ -363,10 +363,8 @@ mod tests {
             sv(30, 30, 0x001F),
         ]);
         r.render_frame(&[p], None);
-        // No 3D pixels should be written — all should be clear (0).
-        for &px in &r.framebuffer {
-            assert_eq!(px & 0x7FFF, 0);
-        }
+        let idx = (15 * FB_WIDTH) + 30;
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x001F);
     }
 
     #[test]
