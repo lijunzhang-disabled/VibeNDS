@@ -92,7 +92,7 @@ impl Nds {
         let cart = Cart::from_rom(rom).map_err(CartLoadError::Header)?;
         let header = cart.header.as_ref().expect("just parsed").clone();
         let rom_bytes = cart.rom.as_ref().expect("just parsed").clone();
-        cart::direct_boot::apply(&mut self.cpu9, &mut self.cpu7, &mut self.shared, &header, &rom_bytes)
+        cart::direct_boot::apply(&mut self.cpu9, &mut self.cpu7, &mut self.mem7, &mut self.shared, &header, &rom_bytes)
             .map_err(CartLoadError::DirectBoot)?;
         self.cart = cart;
         self.direct_boot = true;
@@ -825,6 +825,21 @@ mod tests {
                     x, y, nds.framebuffer_top[y * SCREEN_WIDTH + x]);
             }
         }
+    }
+
+    #[test]
+    fn test_direct_vram_display_mode_renders_lcdc_block() {
+        let mut nds = Nds::new(None, None);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.engine_a.dispcnt = 2 << 16;
+        nds.shared.vram.write_cnt(crate::vram::BankId::A, 0x80);
+        nds.shared.vram.cpu_write_arm9(0x0680_0000, 0x1F);
+        nds.shared.vram.cpu_write_arm9(0x0680_0001, 0x00);
+
+        nds.run_frame();
+
+        assert_eq!(nds.framebuffer_top[0], 0x001F);
     }
 
     #[test]

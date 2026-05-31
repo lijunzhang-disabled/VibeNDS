@@ -253,9 +253,10 @@ impl<'a> CpuBus for Bus9<'a> {
                 }
             }
             0x04 => super::io_arm9::write_io8(self.shared, addr, val),
-            // Per NDS hardware: 8-bit writes to palette / VRAM / OAM are
-            // dropped — only halfword/word writes update those regions.
-            0x05 | 0x06 | 0x07 => {}
+            // Palette / OAM byte writes are dropped. VRAM byte writes are
+            // valid and are used by small homebrew framebuffer renderers.
+            0x05 | 0x07 => {}
+            0x06 => self.shared.vram.cpu_write_arm9(addr, val),
             _ => {}
         }
     }
@@ -421,6 +422,17 @@ mod tests {
         assert_eq!(bus.read32(0x0000_8010), 0x1234_5678);
         // Outside the window — falls through to other decoders (open bus)
         assert_eq!(bus.read32(0x0001_0010), 0);
+    }
+
+    #[test]
+    fn test_vram_byte_write_updates_lcdc_bank() {
+        let (mut mem, mut shared) = fresh();
+        shared.vram.write_cnt(crate::vram::BankId::A, 0x80);
+        let mut bus = Bus9::new(&mut mem, &mut shared, TcmRegion::disabled(), TcmRegion::disabled());
+
+        bus.write8(0x0680_0080, 0x7B);
+
+        assert_eq!(bus.shared.vram.read_lcdc(0x80), 0x7B);
     }
 
     #[test]

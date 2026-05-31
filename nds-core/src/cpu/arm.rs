@@ -54,11 +54,13 @@ impl Cpu {
                     // QADD / QSUB / QDADD / QDSUB (ARMv5TE)
                     if self.is_arm9 { self.arm_q_arith(opcode) }
                     else { self.arm_undefined(opcode) }
-                } else if (bits_7_4 & 0x9) == 0x8 && (bits_7_4 & 0x1) == 0x0
-                    && (bits_27_20 & 0xE0) == 0
-                    && bits_27_20 & 0x10 != 0
+                } else if (bits_7_4 & 0x9) == 0x8
+                    && (bits_27_20 & 0xF9) == 0x10
                 {
-                    // DSP multiply family: bit 7 = 1, bit 4 = 0, bits[27:24] = 0x1
+                    // DSP multiply family: bit 7 = 1, bit 4 = 0,
+                    // bits[27:20] are 0x10/0x12/0x14/0x16. Ordinary
+                    // shifted-register data-processing instructions also use
+                    // bit 7, so keep the high opcode mask tight.
                     if self.is_arm9 { self.arm_dsp_multiply(opcode) }
                     else { self.arm_undefined(opcode) }
                 } else if (bits_7_4 & 0x9) == 0x9 && (bits_27_20 & 0xE0) == 0 {
@@ -352,11 +354,6 @@ impl Cpu {
         if l {
             let val = if b {
                 bus.read8(addr) as u32
-            } else if self.is_arm9 {
-                // ARMv5: misaligned LDR raises a data abort or returns the
-                // word at the aligned address (no rotate). We follow the
-                // "force-aligned" behavior melonDS uses.
-                bus.read32(addr & !3)
             } else {
                 let aligned = addr & !3;
                 let val = bus.read32(aligned);
@@ -589,7 +586,7 @@ impl Cpu {
             addr = addr.wrapping_add(4);
         }
 
-        if w && !(l && rlist & (1 << rn) != 0) {
+        if w && (!l || !rn_in_list || rn_is_lowest) {
             self.regs[rn as usize] = final_addr;
         }
 
@@ -916,12 +913,59 @@ mod tests {
     }
 
     #[test]
+    fn test_arm9_unaligned_ldr_rotates_aligned_word() {
+        let (mut cpu, mut bus) = arm9_with(0x100);
+        bus.mem[0x40..0x44].copy_from_slice(&0xFF00_8F00u32.to_le_bytes());
+        cpu.regs[1] = 0x40;
+
+        cpu.execute_arm(&mut bus, 0xE591_0002); // LDR R0, [R1, #2]
+
+        assert_eq!(cpu.regs[0], 0x8F00_FF00);
+    }
+
+    #[test]
+    fn test_ldm_writeback_when_base_is_lowest_loaded_register() {
+        let (mut cpu, mut bus) = arm9_with(0x100);
+        bus.mem[0x40..0x44].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+        bus.mem[0x44..0x48].copy_from_slice(&0x5566_7788u32.to_le_bytes());
+        cpu.regs[3] = 0x3C;
+
+        cpu.execute_arm(&mut bus, 0xE9B3_0028); // LDMIB R3!, {R3,R5}
+
+        assert_eq!(cpu.regs[3], 0x44);
+        assert_eq!(cpu.regs[5], 0x5566_7788);
+    }
+
+    #[test]
+    fn test_ldm_base_in_list_not_lowest_keeps_loaded_value() {
+        let (mut cpu, mut bus) = arm9_with(0x100);
+        bus.mem[0x40..0x44].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+        bus.mem[0x44..0x48].copy_from_slice(&0x5566_7788u32.to_le_bytes());
+        cpu.regs[3] = 0x3C;
+
+        cpu.execute_arm(&mut bus, 0xE9B3_000C); // LDMIB R3!, {R2,R3}
+
+        assert_eq!(cpu.regs[2], 0x1122_3344);
+        assert_eq!(cpu.regs[3], 0x5566_7788);
+    }
+
+    #[test]
     fn test_arm_multiply() {
         let (mut cpu, mut bus) = arm7_with(0x100);
         cpu.regs[0] = 7;
         cpu.regs[1] = 6;
         cpu.execute_arm(&mut bus, 0xE002_0190); // MUL R2, R0, R1
         assert_eq!(cpu.regs[2], 42);
+    }
+
+    #[test]
+    fn test_arm9_mov_shifted_register_not_dsp_multiply() {
+        let (mut cpu, mut bus) = arm9_with(0x100);
+        cpu.regs[0] = 0x0200_81F4;
+        cpu.regs[3] = 1;
+        cpu.execute_arm(&mut bus, 0xE1A0_3083); // MOV R3, R3, LSL #1
+        assert_eq!(cpu.regs[0], 0x0200_81F4);
+        assert_eq!(cpu.regs[3], 2);
     }
 
     // ─── ARMv5TE additions (ARM9 only) ───────────────────────────

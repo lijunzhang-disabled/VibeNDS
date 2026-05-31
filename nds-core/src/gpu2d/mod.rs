@@ -133,8 +133,18 @@ pub fn render_scanline(
         return;
     }
 
-    // Direct VRAM display (mode 2) and Main Memory display (mode 3) are
-    // wired in later phases; for now fall through to normal compositing.
+    if engine.which == Which::A && display_mode == 2 {
+        let block = (engine.dispcnt >> 18) & 0x3;
+        let base = block * 0x2_0000;
+        let line_base = base + line as u32 * 256 * 2;
+        for x in 0..256 {
+            framebuffer[row_start + x] = vram.read_lcdc_u16(line_base + x as u32 * 2) & 0x7FFF;
+        }
+        return;
+    }
+
+    // Main Memory display (mode 3) is wired in later phases; for now fall
+    // through to normal compositing.
 
     // Collect BG layers active in this mode.
     let (text_bgs, affine_bgs): (&[usize], &[usize]) = match mode {

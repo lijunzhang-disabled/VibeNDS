@@ -357,6 +357,25 @@ impl VramRouter {
         lo | (hi << 8)
     }
 
+    pub fn read_lcdc(&self, addr: u32) -> u8 {
+        for bank in &self.banks {
+            if let VramTarget::Lcdc { lcdc_offset } = bank.target {
+                let span = bank.id.size() as u32;
+                if addr >= lcdc_offset && addr < lcdc_offset + span {
+                    return bank.data[(addr - lcdc_offset) as usize];
+                }
+            }
+        }
+        0
+    }
+
+    pub fn read_lcdc_u16(&self, addr: u32) -> u16 {
+        let a = addr & !1;
+        let lo = self.read_lcdc(a) as u16;
+        let hi = self.read_lcdc(a + 1) as u16;
+        lo | (hi << 8)
+    }
+
     /// Read one byte from the 512 KB texture image target. The 3D engine's
     /// texture unit calls this per-texel during rasterization. Banks A-D
     /// can each back a 128 KB slot (selected by their VRAMCNT offset).

@@ -195,20 +195,21 @@ impl Cp15 {
     }
 
     fn recompute_tcm(&mut self) {
-        // TCM register format: `[31:12] = base address, [5:1] = size_field, [0] = enable`.
+        // TCM register format: `[31:12] = base address, [5:1] = size_field`.
+        // Existing startup code commonly writes even values such as 0x1E to
+        // mirror ITCM across the low address space, so bit 0 is not an enable
+        // gate here.
         // Real size = 512 << size_field bytes (size_field=3 → 4 KB, =5 → 32 KB, etc.).
         // ITCM's base is fixed at 0 on this part — the hardware ignores the
         // base bits and mirrors the I-TCM across `[0, itcm.size)`. DTCM's
         // base is honored.
-        let dtcm_enable = self.dtcm_raw & 1 != 0;
-        let dtcm_size = if dtcm_enable {
+        let dtcm_size = if self.dtcm_raw != 0 {
             let sf = (self.dtcm_raw >> 1) & 0x1F;
             if sf > 31 { 0 } else { 512u32.wrapping_shl(sf) }
         } else { 0 };
         let dtcm_base = self.dtcm_raw & 0xFFFF_F000;
 
-        let itcm_enable = self.itcm_raw & 1 != 0;
-        let itcm_size = if itcm_enable {
+        let itcm_size = if self.itcm_raw != 0 {
             let sf = (self.itcm_raw >> 1) & 0x1F;
             if sf > 31 { 0 } else { 512u32.wrapping_shl(sf) }
         } else { 0 };
@@ -242,6 +243,14 @@ mod tests {
         assert!(cp.itcm.contains(0));
         assert!(cp.itcm.contains(0x7FFF));
         assert!(!cp.itcm.contains(0x8000));
+    }
+
+    #[test]
+    fn test_itcm_even_raw_value_enables_low_mirror() {
+        let mut cp = Cp15::new();
+        cp.write(9, 1, 0, 1, 0x1E);
+        assert_eq!(cp.itcm.size_bytes, 16 * 1024 * 1024);
+        assert!(cp.itcm.contains(0x0080_3EBC));
     }
 
     #[test]
