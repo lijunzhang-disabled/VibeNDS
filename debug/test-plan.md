@@ -333,17 +333,15 @@ User-requested sweep order:
      was interpreted as a dummy byte for the previous command. EEPROM
      `RDID` now returns `0xFFFFFF` while flash chips keep the placeholder
      JEDEC ID path, matching libnds' type probe expectations.
-   - `filesystem/libfat/libfatdir` still reports
-     `fatInitDefault failure: terminating`. This is expected with the
-     current emulator setup because there is no DLDI-patched FAT block device
-     or mounted FAT image backing libfat yet. Modern libfat/libdvm reaches
-     the ARM9 block-device path, then talks to ARM7 over the Calico PXI
-     block-device channel; ARM7 only advertises a usable DLDI disk interface
-     when `_blkShelterDldi` has installed a real patched driver. The test ROM
-     currently contains only the DLDI stub, so this needs a real DLDI/FAT
-     backing implementation rather than another Slot-1 command tweak.
+   - `filesystem/libfat/libfatdir` still needs a ROM-level pass. The emulator
+     now has an initial DLDI/PXI block-device service that answers Calico
+     block-device channel requests for DLDI init, presence, sector reads, and
+     sector writes against a synthetic FAT16 image. Unit coverage verifies
+     sector-count exposure and boot-sector reads. The actual devkitPro
+     `libfatdir` ROM has not yet produced a successful root directory
+     listing, so keep this stage open.
    - Current core regression count after these fixes: `cargo test -p
-     nds-core` reports `323 passed; 0 failed`.
+     nds-core` reports `326 passed; 0 failed`.
 6. Homebrew games/demos — **first broad candidates tested**:
    - Shared startup fix: direct-boot/no-BIOS ARM9 IRQ delivery now
      acknowledges enabled pending IRQs when the libnds handler slot at

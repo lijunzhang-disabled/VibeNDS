@@ -257,7 +257,10 @@ fn decode_dma_reg(local: u32) -> Option<(usize, u32)> {
 
 /// FIFOSEND (32-bit write at 0x04000188).
 fn write_fifosend(shared: &mut SharedState, val: u32) {
-    if shared.ipc.write_send(Side::Arm9, val) {
+    let raise_arm7 = shared.ipc.write_send(Side::Arm9, val);
+    let hle_owned = super::dldi::has_pending_request(shared);
+    super::dldi::service_pxi(shared);
+    if raise_arm7 && !hle_owned {
         ipc::raise_recv_not_empty(&mut shared.irq7);
     }
 }

@@ -133,7 +133,7 @@ Current core regression suite:
 cargo test -p nds-core
 ```
 
-Latest recorded result: `323 passed; 0 failed`.
+Latest recorded result: `326 passed; 0 failed`.
 
 Manual/probe evidence gathered during the sweep:
 
@@ -156,9 +156,11 @@ Manual/probe evidence gathered during the sweep:
 
 ## Known Remaining Work
 
-- `filesystem/libfat/libfatdir` still reports
-  `fatInitDefault failure: terminating` because there is no real DLDI/FAT
-  block-device backing yet.
+- `filesystem/libfat/libfatdir` still needs a ROM-level pass. An
+  emulator-backed DLDI/PXI block-device path now exists with a synthetic
+  FAT16 image and unit coverage for init, sector-count exposure, and boot
+  sector reads, but the temporary devkitPro ROM probe has not yet produced a
+  successful root directory listing.
 - Spelunky DS reaches the title/menu screen, but the correct interaction
   sequence for entering gameplay still needs to be driven and verified.
 - Graphics results are smoke-level compatibility checks, not pixel-perfect

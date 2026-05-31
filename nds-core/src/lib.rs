@@ -340,6 +340,9 @@ impl Nds {
         if !self.shared.irq9.has_pending() {
             return;
         }
+        if self.mem9.has_installed_irq_vector() {
+            return;
+        }
         if self.main_ram32(0x02FF_3FFC) != 0 {
             return;
         }
@@ -701,6 +704,29 @@ mod tests {
             nds.mem9.dtcm[shadow_off + 3],
         ]);
         assert_eq!(shadow & Irq::VBlank.bit(), Irq::VBlank.bit());
+    }
+
+    #[test]
+    fn test_direct_boot_arm9_irq_with_itcm_vector_is_not_acked_by_fallback() {
+        let mut nds = Nds::new(None, None);
+        nds.direct_boot = true;
+        nds.cpu7.halted = true;
+
+        let nop = 0xE1A0_0000u32.to_le_bytes();
+        nds.shared.main_ram[0..4].copy_from_slice(&nop);
+        nds.mem9.itcm[0x18..0x1C].copy_from_slice(&0xE59F_F010u32.to_le_bytes());
+        nds.cpu9.cpsr = Psr::new(CpuMode::System);
+        nds.cpu9.cpsr.bits &= !(1 << 7);
+        nds.cpu9.regs[15] = 0x0200_0000;
+        nds.cpu9.pipeline_flushed = true;
+        nds.shared.irq9.write_ie(Irq::IpcSync.bit());
+        nds.shared.irq9.write_ime(1);
+        nds.shared.irq9.request(Irq::IpcSync);
+
+        nds.step_one();
+
+        assert_ne!(nds.shared.irq9.iflag & Irq::IpcSync.bit(), 0);
+        assert_eq!(nds.cpu9.irq_entries, 1);
     }
 
     /// Run a frame with VBlank IRQ enabled in DISPSTAT and IE on both CPUs.

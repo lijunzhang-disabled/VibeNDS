@@ -126,6 +126,11 @@ pub struct SharedState {
     pub slot1_command: [u8; 8],
     pub slot1_data: VecDeque<u32>,
 
+    /// Emulator-backed DLDI/FAT block-device image. Empty means lazily
+    /// initialize the default test volume on first DLDI access.
+    #[serde(with = "serde_bytes_vec")]
+    pub dldi_fat_image: Vec<u8>,
+
     /// 3D engine — matrix stacks + vertex pipeline + lighting + clipper +
     /// viewport transform + GXFIFO. ARM9-only.
     pub gpu3d: Engine3d,
@@ -171,6 +176,7 @@ impl SharedState {
             slot1_romctrl: 0,
             slot1_command: [0; 8],
             slot1_data: VecDeque::new(),
+            dldi_fat_image: Vec::new(),
             gpu3d: Engine3d::new(),
             math: MathUnit::new(),
             audio: Audio::new(),

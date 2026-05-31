@@ -93,6 +93,10 @@ impl Arm9Memory {
     fn low_vectors_are_blank(&self) -> bool {
         self.itcm[..0x18].iter().all(|&b| b == 0) && self.itcm[0x18..0x44].iter().all(|&b| b == 0)
     }
+
+    pub(crate) fn has_installed_irq_vector(&self) -> bool {
+        !self.low_vectors_are_blank()
+    }
 }
 
 fn synthetic_irq_vector_word(off: usize) -> Option<u32> {
