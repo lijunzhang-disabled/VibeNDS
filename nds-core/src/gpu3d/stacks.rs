@@ -123,46 +123,46 @@ impl MatrixStacks {
         }
     }
 
-    /// `MTX_MULT_4x4` (etc.) — hardware multiplies the current matrix by
-    /// the command matrix: `current = current * m`.
+    /// `MTX_MULT_4x4` (etc.) — hardware applies the command matrix before
+    /// the current matrix: `current = m * current`.
     pub fn mult(&mut self, m: Matrix) {
         match self.mode {
-            MtxMode::Projection => self.projection = self.projection.mul_matrix(&m),
-            MtxMode::Position => self.position = self.position.mul_matrix(&m),
+            MtxMode::Projection => self.projection = m.mul_matrix(&self.projection),
+            MtxMode::Position => self.position = m.mul_matrix(&self.position),
             MtxMode::PosVector => {
-                self.position = self.position.mul_matrix(&m);
-                self.vector = self.vector.mul_matrix(&m);
+                self.position = m.mul_matrix(&self.position);
+                self.vector = m.mul_matrix(&self.vector);
             }
-            MtxMode::Texture => self.texture = self.texture.mul_matrix(&m),
+            MtxMode::Texture => self.texture = m.mul_matrix(&self.texture),
         }
     }
 
-    /// `MTX_SCALE` — multiply by a scale matrix, except mode 2 updates
+    /// `MTX_SCALE` — pre-multiply by a scale matrix, except mode 2 updates
     /// only the position matrix so the directional matrix keeps light-vector
     /// lengths.
     pub fn scale(&mut self, sx: i32, sy: i32, sz: i32) {
         let m = Matrix::identity().mul_scale(sx, sy, sz);
         match self.mode {
-            MtxMode::Projection => self.projection = self.projection.mul_matrix(&m),
+            MtxMode::Projection => self.projection = m.mul_matrix(&self.projection),
             MtxMode::Position | MtxMode::PosVector => {
-                self.position = self.position.mul_matrix(&m);
+                self.position = m.mul_matrix(&self.position);
             }
-            MtxMode::Texture => self.texture = self.texture.mul_matrix(&m),
+            MtxMode::Texture => self.texture = m.mul_matrix(&self.texture),
         }
     }
 
-    /// `MTX_TRANS` — multiply the selected matrix/matrices by a
+    /// `MTX_TRANS` — pre-multiply the selected matrix/matrices by a
     /// translation matrix.
     pub fn translate(&mut self, tx: i32, ty: i32, tz: i32) {
         let m = Matrix::identity().mul_translate(tx, ty, tz);
         match self.mode {
-            MtxMode::Projection => self.projection = self.projection.mul_matrix(&m),
-            MtxMode::Position => self.position = self.position.mul_matrix(&m),
+            MtxMode::Projection => self.projection = m.mul_matrix(&self.projection),
+            MtxMode::Position => self.position = m.mul_matrix(&self.position),
             MtxMode::PosVector => {
-                self.position = self.position.mul_matrix(&m);
-                self.vector = self.vector.mul_matrix(&m);
+                self.position = m.mul_matrix(&self.position);
+                self.vector = m.mul_matrix(&self.vector);
             }
-            MtxMode::Texture => self.texture = self.texture.mul_matrix(&m),
+            MtxMode::Texture => self.texture = m.mul_matrix(&self.texture),
         }
     }
 
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mult_postmultiplies_current_matrix() {
+    fn test_mult_premultiplies_current_matrix() {
         let mut s = MatrixStacks::new();
         s.set_mode(MtxMode::Position);
         s.load(Matrix::identity().mul_translate(ONE, 0, 0));
@@ -364,14 +364,13 @@ mod tests {
 
         let r = s.position.mul_vec4([0, 0, 0, ONE]);
         assert_eq!(
-            r[0],
-            2 * ONE,
-            "C = translate * scale scales the existing translation"
+            r[0], ONE,
+            "C = scale * translate keeps translation unscaled"
         );
     }
 
     #[test]
-    fn test_scale_command_postmultiplies_current_matrix() {
+    fn test_scale_command_premultiplies_current_matrix() {
         let mut s = MatrixStacks::new();
         s.set_mode(MtxMode::Position);
         s.load(Matrix::identity().mul_translate(ONE, 0, 0));
@@ -379,7 +378,7 @@ mod tests {
         s.scale(2 * ONE, 2 * ONE, 2 * ONE);
 
         let r = s.position.mul_vec4([0, 0, 0, ONE]);
-        assert_eq!(r[0], 2 * ONE, "MTX_SCALE uses C = C * M");
+        assert_eq!(r[0], ONE, "MTX_SCALE uses C = M * C");
     }
 
     #[test]
@@ -392,8 +391,8 @@ mod tests {
 
         assert_eq!(s.position.at(0, 0), 2 * ONE);
         assert_eq!(s.vector.at(0, 0), 3 * ONE);
-        assert_eq!(s.position.at(3, 0), ONE);
-        assert_eq!(s.vector.at(3, 0), ONE);
+        assert_eq!(s.position.at(3, 0), 2 * ONE);
+        assert_eq!(s.vector.at(3, 0), 3 * ONE);
     }
 
     #[test]
