@@ -18,7 +18,8 @@ use super::vertex::{Polygon, Vertex};
 /// VIEWPORT command parameter unpacked into rectangle bounds.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Viewport {
-    /// Pixel-coord viewport rect (origin top-left). Default = full screen.
+    /// Pixel-coord viewport rect in DS 3D coordinates: X grows right, Y
+    /// grows upward, and Y=0 is the bottom scanline.
     pub x1: u8,
     pub y1: u8,
     pub x2: u8,
@@ -27,13 +28,17 @@ pub struct Viewport {
 
 impl Viewport {
     pub fn full_screen() -> Self {
-        Viewport { x1: 0, y1: 0, x2: 255, y2: 191 }
+        Viewport {
+            x1: 0,
+            y1: 0,
+            x2: 255,
+            y2: 191,
+        }
     }
 
     /// `VIEWPORT` command: `param = (y2 << 24) | (x2 << 16) | (y1 << 8) | x1`.
-    /// y coordinates are inverted relative to the screen on real hardware
-    /// (top of screen is y = 192 - 1). We treat the stored values as
-    /// screen-pixel coords with y growing downward to match our framebuffer.
+    /// Unlike the 2D engines, the DS 3D viewport uses lower-left origin:
+    /// y1 is the bottom edge and y2 is the top edge.
     pub fn from_param(param: u32) -> Self {
         let x1 = (param & 0xFF) as u8;
         let y1 = ((param >> 8) & 0xFF) as u8;
@@ -44,12 +49,20 @@ impl Viewport {
 
     /// Viewport pixel count (inclusive of both x1 and x2). For the
     /// full-screen viewport (x1=0, x2=255) this is 256.
-    pub fn width(&self) -> i32 { (self.x2 as i32 - self.x1 as i32 + 1).max(1) }
-    pub fn height(&self) -> i32 { (self.y2 as i32 - self.y1 as i32 + 1).max(1) }
+    pub fn width(&self) -> i32 {
+        (self.x2 as i32 - self.x1 as i32 + 1).max(1)
+    }
+    pub fn height(&self) -> i32 {
+        (self.y2 as i32 - self.y1 as i32 + 1).max(1)
+    }
     /// NDC-to-pixel scale span: NDC +1 maps to pixel `x2` (inclusive); NDC
     /// −1 maps to `x1`. This is `width - 1` for non-degenerate viewports.
-    pub fn span_x(&self) -> i32 { (self.x2 as i32 - self.x1 as i32).max(1) }
-    pub fn span_y(&self) -> i32 { (self.y2 as i32 - self.y1 as i32).max(1) }
+    pub fn span_x(&self) -> i32 {
+        (self.x2 as i32 - self.x1 as i32).max(1)
+    }
+    pub fn span_y(&self) -> i32 {
+        (self.y2 as i32 - self.y1 as i32).max(1)
+    }
 }
 
 /// One vertex in screen space, post-perspective-divide.
@@ -75,6 +88,14 @@ pub struct ScreenPolygon {
     pub attr: u32,
     pub tex_image_param: u32,
     pub palette_base: u16,
+    /// True when a negative signed screen-space area is the polygon's front
+    /// side. Triangle strips invert this for every second triangle on DS.
+    #[serde(default = "default_front_area_negative")]
+    pub front_area_negative: bool,
+}
+
+fn default_front_area_negative() -> bool {
+    true
 }
 
 /// Apply perspective divide + viewport transform to one clip-space vertex.
@@ -84,9 +105,7 @@ fn transform_vertex(v: &Vertex, vp: Viewport) -> ScreenVertex {
     let w_safe = if w == 0 { 1 } else { w };
 
     // Perspective divide. NDC components in [-ONE, +ONE].
-    let div = |v: i32| -> i32 {
-        (((v as i64) * (ONE as i64)) / (w_safe as i64)) as i32
-    };
+    let div = |v: i32| -> i32 { (((v as i64) * (ONE as i64)) / (w_safe as i64)) as i32 };
     let ndc_x = div(v.clip[0]);
     let ndc_y = div(v.clip[1]);
     let ndc_z = div(v.clip[2]);
@@ -104,8 +123,10 @@ fn transform_vertex(v: &Vertex, vp: Viewport) -> ScreenVertex {
 
     // screen_x_8 = vp.x1 + (ndc_x / ONE + 1) × (span_x / 2)  [all in 24.8]
     let screen_x = x1_8 + half_span_x + ((ndc_x as i64) * half_span_x) / (ONE as i64);
-    // Y is flipped because NDC +Y is up but screen +Y is down.
-    let screen_y = y1_8 + half_span_y + ((-ndc_y as i64) * half_span_y) / (ONE as i64);
+    // The hardware viewport Y coordinate is lower-left origin; convert the
+    // computed lower-left pixel coordinate into our top-left framebuffer.
+    let lower_y = y1_8 + half_span_y + ((ndc_y as i64) * half_span_y) / (ONE as i64);
+    let screen_y = (191 * 256) - lower_y;
 
     ScreenVertex {
         screen_x: screen_x as i32,
@@ -124,6 +145,7 @@ pub fn transform_polygon(p: &Polygon, vp: Viewport) -> ScreenPolygon {
         attr: p.attr,
         tex_image_param: p.tex_image_param,
         palette_base: p.palette_base,
+        front_area_negative: p.front_area_negative,
     }
 }
 
@@ -132,7 +154,11 @@ mod tests {
     use super::*;
 
     fn vtx(clip: [i32; 4]) -> Vertex {
-        Vertex { clip, color: 0x7FFF, tex: [0, 0] }
+        Vertex {
+            clip,
+            color: 0x7FFF,
+            tex: [0, 0],
+        }
     }
 
     #[test]
@@ -168,10 +194,10 @@ mod tests {
     fn test_perspective_divide_w_double_halves_screen_pos() {
         // Doubling w doubles distance — should pull screen point halfway
         // back to center.
-        let near = vtx([ONE, 0, 0, ONE]);                  // x = vp_w
-        let far  = vtx([ONE, 0, 0, 2 * ONE]);              // x = vp_w/2 + center
+        let near = vtx([ONE, 0, 0, ONE]); // x = vp_w
+        let far = vtx([ONE, 0, 0, 2 * ONE]); // x = vp_w/2 + center
         let s_near = transform_vertex(&near, Viewport::full_screen());
-        let s_far  = transform_vertex(&far,  Viewport::full_screen());
+        let s_far = transform_vertex(&far, Viewport::full_screen());
         // s_near.x ≈ 255 × 256 = 65280
         // s_far.x  ≈ 128 × 256 + (½ × 128 × 256) = 32768 + 16384 = 49152
         let center = 128 * 256;
@@ -179,12 +205,17 @@ mod tests {
         // s_far should be halfway between center and s_near.
         let halfway = (center + s_near.screen_x) / 2;
         // Within 1 pixel of the predicted halfway (rounding).
-        assert!((s_far.screen_x - halfway).abs() <= 256, "got {}, expected ≈ {}", s_far.screen_x, halfway);
+        assert!(
+            (s_far.screen_x - halfway).abs() <= 256,
+            "got {}, expected ≈ {}",
+            s_far.screen_x,
+            halfway
+        );
     }
 
     #[test]
     fn test_viewport_param_unpacks_correctly() {
-        // x1=10, y1=20, x2=100, y2=180
+        // x1=10, y1=20 bottom, x2=100, y2=180 top.
         let v = Viewport::from_param((180 << 24) | (100 << 16) | (20 << 8) | 10);
         assert_eq!(v.x1, 10);
         assert_eq!(v.y1, 20);
@@ -193,5 +224,16 @@ mod tests {
         // Inclusive widths: 100 - 10 + 1 = 91, 180 - 20 + 1 = 161.
         assert_eq!(v.width(), 91);
         assert_eq!(v.height(), 161);
+    }
+
+    #[test]
+    fn test_partial_viewport_y_uses_lower_left_origin() {
+        let vp = Viewport::from_param((180 << 24) | (100 << 16) | (20 << 8) | 10);
+
+        let top = transform_vertex(&vtx([0, ONE, 0, ONE]), vp);
+        let bottom = transform_vertex(&vtx([0, -ONE, 0, ONE]), vp);
+
+        assert_eq!(top.screen_y, (191 - 180) * 256);
+        assert_eq!(bottom.screen_y, (191 - 20) * 256);
     }
 }

@@ -36,8 +36,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-pub mod sample;
 pub mod mixer;
+pub mod sample;
 
 pub use sample::SampleFormat;
 
@@ -105,7 +105,11 @@ pub struct Channel {
 impl Channel {
     pub fn new() -> Self {
         Channel {
-            cnt: 0, sad: 0, tmr: 0, pnt: 0, len: 0,
+            cnt: 0,
+            sad: 0,
+            tmr: 0,
+            pnt: 0,
+            len: 0,
             active: false,
             pos_word: 0,
             pos_frac: 0,
@@ -119,16 +123,35 @@ impl Channel {
         }
     }
 
-    #[inline] pub fn volume_mul(&self) -> u32 { self.cnt & 0x7F }
-    #[inline] pub fn volume_div(&self) -> u32 {
+    #[inline]
+    pub fn volume_mul(&self) -> u32 {
+        self.cnt & 0x7F
+    }
+    #[inline]
+    pub fn volume_div(&self) -> u32 {
         match (self.cnt >> 8) & 0x3 {
-            0 => 0, 1 => 1, 2 => 2, _ => 4,
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 4,
         }
     }
-    #[inline] pub fn pan(&self) -> u32 { (self.cnt >> 16) & 0x7F }
-    #[inline] pub fn duty(&self) -> u32 { (self.cnt >> 24) & 0x7 }
-    #[inline] pub fn repeat(&self) -> RepeatMode { RepeatMode::from_bits(self.cnt >> 27) }
-    #[inline] pub fn format(&self) -> SampleFormat { SampleFormat::from_bits(self.cnt >> 29) }
+    #[inline]
+    pub fn pan(&self) -> u32 {
+        (self.cnt >> 16) & 0x7F
+    }
+    #[inline]
+    pub fn duty(&self) -> u32 {
+        (self.cnt >> 24) & 0x7
+    }
+    #[inline]
+    pub fn repeat(&self) -> RepeatMode {
+        RepeatMode::from_bits(self.cnt >> 27)
+    }
+    #[inline]
+    pub fn format(&self) -> SampleFormat {
+        SampleFormat::from_bits(self.cnt >> 29)
+    }
 
     /// Called on a 0→1 transition of the start bit (CNT bit 31).
     pub fn restart(&mut self, channel_id: usize) {
@@ -154,7 +177,9 @@ impl Channel {
 }
 
 impl Default for Channel {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// All 16 channels + global registers + output queue.
@@ -192,14 +217,24 @@ impl Audio {
         }
     }
 
-    #[inline] pub fn master_enabled(&self) -> bool { self.master_cnt & (1 << 15) != 0 }
-    #[inline] pub fn master_volume(&self) -> u32 { (self.master_cnt & 0x7F) as u32 }
+    #[inline]
+    pub fn master_enabled(&self) -> bool {
+        self.master_cnt & (1 << 15) != 0
+    }
+    #[inline]
+    pub fn master_volume(&self) -> u32 {
+        (self.master_cnt & 0x7F) as u32
+    }
 
     /// CPU-side read of `SOUNDxCNT` (returns the programmed value with
     /// the start bit reflecting current active state).
     pub fn read_cnt(&self, ch: usize) -> u32 {
         let mut v = self.channels[ch].cnt;
-        if self.channels[ch].active { v |= 1 << 31; } else { v &= !(1 << 31); }
+        if self.channels[ch].active {
+            v |= 1 << 31;
+        } else {
+            v &= !(1 << 31);
+        }
         v
     }
 
@@ -229,7 +264,9 @@ impl Audio {
             }
         }
         // Pad with silence if requested more than available.
-        for sample in &mut out[n..] { *sample = 0; }
+        for sample in &mut out[n..] {
+            *sample = 0;
+        }
         n
     }
 
@@ -246,7 +283,9 @@ impl Audio {
 }
 
 impl Default for Audio {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

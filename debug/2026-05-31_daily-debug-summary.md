@@ -31,29 +31,24 @@ early homebrew candidates.
   screens, including hbmenu `argvTest`, cellsDS, neo-engine, Flappy Bird DS,
   and Spelunky DS.
 
-## Current Work In Progress
+## Current Filesystem Result
 
-The current unmerged runtime work adds an initial emulator-backed DLDI/PXI
-block-device service:
+The runtime work adds an emulator-backed DLDI/PXI block-device service:
 
 - Calico block-device channel 2 request handling for DLDI presence, init,
   sector reads, and sector writes.
 - A lazily initialized synthetic FAT16 image with a small root directory.
 - Unit coverage for sector-count exposure and boot-sector reads.
 
-This is not yet a ROM-level libfat pass. The devkitPro
-`filesystem/libfat/libfatdir` ROM still reports:
+This now reaches a ROM-level libfat pass. The devkitPro
+`filesystem/libfat/libfatdir` ROM mounts the emulator-backed FAT16 volume and
+lists the synthetic root directory entries `README.TXT` and `[GAMES]`.
 
-```text
-fatInitDefault failure: terminating
-```
-
-The next debugging step is to determine whether the ROM reaches the ARM9 PXI
-DLDI service at all. A temporary console probe under `/private/tmp` was being
-updated to print the emulator DLDI image length after running `libfatdir`; if
-that length stays zero, libfat is rejecting the stub before the PXI path. If it
-becomes nonzero, the synthetic FAT image or request handling is the likely
-problem.
+The failure was in the synthetic boot sector, not PXI request delivery:
+`dldi_len=16777216` proved the ROM had reached the DLDI service. libfat's
+FAT12/16 VBR probe expected the 16-bit total-sector BPB field to be populated
+for the 32K-sector volume; using only the 32-bit total-sector field caused
+`fatInitDefault failure: terminating`.
 
 ## Tests Run
 
@@ -69,12 +64,9 @@ Latest recorded result for `cargo test -p nds-core`: `326 passed; 0 failed`.
 
 ## Carryover
 
-- Finish ROM-level `filesystem/libfat/libfatdir` support.
-- Drive Spelunky DS past the title/menu screen with the correct interaction
-  sequence.
 - Convert the current smoke-level graphics and homebrew checks into a more
   repeatable compatibility test script or matrix.
-- Rerun the full core regression suite after the DLDI/libfat result changes.
+- Rerun the full core regression suite after the next runtime result changes.
 
 ## Notes
 

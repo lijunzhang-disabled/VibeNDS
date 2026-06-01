@@ -3,15 +3,15 @@
 //! 4 directional lights (each with a direction vector + RGB color).
 //! Material parameters: diffuse + ambient + specular + emission, each a
 //! 5-bit-per-channel BGR555 value. A 128-entry "shininess" LUT
-//! approximates the Phong specular falloff `(reflection · viewer)^n`.
+//! drives the DS half-vector specular term, optionally through a shininess LUT.
 //!
 //! For each lit polygon vertex, color is computed as:
 //!
 //! ```text
 //!   color = emission
-//!         + ambient_global × material_ambient
 //!         + Σ_lights enable_bit → light_color × (
-//!               diffuse_term  (= max(0, -L · N))   × material_diffuse
+//!               ambient_term (= material_ambient)
+//!             + diffuse_term  (= max(0, -L · N)) × material_diffuse
 //!             + specular_term (= shininess_lut[H · N]) × material_specular
 //!           )
 //! ```
@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::matrix::{Matrix, ONE, fmul};
+use super::matrix::{fmul, Matrix, ONE};
 
 /// One directional light source.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -31,6 +31,9 @@ pub struct Light {
     /// matrix on `LIGHT_VECTOR`). Normalized to a unit vector in 1.0.9
     /// fixed-point — i.e. values are in [-512, 511].
     pub direction: [i32; 3],
+    /// Precomputed half-vector from LIGHT_VECTOR: `(LightVector + sight) / 2`.
+    /// The DS uses this during NORMAL for specular lighting.
+    pub half_vector: [i32; 3],
     /// BGR555 color (each channel 0..31).
     pub color: u16,
 }
@@ -97,12 +100,17 @@ impl LightingState {
     pub fn set_light_vector(&mut self, param: u32, vec_matrix: &Matrix) {
         let id = ((param >> 30) & 0x3) as usize;
         let sign_ext = |b: u32| -> i32 { (((b & 0x3FF) << 22) as i32) >> 22 };
-        let dx = sign_ext(param) << 3;       // 10-bit -> 1.19.12 (shift 6) then scale 1/512
+        let dx = sign_ext(param) << 3; // 10-bit -> 1.19.12 (shift 6) then scale 1/512
         let dy = sign_ext(param >> 10) << 3;
         let dz = sign_ext(param >> 20) << 3;
         // Transform direction by the vector matrix (rotational part).
         let transformed = vec_matrix.mul_vec4([dx, dy, dz, 0]);
         self.lights[id].direction = [transformed[0], transformed[1], transformed[2]];
+        self.lights[id].half_vector = [
+            transformed[0] / 2,
+            transformed[1] / 2,
+            (transformed[2] - ONE) / 2,
+        ];
     }
 
     /// `LIGHT_COLOR` — `[14:0]` = BGR555 color, `[31:30]` = light index.
@@ -125,7 +133,9 @@ impl LightingState {
 }
 
 impl Default for LightingState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Pack three 0..31 channels into BGR555.
@@ -171,15 +181,16 @@ pub fn compute_vertex_color(
     let (df_r, df_g, df_b) = unpack_bgr555(state.mat_diffuse);
     let (sp_r, sp_g, sp_b) = unpack_bgr555(state.mat_specular);
 
-    // Start with emission + ambient.
-    let mut r = em_r + am_r;
-    let mut g = em_g + am_g;
-    let mut b = em_b + am_b;
+    // Start with emission. Ambient is contributed per enabled light and is
+    // multiplied by that light's color on DS hardware.
+    let mut r = em_r;
+    let mut g = em_g;
+    let mut b = em_b;
 
-    // Half-vector for specular: H = normalize(L + V). We approximate V as
-    // (0, 0, -1) in eye space (camera looking down -Z).
     for (i, light) in state.lights.iter().enumerate() {
-        if light_enable_mask & (1 << i) == 0 { continue; }
+        if light_enable_mask & (1 << i) == 0 {
+            continue;
+        }
 
         let (lr, lg, lb) = unpack_bgr555(light.color);
         let l = light.direction;
@@ -189,32 +200,27 @@ pub fn compute_vertex_color(
         let d = -dot3(l, n);
         let diff_factor = (d.clamp(0, ONE)) as i32;
 
-        // Specular: half-vector H = (L + V) / |L + V|. NDS does an
-        // approximate Phong by computing (V·R) and looking it up in the
-        // shininess table.
-        let v = [0, 0, -ONE]; // looking down -Z
-        // R = 2(N·L)N - L
-        let nl = dot3(n, l);
-        let r_vec = [
-            fmul(2 * nl, n[0]) - l[0],
-            fmul(2 * nl, n[1]) - l[1],
-            fmul(2 * nl, n[2]) - l[2],
-        ];
-        let rv = -dot3(r_vec, v).clamp(0, ONE);
+        // Hardware uses the precomputed half-vector from LIGHT_VECTOR and
+        // squares its dot product with the normal.
+        let h = light.half_vector;
+        let half_dot = (-dot3(h, n)).clamp(0, ONE);
+        let shininess_level = fmul(half_dot, half_dot);
         let spec_factor = if state.use_shininess_table {
-            // LUT indexed by RV in [0..127].
-            let idx = ((rv * 127) / ONE).clamp(0, 127) as usize;
+            let idx = ((shininess_level * 127) / ONE).clamp(0, 127) as usize;
             (state.shininess_table[idx] as i32) * ONE / 255
         } else {
-            rv
+            shininess_level
         };
 
-        // Accumulate diffuse contribution per-channel: light × material × factor.
+        // Accumulate light contribution per-channel: light × material × factor.
         let scale = |light_chan: i32, mat_chan: i32, factor: i32| -> i32 {
             // (light/31) × (mat/31) × factor → result in 0..31
             // Approximate to avoid floats: (light * mat * factor) / (31 * ONE)
             ((light_chan * mat_chan * factor) / (31 * ONE)).clamp(0, 31)
         };
+        r += scale(lr, am_r, ONE);
+        g += scale(lg, am_g, ONE);
+        b += scale(lb, am_b, ONE);
         r += scale(lr, df_r, diff_factor);
         g += scale(lg, df_g, diff_factor);
         b += scale(lb, df_b, diff_factor);
@@ -230,16 +236,60 @@ pub fn compute_vertex_color(
 mod tests {
     use super::*;
 
+    fn light_vector_param(index: u32, x: i32, y: i32, z: i32) -> u32 {
+        let pack = |v: i32| (v as u32) & 0x3FF;
+        (index << 30) | pack(x) | (pack(y) << 10) | (pack(z) << 20)
+    }
+
     #[test]
-    fn test_default_lighting_returns_emission_plus_ambient() {
+    fn test_disabled_lights_return_emission_only() {
         let mut s = LightingState::new();
         s.set_dif_amb((0x0421 << 16) | 0); // ambient = (1, 1, 1) in BGR555 channels
         s.set_spe_emi((0x4210 << 16) | 0); // emission = (16, 16, 16)? Let's pick (16,16,16)
-        // Compose emission = R=16, G=16, B=16  →  packed = 16 | (16<<5) | (16<<10) = 0x4210
-        // ambient = (1,1,1) packed = 1 | (1<<5) | (1<<10) = 0x0421
+                                           // Compose emission = R=16, G=16, B=16  →  packed = 16 | (16<<5) | (16<<10) = 0x4210
+                                           // ambient = (1,1,1) packed = 1 | (1<<5) | (1<<10) = 0x0421
         let c = compute_vertex_color(&s, [0, 0, ONE], &Matrix::identity(), 0);
         let (r, g, b) = unpack_bgr555(c);
-        assert_eq!((r, g, b), (17, 17, 17), "emission + ambient");
+        assert_eq!((r, g, b), (16, 16, 16), "ambient needs an enabled light");
+    }
+
+    #[test]
+    fn test_ambient_is_per_enabled_light_color() {
+        let mut s = LightingState::new();
+        s.set_dif_amb(0x0421 << 16); // ambient = (1, 1, 1)
+        s.lights[0].color = 0x001F; // red only
+        s.lights[1].color = 0x03E0; // green only
+
+        let c = compute_vertex_color(&s, [0, 0, ONE], &Matrix::identity(), 0b0011);
+        let (r, g, b) = unpack_bgr555(c);
+
+        assert_eq!((r, g, b), (1, 1, 0));
+    }
+
+    #[test]
+    fn test_specular_highlight_can_contribute() {
+        let mut s = LightingState::new();
+        s.set_spe_emi(0x7FFF); // white specular, no emission
+        s.set_light_vector(light_vector_param(0, 0, 0, -512), &Matrix::identity());
+        s.lights[0].color = 0x7FFF;
+
+        let c = compute_vertex_color(&s, [0, 0, ONE], &Matrix::identity(), 1);
+        let (r, g, b) = unpack_bgr555(c);
+
+        assert_eq!((r, g, b), (31, 31, 31));
+    }
+
+    #[test]
+    fn test_specular_uses_light_half_vector() {
+        let mut s = LightingState::new();
+        s.set_spe_emi(0x7FFF);
+        s.set_light_vector(light_vector_param(0, -512, 0, 0), &Matrix::identity());
+        s.lights[0].color = 0x7FFF;
+
+        let c = compute_vertex_color(&s, [ONE, 0, 0], &Matrix::identity(), 1);
+        let (r, g, b) = unpack_bgr555(c);
+
+        assert_eq!((r, g, b), (7, 7, 7));
     }
 
     #[test]
@@ -248,7 +298,7 @@ mod tests {
         // Bright white light pointed at +Z. Default material is black,
         // so contribution is zero anyway, but more importantly the
         // light_enable_mask of 0 should bypass lights entirely.
-        s.lights[0].direction = [0, 0, -ONE];
+        s.set_light_vector(light_vector_param(0, 0, 0, -512), &Matrix::identity());
         s.lights[0].color = 0x7FFF;
         let c = compute_vertex_color(&s, [0, 0, ONE], &Matrix::identity(), 0);
         assert_eq!(c, 0, "all-disabled lights → black");
@@ -274,19 +324,26 @@ mod tests {
         // without verifying internal state, but reading back light[2] is
         // a "stored to right slot" check.
         assert_eq!(s.lights[2].direction, [0, 0, 0]);
+        assert_eq!(s.lights[2].half_vector, [0, 0, -ONE / 2]);
     }
 
     #[test]
     fn test_shininess_table_loads_4_per_word() {
         let mut s = LightingState::new();
-        let params: Vec<u32> = (0..32).map(|w| {
-            // Each word is 4 incrementing bytes: 0,1,2,3 ; 4,5,6,7 ; ...
-            let base = (w * 4) as u32;
-            base | ((base + 1) << 8) | ((base + 2) << 16) | ((base + 3) << 24)
-        }).collect();
+        let params: Vec<u32> = (0..32)
+            .map(|w| {
+                // Each word is 4 incrementing bytes: 0,1,2,3 ; 4,5,6,7 ; ...
+                let base = (w * 4) as u32;
+                base | ((base + 1) << 8) | ((base + 2) << 16) | ((base + 3) << 24)
+            })
+            .collect();
         s.set_shininess(&params);
         for i in 0..128 {
-            assert_eq!(s.shininess_table[i] as usize, i, "entry {} should be {}", i, i);
+            assert_eq!(
+                s.shininess_table[i] as usize, i,
+                "entry {} should be {}",
+                i, i
+            );
         }
     }
 }

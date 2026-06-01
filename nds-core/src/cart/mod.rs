@@ -3,14 +3,14 @@
 //! AUXSPI backup, KEY1/KEY2 encryption, and the slot-1 command protocol
 //! arrive in later phases.
 
-pub mod header;
-pub mod direct_boot;
 pub mod auxspi;
 pub mod chip_id;
+pub mod direct_boot;
+pub mod header;
 
-pub use header::{CartHeader, ParseError, HEADER_SIZE};
-pub use direct_boot::{apply as direct_boot_apply, DirectBootError};
 pub use auxspi::{AuxSpi, BackupKind};
+pub use direct_boot::{apply as direct_boot_apply, DirectBootError};
+pub use header::{CartHeader, ParseError, HEADER_SIZE};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,9 +34,16 @@ impl Cart {
 
     pub fn from_rom(rom: Vec<u8>) -> Result<Self, ParseError> {
         let header = CartHeader::parse(&rom)?;
-        Ok(Cart { rom: Some(rom), header: Some(header) })
+        Ok(Cart {
+            rom: Some(rom),
+            header: Some(header),
+        })
     }
 
-    pub fn header(&self) -> Option<&CartHeader> { self.header.as_ref() }
-    pub fn rom(&self) -> Option<&[u8]> { self.rom.as_deref() }
+    pub fn header(&self) -> Option<&CartHeader> {
+        self.header.as_ref()
+    }
+    pub fn rom(&self) -> Option<&[u8]> {
+        self.rom.as_deref()
+    }
 }

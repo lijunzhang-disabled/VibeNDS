@@ -101,10 +101,18 @@ impl DmaController {
         }
     }
 
-    pub fn read_sad(&self, id: usize) -> u32 { self.channels[id].sad }
-    pub fn read_dad(&self, id: usize) -> u32 { self.channels[id].dad }
-    pub fn read_count(&self, id: usize) -> u32 { self.channels[id].count_programmed }
-    pub fn read_control(&self, id: usize) -> u32 { self.channels[id].control }
+    pub fn read_sad(&self, id: usize) -> u32 {
+        self.channels[id].sad
+    }
+    pub fn read_dad(&self, id: usize) -> u32 {
+        self.channels[id].dad
+    }
+    pub fn read_count(&self, id: usize) -> u32 {
+        self.channels[id].count_programmed
+    }
+    pub fn read_control(&self, id: usize) -> u32 {
+        self.channels[id].control
+    }
 
     pub fn write_sad(&mut self, id: usize, val: u32) {
         // Bit width depends on channel + side; we store full 32 bits and
@@ -183,7 +191,11 @@ impl DmaController {
     }
 
     pub fn word_size(&self, id: usize) -> u32 {
-        if self.channels[id].control & (1 << 26) != 0 { 4 } else { 2 }
+        if self.channels[id].control & (1 << 26) != 0 {
+            4
+        } else {
+            2
+        }
     }
 
     pub fn repeat(&self, id: usize) -> bool {
@@ -196,7 +208,9 @@ impl DmaController {
 
     /// Channels armed for `timing`, in priority order (ascending channel id).
     pub fn channels_for_timing(&self, timing: DmaTiming) -> Vec<usize> {
-        (0..4).filter(|&i| self.channels[i].active && self.timing(i) == timing).collect()
+        (0..4)
+            .filter(|&i| self.channels[i].active && self.timing(i) == timing)
+            .collect()
     }
 
     /// Apply post-transfer state: clear active + enable bit (one-shot) or
@@ -320,7 +334,7 @@ mod tests {
         let mut d = DmaController::new(true);
         d.write_count(0, 4);
         d.write_control(0, (1 << 31) | (1 << 25)); // enable + repeat
-        // Simulate count drained
+                                                   // Simulate count drained
         d.channels[0].internal_count = 0;
         d.finish_transfer(0);
         assert!(d.channels[0].active);

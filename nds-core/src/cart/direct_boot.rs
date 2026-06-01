@@ -4,10 +4,10 @@
 //!
 //! Reference: GBATEK §"DS Cartridge Header" + §"DS Direct Boot".
 
+use super::header::CartHeader;
 use crate::bus::{Arm7Memory, SharedState};
 use crate::cart::chip_id::chip_id_for_rom;
 use crate::cpu::{Cpu, CpuMode, Psr};
-use super::header::CartHeader;
 
 /// Standard ARM9 stack pointers per the NDS BIOS direct-boot convention.
 pub const ARM9_SP_USR: u32 = 0x0300_2F7C;
@@ -45,8 +45,24 @@ pub fn apply(
     header: &CartHeader,
     rom: &[u8],
 ) -> Result<(), DirectBootError> {
-    copy_binary(shared, mem7, rom, header.arm9_rom_offset, header.arm9_load, header.arm9_size, "ARM9")?;
-    copy_binary(shared, mem7, rom, header.arm7_rom_offset, header.arm7_load, header.arm7_size, "ARM7")?;
+    copy_binary(
+        shared,
+        mem7,
+        rom,
+        header.arm9_rom_offset,
+        header.arm9_load,
+        header.arm9_size,
+        "ARM9",
+    )?;
+    copy_binary(
+        shared,
+        mem7,
+        rom,
+        header.arm7_rom_offset,
+        header.arm7_load,
+        header.arm7_size,
+        "ARM7",
+    )?;
     copy_header_into_ram(shared, rom);
     initialize_argv_header(shared);
     write_boot_indicators(shared, header, rom);
@@ -84,24 +100,36 @@ fn copy_binary(
     label: &'static str,
 ) -> Result<(), DirectBootError> {
     let src_start = rom_offset as usize;
-    let src_end = src_start.checked_add(size as usize)
+    let src_end = src_start
+        .checked_add(size as usize)
         .ok_or(DirectBootError::ArithmeticOverflow)?;
     if src_end > rom.len() {
-        return Err(DirectBootError::OutOfRangeRom { label, src_end, rom_len: rom.len() });
+        return Err(DirectBootError::OutOfRangeRom {
+            label,
+            src_end,
+            rom_len: rom.len(),
+        });
     }
 
     if (load_addr >> 24) == 0x02 {
         let dst_off = main_ram_offset(load_addr);
         if dst_off + size as usize > shared.main_ram.len() {
-            return Err(DirectBootError::UnsupportedLoadRegion { label, addr: load_addr, size });
+            return Err(DirectBootError::UnsupportedLoadRegion {
+                label,
+                addr: load_addr,
+                size,
+            });
         }
 
-        shared.main_ram[dst_off..dst_off + size as usize]
-            .copy_from_slice(&rom[src_start..src_end]);
+        shared.main_ram[dst_off..dst_off + size as usize].copy_from_slice(&rom[src_start..src_end]);
     } else if label == "ARM7" && (load_addr >> 24) == 0x03 {
         copy_arm7_wram_binary(shared, mem7, &rom[src_start..src_end], load_addr, size)?;
     } else {
-        return Err(DirectBootError::UnsupportedLoadRegion { label, addr: load_addr, size });
+        return Err(DirectBootError::UnsupportedLoadRegion {
+            label,
+            addr: load_addr,
+            size,
+        });
     }
     Ok(())
 }
@@ -198,8 +226,8 @@ fn setup_arm9(cpu: &mut Cpu, entry: u32) {
     cpu.cpsr = Psr::new(CpuMode::System);
     cpu.cpsr.bits &= !(1 << 7); // IRQ enabled
     cpu.cpsr.bits &= !(1 << 6); // FIQ enabled
-    // Homebrew startup code expects ITCM to exist before entering ARM9 code.
-    // Some test ROMs expand this into a larger low-address mirror themselves.
+                                // Homebrew startup code expects ITCM to exist before entering ARM9 code.
+                                // Some test ROMs expand this into a larger low-address mirror themselves.
     cpu.cp15.write(9, 1, 0, 1, (6 << 1) | 1);
     cpu.cp15.set_high_vectors(false);
     cpu.refresh_exception_base();
@@ -225,18 +253,38 @@ fn setup_arm7(cpu: &mut Cpu, entry: u32) {
 #[derive(Debug)]
 pub enum DirectBootError {
     ArithmeticOverflow,
-    OutOfRangeRom { label: &'static str, src_end: usize, rom_len: usize },
-    UnsupportedLoadRegion { label: &'static str, addr: u32, size: u32 },
+    OutOfRangeRom {
+        label: &'static str,
+        src_end: usize,
+        rom_len: usize,
+    },
+    UnsupportedLoadRegion {
+        label: &'static str,
+        addr: u32,
+        size: u32,
+    },
 }
 
 impl std::fmt::Display for DirectBootError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DirectBootError::ArithmeticOverflow => write!(f, "arithmetic overflow during direct boot"),
-            DirectBootError::OutOfRangeRom { label, src_end, rom_len } =>
-                write!(f, "{} binary extends past ROM end (needs 0x{:X}, ROM is 0x{:X})", label, src_end, rom_len),
-            DirectBootError::UnsupportedLoadRegion { label, addr, size } =>
-                write!(f, "{} load region 0x{:08X}+0x{:X} not in supported RAM", label, addr, size),
+            DirectBootError::ArithmeticOverflow => {
+                write!(f, "arithmetic overflow during direct boot")
+            }
+            DirectBootError::OutOfRangeRom {
+                label,
+                src_end,
+                rom_len,
+            } => write!(
+                f,
+                "{} binary extends past ROM end (needs 0x{:X}, ROM is 0x{:X})",
+                label, src_end, rom_len
+            ),
+            DirectBootError::UnsupportedLoadRegion { label, addr, size } => write!(
+                f,
+                "{} load region 0x{:08X}+0x{:X} not in supported RAM",
+                label, addr, size
+            ),
         }
     }
 }
@@ -290,7 +338,10 @@ mod tests {
         // ARM9 binary at 0x02000000 — first 4 bytes are the B . opcode
         assert_eq!(&shared.main_ram[0..4], &0xEAFF_FFFEu32.to_le_bytes());
         // ARM7 binary at 0x02380000 — that's 0x02380000 - 0x02000000 = 0x380000
-        assert_eq!(&shared.main_ram[0x380000..0x380004], &0xEAFF_FFFEu32.to_le_bytes());
+        assert_eq!(
+            &shared.main_ram[0x380000..0x380004],
+            &0xEAFF_FFFEu32.to_le_bytes()
+        );
     }
 
     #[test]
@@ -343,7 +394,10 @@ mod tests {
         assert_eq!(cpu9.regs[15], 0x0200_0000);
         assert_eq!(cpu9.regs[13], ARM9_SP_USR);
         assert_eq!(cpu9.banked.sp[CpuMode::Irq.bank_index()], ARM9_SP_IRQ);
-        assert_eq!(cpu9.banked.sp[CpuMode::Supervisor.bank_index()], ARM9_SP_SVC);
+        assert_eq!(
+            cpu9.banked.sp[CpuMode::Supervisor.bank_index()],
+            ARM9_SP_SVC
+        );
         assert_eq!(cpu9.cp15.itcm.size_bytes, 32 * 1024);
         assert_eq!(cpu9.exception_base, 0);
         assert!(!cpu9.cp15.high_vectors());
@@ -351,7 +405,10 @@ mod tests {
         assert_eq!(cpu7.regs[15], 0x0238_0000);
         assert_eq!(cpu7.regs[13], ARM7_SP_USR);
         assert_eq!(cpu7.banked.sp[CpuMode::Irq.bank_index()], ARM7_SP_IRQ);
-        assert_eq!(cpu7.banked.sp[CpuMode::Supervisor.bank_index()], ARM7_SP_SVC);
+        assert_eq!(
+            cpu7.banked.sp[CpuMode::Supervisor.bank_index()],
+            ARM7_SP_SVC
+        );
         assert_eq!(cpu7.banked.sp[CpuMode::Undefined.bank_index()], ARM7_SP_UND);
     }
 
@@ -367,9 +424,8 @@ mod tests {
 
         let off = (HEADER_COPY_ADDR & 0x003F_FFFF) as usize;
         assert_eq!(&shared.main_ram[off..off + 12], b"DBOOT TEST\0\0");
-        let crc_in_copy = u16::from_le_bytes([
-            shared.main_ram[off + 0x15E], shared.main_ram[off + 0x15F]
-        ]);
+        let crc_in_copy =
+            u16::from_le_bytes([shared.main_ram[off + 0x15E], shared.main_ram[off + 0x15F]]);
         assert_eq!(crc_in_copy, header.header_crc);
     }
 
@@ -394,7 +450,10 @@ mod tests {
         };
 
         assert_eq!(read32(ENV_ARGV_HEADER_ADDR, &shared), 0);
-        assert_eq!(read32(ENV_ARGV_HEADER_ADDR + 16, &shared), ENV_ARGV_SLOT_ADDR);
+        assert_eq!(
+            read32(ENV_ARGV_HEADER_ADDR + 16, &shared),
+            ENV_ARGV_SLOT_ADDR
+        );
         assert_eq!(read32(ENV_ARGV_SLOT_ADDR, &shared), 0);
     }
 

@@ -4,8 +4,8 @@
 //! (3, 4, 5) and large-screen mode 6 are deferred until we hit a game
 //! that needs them.
 
-use crate::vram::VramRouter;
 use super::{Engine2d, Which};
+use crate::vram::VramRouter;
 
 /// One opaque pixel candidate produced by a BG.
 #[derive(Debug, Clone, Copy)]
@@ -81,8 +81,7 @@ pub fn render_text_bg(
         let block = block_y * blocks_x + block_x;
         let in_block_x = tile_x & 31;
         let in_block_y = tile_y & 31;
-        let map_addr = screen_base + block * 0x800
-                     + (in_block_y * 32 + in_block_x) * 2;
+        let map_addr = screen_base + block * 0x800 + (in_block_y * 32 + in_block_x) * 2;
         let entry = read_bg_u16(engine.which, vram, map_addr);
 
         let tile_num = (entry & 0x3FF) as u32;
@@ -102,14 +101,22 @@ pub fn render_text_bg(
             let tile_addr = char_base + tile_num * 32 + row * 4 + (col >> 1);
             let byte = read_bg_u8(engine.which, vram, tile_addr);
             let nibble = if col & 1 != 0 { byte >> 4 } else { byte & 0xF };
-            if nibble != 0 { palette_num * 16 + nibble } else { 0 }
+            if nibble != 0 {
+                palette_num * 16 + nibble
+            } else {
+                0
+            }
         };
 
         if color_idx == 0 {
             continue;
         }
         let color = bg_palette_color(engine, n, palette, vram, color_idx as u32, palette_num);
-        line_pixels[x] = Some(BgPixel { color, priority, bg_index: n as u8 });
+        line_pixels[x] = Some(BgPixel {
+            color,
+            priority,
+            bg_index: n as u8,
+        });
     }
 }
 
@@ -137,22 +144,34 @@ pub fn render_affine_bg(
     let map_w_px = map_size_tiles * 8;
 
     let (mut x_int, mut y_int, pa, pc) = if n == 2 {
-        (engine.bg2_x_int, engine.bg2_y_int, engine.bg2_pa as i32, engine.bg2_pc as i32)
+        (
+            engine.bg2_x_int,
+            engine.bg2_y_int,
+            engine.bg2_pa as i32,
+            engine.bg2_pc as i32,
+        )
     } else {
-        (engine.bg3_x_int, engine.bg3_y_int, engine.bg3_pa as i32, engine.bg3_pc as i32)
+        (
+            engine.bg3_x_int,
+            engine.bg3_y_int,
+            engine.bg3_pa as i32,
+            engine.bg3_pc as i32,
+        )
     };
 
     for x in 0..SCREEN_WIDTH {
         let tex_x = x_int >> 8;
         let tex_y = y_int >> 8;
 
-        let inside = (0..map_w_px as i32).contains(&tex_x)
-                  && (0..map_w_px as i32).contains(&tex_y);
+        let inside = (0..map_w_px as i32).contains(&tex_x) && (0..map_w_px as i32).contains(&tex_y);
 
         let (px, py) = if inside {
             (tex_x as u32, tex_y as u32)
         } else if wraparound {
-            ((tex_x as u32) & (map_w_px - 1), (tex_y as u32) & (map_w_px - 1))
+            (
+                (tex_x as u32) & (map_w_px - 1),
+                (tex_y as u32) & (map_w_px - 1),
+            )
         } else {
             x_int = x_int.wrapping_add(pa);
             y_int = y_int.wrapping_add(pc);
@@ -171,7 +190,11 @@ pub fn render_affine_bg(
 
         if color_idx != 0 {
             let color = bg_palette_color(engine, n, palette, vram, color_idx as u32, 0);
-            line_pixels[x] = Some(BgPixel { color, priority, bg_index: n as u8 });
+            line_pixels[x] = Some(BgPixel {
+                color,
+                priority,
+                bg_index: n as u8,
+            });
         }
 
         x_int = x_int.wrapping_add(pa);
@@ -208,16 +231,25 @@ pub fn render_bitmap_bg(
     };
 
     let (mut x_int, mut y_int, pa, pc) = if n == 2 {
-        (engine.bg2_x_int, engine.bg2_y_int, engine.bg2_pa as i32, engine.bg2_pc as i32)
+        (
+            engine.bg2_x_int,
+            engine.bg2_y_int,
+            engine.bg2_pa as i32,
+            engine.bg2_pc as i32,
+        )
     } else {
-        (engine.bg3_x_int, engine.bg3_y_int, engine.bg3_pa as i32, engine.bg3_pc as i32)
+        (
+            engine.bg3_x_int,
+            engine.bg3_y_int,
+            engine.bg3_pa as i32,
+            engine.bg3_pc as i32,
+        )
     };
 
     for x in 0..SCREEN_WIDTH {
         let tex_x = x_int >> 8;
         let tex_y = y_int >> 8;
-        let inside = (0..width as i32).contains(&tex_x)
-                  && (0..height as i32).contains(&tex_y);
+        let inside = (0..width as i32).contains(&tex_x) && (0..height as i32).contains(&tex_y);
 
         let (px, py) = if inside {
             (tex_x as u32, tex_y as u32)
@@ -247,7 +279,11 @@ pub fn render_bitmap_bg(
             let color_idx = read_bg_u8(engine.which, vram, addr);
             if color_idx != 0 {
                 let color = bg_palette_color(engine, n, palette, vram, color_idx as u32, 0);
-                line_pixels[x] = Some(BgPixel { color, priority, bg_index: n as u8 });
+                line_pixels[x] = Some(BgPixel {
+                    color,
+                    priority,
+                    bg_index: n as u8,
+                });
             }
         }
 

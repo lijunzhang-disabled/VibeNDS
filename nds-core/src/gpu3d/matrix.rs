@@ -43,15 +43,12 @@ pub struct Matrix {
 
 impl Matrix {
     pub const IDENTITY: Matrix = Matrix {
-        m: [
-            ONE, 0, 0, 0,
-            0, ONE, 0, 0,
-            0, 0, ONE, 0,
-            0, 0, 0, ONE,
-        ],
+        m: [ONE, 0, 0, 0, 0, ONE, 0, 0, 0, 0, ONE, 0, 0, 0, 0, ONE],
     };
 
-    pub fn identity() -> Self { Self::IDENTITY }
+    pub fn identity() -> Self {
+        Self::IDENTITY
+    }
 
     /// Get the element at `[row, col]`.
     #[inline]
@@ -101,9 +98,9 @@ impl Matrix {
         Matrix { m }
     }
 
-    /// Matrix × matrix. NDS GX semantics: `MTX_MULT_*` post-multiplies the
-    /// current matrix by the parameter, so `current = current × param`.
-    /// Here `self × other` returns a fresh matrix in the same convention.
+    /// Matrix × matrix. `self × other` returns a fresh matrix; the command
+    /// layer decides which operand is the current matrix and which is the
+    /// incoming command matrix.
     pub fn mul_matrix(&self, other: &Matrix) -> Matrix {
         let mut out = [0i32; 16];
         for col in 0..4 {
@@ -132,38 +129,27 @@ impl Matrix {
         out
     }
 
-    /// `current = current × T(tx, ty, tz)` — the `MTX_TRANS` command.
+    /// Return `self × T(tx, ty, tz)`.
     pub fn mul_translate(&self, tx: i32, ty: i32, tz: i32) -> Matrix {
         let t = Matrix {
-            m: [
-                ONE, 0, 0, 0,
-                0, ONE, 0, 0,
-                0, 0, ONE, 0,
-                tx, ty, tz, ONE,
-            ],
+            m: [ONE, 0, 0, 0, 0, ONE, 0, 0, 0, 0, ONE, 0, tx, ty, tz, ONE],
         };
         self.mul_matrix(&t)
     }
 
-    /// `current = current × S(sx, sy, sz)` — the `MTX_SCALE` command.
-    /// Per GBATEK: scales only the first three columns; row 3 stays put,
-    /// which matches the `T × S` expectation. (We post-multiply, so the
-    /// effect on a vector is `M·S·v` = scale-then-M.)
+    /// Return `self × S(sx, sy, sz)`.
     pub fn mul_scale(&self, sx: i32, sy: i32, sz: i32) -> Matrix {
         let s = Matrix {
-            m: [
-                sx, 0, 0, 0,
-                0, sy, 0, 0,
-                0, 0, sz, 0,
-                0, 0, 0, ONE,
-            ],
+            m: [sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, sz, 0, 0, 0, 0, ONE],
         };
         self.mul_matrix(&s)
     }
 }
 
 impl Default for Matrix {
-    fn default() -> Self { Self::IDENTITY }
+    fn default() -> Self {
+        Self::IDENTITY
+    }
 }
 
 #[cfg(test)]
@@ -216,12 +202,7 @@ mod tests {
 
     #[test]
     fn test_load_4x4_round_trip() {
-        let words: [i32; 16] = [
-            1, 2, 3, 4,
-            5, 6, 7, 8,
-            9, 10, 11, 12,
-            13, 14, 15, 16,
-        ];
+        let words: [i32; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let m = Matrix::load_4x4(&words);
         // Row 0 is M[0..3].
         assert_eq!(m.at(0, 0), 1);
@@ -235,12 +216,7 @@ mod tests {
 
     #[test]
     fn test_load_4x3_pads_bottom_row() {
-        let words: [i32; 12] = [
-            1, 2, 3,
-            4, 5, 6,
-            7, 8, 9,
-            10, 11, 12,
-        ];
+        let words: [i32; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let m = Matrix::load_4x3(&words);
         assert_eq!(m.at(3, 0), 10);
         assert_eq!(m.at(3, 1), 11);
@@ -255,11 +231,7 @@ mod tests {
 
     #[test]
     fn test_load_3x3_pads_identity() {
-        let words: [i32; 9] = [
-            2 * ONE, 0, 0,
-            0, 2 * ONE, 0,
-            0, 0, 2 * ONE,
-        ];
+        let words: [i32; 9] = [2 * ONE, 0, 0, 0, 2 * ONE, 0, 0, 0, 2 * ONE];
         let m = Matrix::load_3x3(&words);
         // Last column/row should remain identity.
         assert_eq!(m.at(0, 3), 0);
@@ -289,9 +261,6 @@ mod tests {
     #[test]
     fn test_mul_matrix_rotates_then_scales() {
         // Verify ordering: row-vector v × M means "apply M to v in object space".
-        // We post-multiply in NDS semantics: current = current × param, so
-        // applying this composite to a row vector v gives v × (S × T):
-        // scale first, then translate.
         let s = Matrix::identity().mul_scale(2 * ONE, 2 * ONE, 2 * ONE);
         let c = s.mul_matrix(&Matrix::identity().mul_translate(5 * ONE, 0, 0));
         let r = c.mul_vec4([ONE, 0, 0, ONE]);

@@ -64,12 +64,16 @@ pub fn compose_scanline(
         let mut buf: [Option<PixelCandidate>; 5] = [None; 5];
         let mut len = 0usize;
         for n in 0..4 {
-            if !win.bg_enable[n] { continue; }
+            if !win.bg_enable[n] {
+                continue;
+            }
             if let Some(layers) = &bg_layers[n] {
                 if let Some(p) = layers[x] {
                     buf[len] = Some(PixelCandidate {
-                        color: p.color, priority: p.priority,
-                        layer: p.bg_index, semi_transparent: false,
+                        color: p.color,
+                        priority: p.priority,
+                        layer: p.bg_index,
+                        semi_transparent: false,
                     });
                     len += 1;
                 }
@@ -78,7 +82,8 @@ pub fn compose_scanline(
         if win.obj_enable {
             if let Some(o) = obj_line.pixel[x] {
                 buf[len] = Some(PixelCandidate {
-                    color: o.color, priority: o.priority,
+                    color: o.color,
+                    priority: o.priority,
                     layer: LAYER_OBJ,
                     semi_transparent: o.gfx_mode == 1,
                 });
@@ -88,13 +93,18 @@ pub fn compose_scanline(
 
         // Sort active candidates in-place by priority asc, ties by sublayer rank.
         buf[..len].sort_by(|a, b| {
-            let a = a.unwrap(); let b = b.unwrap();
-            a.priority.cmp(&b.priority)
+            let a = a.unwrap();
+            let b = b.unwrap();
+            a.priority
+                .cmp(&b.priority)
                 .then_with(|| sublayer_rank(a.layer).cmp(&sublayer_rank(b.layer)))
         });
 
         let backdrop_cand = PixelCandidate {
-            color: backdrop, priority: 4, layer: LAYER_BACKDROP, semi_transparent: false,
+            color: backdrop,
+            priority: 4,
+            layer: LAYER_BACKDROP,
+            semi_transparent: false,
         };
         let (top, second) = match len {
             0 => (backdrop_cand, backdrop_cand),
@@ -119,14 +129,19 @@ pub fn compose_scanline(
 fn sublayer_rank(layer: u8) -> u8 {
     match layer {
         LAYER_OBJ => 0, // OBJ beats BG at equal priority
-        LAYER_BG0 => 1, LAYER_BG1 => 2, LAYER_BG2 => 3, LAYER_BG3 => 4,
+        LAYER_BG0 => 1,
+        LAYER_BG1 => 2,
+        LAYER_BG2 => 3,
+        LAYER_BG3 => 4,
         _ => 5,
     }
 }
 
-fn compute_window_flags(engine: &Engine2d, line: u16, obj_line: &ObjLine)
-    -> [WinFlags; SCREEN_WIDTH]
-{
+fn compute_window_flags(
+    engine: &Engine2d,
+    line: u16,
+    obj_line: &ObjLine,
+) -> [WinFlags; SCREEN_WIDTH] {
     let win0_enable = engine.dispcnt & (1 << 13) != 0;
     let win1_enable = engine.dispcnt & (1 << 14) != 0;
     let objwin_enable = engine.dispcnt & (1 << 15) != 0;
@@ -134,7 +149,9 @@ fn compute_window_flags(engine: &Engine2d, line: u16, obj_line: &ObjLine)
     if !win0_enable && !win1_enable && !objwin_enable {
         // Fast path: all layers visible, effects enabled.
         let everything = WinFlags {
-            bg_enable: [true; 4], obj_enable: true, effects_enable: true,
+            bg_enable: [true; 4],
+            obj_enable: true,
+            effects_enable: true,
         };
         return [everything; SCREEN_WIDTH];
     }
@@ -211,13 +228,19 @@ fn win_flags_from_bits(bits: u16) -> WinFlags {
 
 fn line_in_range(line: u16, lo: i32, hi: i32) -> bool {
     let line = line as i32;
-    if lo <= hi { (lo..hi).contains(&line) }
-    else        { line >= lo || line < hi }
+    if lo <= hi {
+        (lo..hi).contains(&line)
+    } else {
+        line >= lo || line < hi
+    }
 }
 
 fn x_in_range(x: i32, lo: i32, hi: i32) -> bool {
-    if lo <= hi { (lo..hi).contains(&x) }
-    else        { x >= lo || x < hi }
+    if lo <= hi {
+        (lo..hi).contains(&x)
+    } else {
+        x >= lo || x < hi
+    }
 }
 
 fn is_first_target(engine: &Engine2d, layer: u8) -> bool {
@@ -240,7 +263,9 @@ fn apply_blend(engine: &Engine2d, top: PixelCandidate, second: PixelCandidate) -
         return top.color;
     }
     match mode {
-        1 if is_second_target(engine, second.layer) => alpha_blend(top.color, second.color, engine.bldalpha),
+        1 if is_second_target(engine, second.layer) => {
+            alpha_blend(top.color, second.color, engine.bldalpha)
+        }
         2 => brightness_increase(top.color, engine.bldy),
         3 => brightness_decrease(top.color, engine.bldy),
         _ => top.color,
@@ -250,9 +275,7 @@ fn apply_blend(engine: &Engine2d, top: PixelCandidate, second: PixelCandidate) -
 fn alpha_blend(top: u16, bot: u16, bldalpha: u16) -> u16 {
     let eva = (bldalpha & 0x1F).min(16) as u32;
     let evb = ((bldalpha >> 8) & 0x1F).min(16) as u32;
-    let blend_chan = |t: u32, b: u32| -> u16 {
-        ((t * eva + b * evb) / 16).min(31) as u16
-    };
+    let blend_chan = |t: u32, b: u32| -> u16 { ((t * eva + b * evb) / 16).min(31) as u16 };
     let tr = (top & 0x1F) as u32;
     let tg = ((top >> 5) & 0x1F) as u32;
     let tb = ((top >> 10) & 0x1F) as u32;

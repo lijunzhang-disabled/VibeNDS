@@ -144,7 +144,9 @@ impl MathUnit {
 }
 
 impl Default for MathUnit {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn half32(value: u32, off: u32) -> u16 {

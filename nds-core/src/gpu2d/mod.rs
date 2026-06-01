@@ -12,8 +12,8 @@
 //! source. These are stubbed to render transparent.
 
 pub mod bg;
-pub mod obj;
 pub mod compositor;
+pub mod obj;
 
 use serde::{Deserialize, Serialize};
 
@@ -35,21 +35,36 @@ pub struct Engine2d {
     pub bg_vofs: [u16; 4],
 
     /// BG2/3 affine parameters (PA, PB, PC, PD), 8.8 fixed-point per component.
-    pub bg2_pa: i16, pub bg2_pb: i16, pub bg2_pc: i16, pub bg2_pd: i16,
-    pub bg3_pa: i16, pub bg3_pb: i16, pub bg3_pc: i16, pub bg3_pd: i16,
+    pub bg2_pa: i16,
+    pub bg2_pb: i16,
+    pub bg2_pc: i16,
+    pub bg2_pd: i16,
+    pub bg3_pa: i16,
+    pub bg3_pb: i16,
+    pub bg3_pc: i16,
+    pub bg3_pd: i16,
     /// Reference points (latched at frame start), 28-bit signed 8.8.
-    pub bg2_x_latch: i32, pub bg2_y_latch: i32,
-    pub bg3_x_latch: i32, pub bg3_y_latch: i32,
+    pub bg2_x_latch: i32,
+    pub bg2_y_latch: i32,
+    pub bg3_x_latch: i32,
+    pub bg3_y_latch: i32,
     /// Internal scanline-advanced reference points.
-    pub bg2_x_int: i32, pub bg2_y_int: i32,
-    pub bg3_x_int: i32, pub bg3_y_int: i32,
+    pub bg2_x_int: i32,
+    pub bg2_y_int: i32,
+    pub bg3_x_int: i32,
+    pub bg3_y_int: i32,
 
-    pub win0h: u16, pub win1h: u16,
-    pub win0v: u16, pub win1v: u16,
-    pub winin: u16, pub winout: u16,
+    pub win0h: u16,
+    pub win1h: u16,
+    pub win0v: u16,
+    pub win1v: u16,
+    pub winin: u16,
+    pub winout: u16,
 
     pub mosaic: u16,
-    pub bldcnt: u16, pub bldalpha: u16, pub bldy: u16,
+    pub bldcnt: u16,
+    pub bldalpha: u16,
+    pub bldy: u16,
 
     pub master_bright: u16,
 }
@@ -62,16 +77,32 @@ impl Engine2d {
             bgcnt: [0; 4],
             bg_hofs: [0; 4],
             bg_vofs: [0; 4],
-            bg2_pa: 0x100, bg2_pb: 0, bg2_pc: 0, bg2_pd: 0x100,
-            bg3_pa: 0x100, bg3_pb: 0, bg3_pc: 0, bg3_pd: 0x100,
-            bg2_x_latch: 0, bg2_y_latch: 0,
-            bg3_x_latch: 0, bg3_y_latch: 0,
-            bg2_x_int: 0, bg2_y_int: 0,
-            bg3_x_int: 0, bg3_y_int: 0,
-            win0h: 0, win1h: 0, win0v: 0, win1v: 0,
-            winin: 0, winout: 0,
+            bg2_pa: 0x100,
+            bg2_pb: 0,
+            bg2_pc: 0,
+            bg2_pd: 0x100,
+            bg3_pa: 0x100,
+            bg3_pb: 0,
+            bg3_pc: 0,
+            bg3_pd: 0x100,
+            bg2_x_latch: 0,
+            bg2_y_latch: 0,
+            bg3_x_latch: 0,
+            bg3_y_latch: 0,
+            bg2_x_int: 0,
+            bg2_y_int: 0,
+            bg3_x_int: 0,
+            bg3_y_int: 0,
+            win0h: 0,
+            win1h: 0,
+            win0v: 0,
+            win1v: 0,
+            winin: 0,
+            winout: 0,
             mosaic: 0,
-            bldcnt: 0, bldalpha: 0, bldy: 0,
+            bldcnt: 0,
+            bldalpha: 0,
+            bldy: 0,
             master_bright: 0,
         }
     }
@@ -129,7 +160,9 @@ pub fn render_scanline(
 
     // Display Off: white.
     if engine.which == Which::A && display_mode == 0 {
-        for x in 0..256 { framebuffer[row_start + x] = 0x7FFF; }
+        for x in 0..256 {
+            framebuffer[row_start + x] = 0x7FFF;
+        }
         return;
     }
 
@@ -149,11 +182,11 @@ pub fn render_scanline(
     // Collect BG layers active in this mode.
     let (text_bgs, affine_bgs): (&[usize], &[usize]) = match mode {
         0 => (&[0, 1, 2, 3][..], &[][..]),
-        1 => (&[0, 1, 2][..],    &[3][..]),
-        2 => (&[0, 1][..],       &[2, 3][..]),
-        3 => (&[0, 1, 2][..],    &[3][..]),
-        4 => (&[0, 1][..],       &[2, 3][..]),
-        5 => (&[0, 1][..],       &[2, 3][..]),
+        1 => (&[0, 1, 2][..], &[3][..]),
+        2 => (&[0, 1][..], &[2, 3][..]),
+        3 => (&[0, 1, 2][..], &[3][..]),
+        4 => (&[0, 1][..], &[2, 3][..]),
+        5 => (&[0, 1][..], &[2, 3][..]),
         _ => (&[][..], &[][..]),
     };
 
@@ -166,7 +199,9 @@ pub fn render_scanline(
     let bg0_is_3d = engine.dispcnt & (1 << 3) != 0 && framebuffer_3d.is_some();
 
     for &n in text_bgs {
-        if dispcnt_bg_enable & (1 << n) == 0 { continue; }
+        if dispcnt_bg_enable & (1 << n) == 0 {
+            continue;
+        }
         if n == 0 && bg0_is_3d {
             // Synthesize BG0 from the 3D framebuffer.
             let fb3d = framebuffer_3d.unwrap();
@@ -176,7 +211,11 @@ pub fn render_scanline(
             for x in 0..256 {
                 let pixel = fb3d[line_off + x];
                 if pixel & (1 << 15) != 0 {
-                    layer[x] = Some(bg::BgPixel { color: pixel & 0x7FFF, priority, bg_index: 0 });
+                    layer[x] = Some(bg::BgPixel {
+                        color: pixel & 0x7FFF,
+                        priority,
+                        bg_index: 0,
+                    });
                 }
             }
             bg_layers[0] = Some(layer);
@@ -187,7 +226,9 @@ pub fn render_scanline(
         bg_layers[n] = Some(layer);
     }
     for &n in affine_bgs {
-        if dispcnt_bg_enable & (1 << n) == 0 { continue; }
+        if dispcnt_bg_enable & (1 << n) == 0 {
+            continue;
+        }
         let mut layer = [None; 256];
         if mode >= 3 {
             bg::render_bitmap_bg(engine, n, palette, vram, &mut layer);

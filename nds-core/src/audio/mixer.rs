@@ -32,7 +32,9 @@ fn produce_sample(audio: &mut Audio, bus_read8: &mut dyn FnMut(u32) -> u8) {
 
     for ch_id in 0..16 {
         let ch = &mut audio.channels[ch_id];
-        if !ch.active { continue; }
+        if !ch.active {
+            continue;
+        }
 
         let sample = advance_channel(ch, ch_id, bus_read8);
 
@@ -103,7 +105,13 @@ mod tests {
         // the formula is L=src×(127-pan)/128, R=src×pan/128, so center
         // has a ~1/128 asymmetry. Allow that.
         let ratio = (out[0] as f32) / (out[1] as f32);
-        assert!((0.9..1.1).contains(&ratio), "center pan: L/R = {} (L={} R={})", ratio, out[0], out[1]);
+        assert!(
+            (0.9..1.1).contains(&ratio),
+            "center pan: L/R = {} (L={} R={})",
+            ratio,
+            out[0],
+            out[1]
+        );
     }
 
     #[test]
@@ -119,7 +127,11 @@ mod tests {
         a.drain(&mut out);
         assert!(out[0] != 0);
         // Right side should be 0 (within rounding).
-        assert!(out[1].abs() < 50, "expected right channel silent, got {}", out[1]);
+        assert!(
+            out[1].abs() < 50,
+            "expected right channel silent, got {}",
+            out[1]
+        );
     }
 
     #[test]

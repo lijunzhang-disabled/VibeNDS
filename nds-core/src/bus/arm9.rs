@@ -799,7 +799,10 @@ mod tests {
         let mut bus = Bus9::new(
             &mut mem,
             &mut shared,
-            TcmRegion { base: 0, size_bytes: 32 * 1024 },
+            TcmRegion {
+                base: 0,
+                size_bytes: 32 * 1024,
+            },
             TcmRegion::disabled(),
         );
 

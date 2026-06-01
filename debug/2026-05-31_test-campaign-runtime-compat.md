@@ -76,10 +76,11 @@ homebrew:
    chip deselect and old-libnds-friendly EEPROM identification behavior.
 
 7. **libfat is a separate DLDI-backed block-device problem.**
-   The current emulator can satisfy NitroFS and EEPROM paths, but
-   `filesystem/libfat/libfatdir` still has only a DLDI stub and no mounted FAT
-   block device. That requires real DLDI/FAT backing, not another Slot-1
-   command tweak.
+   The emulator now services Calico's block-device PXI channel for DLDI and
+   provides a synthetic FAT16 volume. The final ROM-level failure was a BPB
+   detail: the test image used the 32-bit total-sector field even though the
+   32K-sector FAT16 volume fits in the 16-bit total-sector field expected by
+   libfat's FAT12/16 VBR probe.
 
 ## Fix
 
@@ -109,6 +110,9 @@ Implemented during this sweep:
   command register byte order, `ROMCTRL`, `CARD_DATA_RD`, and `EXMEMCNT`.
 - AUXSPI transaction reset on deselect and EEPROM identification/status
   behavior compatible with the devkitPro EEPROM sample.
+- Emulator-backed DLDI/PXI block-device service for Calico DLDI init,
+  presence, sector reads, and sector writes, backed by a synthetic FAT16
+  volume whose BPB matches libfat's FAT12/16 VBR probe.
 
 ## Regression Tests
 
@@ -148,21 +152,18 @@ Manual/probe evidence gathered during the sweep:
 - maxmod audio examples produce active channels and nonzero mixed PCM after
   injected input.
 - `filesystem/nitrofs/nitrodir` mounts NitroFS and lists embedded files.
+- `filesystem/libfat/libfatdir` mounts the emulator-backed DLDI FAT16 volume
+  and lists the synthetic root directory entries `README.TXT` and `[GAMES]`.
 - `card/eeprom` opens Slot-1, identifies EEPROM, and reads erased backup
   bytes after injected input.
 - hbmenu `argvTest`, cellsDS, neo-engine, Flappy Bird DS, and Spelunky DS now
-  reach visible startup/title/menu screens. Flappy also advances through a
-  touch/A-driven gameplay loop to a game-over screen.
+  reach visible startup/title/menu screens. Flappy advances through a
+  touch/A-driven gameplay loop to a game-over screen, and Spelunky advances
+  from its title/menu screen into an in-level cave scene after a Left/L input
+  sequence.
 
 ## Known Remaining Work
 
-- `filesystem/libfat/libfatdir` still needs a ROM-level pass. An
-  emulator-backed DLDI/PXI block-device path now exists with a synthetic
-  FAT16 image and unit coverage for init, sector-count exposure, and boot
-  sector reads, but the temporary devkitPro ROM probe has not yet produced a
-  successful root directory listing.
-- Spelunky DS reaches the title/menu screen, but the correct interaction
-  sequence for entering gameplay still needs to be driven and verified.
 - Graphics results are smoke-level compatibility checks, not pixel-perfect
   comparisons against hardware or melonDS.
 
@@ -177,4 +178,5 @@ old-libnds IRQ assumptions.
 
 For filesystem work, keep NitroFS/card access separate from libfat/DLDI.
 NitroFS proves Slot-1 ROM reads; EEPROM proves AUXSPI backup access; libfat
-requires a mounted FAT block device and a patched DLDI interface.
+requires a mounted FAT block device with a BPB layout that matches libfat's
+probe rules.

@@ -61,7 +61,10 @@ impl BackupKind {
     }
 
     pub fn is_flash(self) -> bool {
-        matches!(self, BackupKind::Flash256K | BackupKind::Flash512K | BackupKind::Flash1M)
+        matches!(
+            self,
+            BackupKind::Flash256K | BackupKind::Flash512K | BackupKind::Flash1M
+        )
     }
 
     /// EEPROM/FRAM address-byte width: 1 byte for 512B, 2 bytes for 8K,
@@ -69,7 +72,7 @@ impl BackupKind {
     pub fn addr_bytes(self) -> u8 {
         match self {
             BackupKind::Eeprom512B => 1,
-            BackupKind::Eeprom8K   => 2,
+            BackupKind::Eeprom8K => 2,
             BackupKind::Eeprom64K | BackupKind::Fram32K => 3,
             BackupKind::Flash256K | BackupKind::Flash512K | BackupKind::Flash1M => 3,
             BackupKind::None => 0,
@@ -90,10 +93,17 @@ impl BackupKind {
 enum Phase {
     Idle,
     /// Reading address bytes after a READ/WRITE command.
-    Addr { cmd: u8, remaining: u8, addr: u32 },
+    Addr {
+        cmd: u8,
+        remaining: u8,
+        addr: u32,
+    },
     /// Streaming data after address bytes; for READ we return data,
     /// for WRITE we accept it.
-    Data { cmd: u8, addr: u32 },
+    Data {
+        cmd: u8,
+        addr: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,11 +149,16 @@ impl AuxSpi {
     }
 
     pub fn export_save(&self) -> Option<Vec<u8>> {
-        if matches!(self.kind, BackupKind::None) { None }
-        else { Some(self.storage.clone()) }
+        if matches!(self.kind, BackupKind::None) {
+            None
+        } else {
+            Some(self.storage.clone())
+        }
     }
 
-    pub fn read_cnt(&self) -> u16 { self.cnt & !(1 << 7) }
+    pub fn read_cnt(&self) -> u16 {
+        self.cnt & !(1 << 7)
+    }
 
     pub fn write_cnt(&mut self, val: u16) {
         let selected = val & (1 << 15) != 0 && val & (1 << 13) != 0;
@@ -153,7 +168,9 @@ impl AuxSpi {
         self.cnt = val;
     }
 
-    pub fn read_data(&self) -> u8 { self.data_reg }
+    pub fn read_data(&self) -> u8 {
+        self.data_reg
+    }
 
     /// Triggered on write to AUXSPIDATA. Returns true if the
     /// transfer-complete IRQ should be raised on ARM7.
@@ -185,13 +202,24 @@ impl AuxSpi {
     fn handle_byte(&mut self, byte_in: u8) -> u8 {
         match self.phase {
             Phase::Idle => self.handle_command(byte_in),
-            Phase::Addr { cmd, remaining, addr } => {
+            Phase::Addr {
+                cmd,
+                remaining,
+                addr,
+            } => {
                 let new_addr = (addr << 8) | byte_in as u32;
                 if remaining > 1 {
-                    self.phase = Phase::Addr { cmd, remaining: remaining - 1, addr: new_addr };
+                    self.phase = Phase::Addr {
+                        cmd,
+                        remaining: remaining - 1,
+                        addr: new_addr,
+                    };
                     0
                 } else {
-                    self.phase = Phase::Data { cmd, addr: new_addr & ((self.storage.len() as u32).saturating_sub(1)) };
+                    self.phase = Phase::Data {
+                        cmd,
+                        addr: new_addr & ((self.storage.len() as u32).saturating_sub(1)),
+                    };
                     0
                 }
             }
@@ -209,54 +237,82 @@ impl AuxSpi {
                 // them on an invalid-command 0xFF.
                 self.status
             }
-            0x03 => { // READ
-                self.phase = Phase::Addr { cmd, remaining: addr_bytes, addr: 0 };
+            0x03 => {
+                // READ
+                self.phase = Phase::Addr {
+                    cmd,
+                    remaining: addr_bytes,
+                    addr: 0,
+                };
                 0
             }
-            0x02 => { // WRITE (EEPROM/FRAM); also same opcode as some FLASH chips
+            0x02 => {
+                // WRITE (EEPROM/FRAM); also same opcode as some FLASH chips
                 if self.status & 0x02 != 0 {
-                    self.phase = Phase::Addr { cmd, remaining: addr_bytes, addr: 0 };
+                    self.phase = Phase::Addr {
+                        cmd,
+                        remaining: addr_bytes,
+                        addr: 0,
+                    };
                 } else {
                     self.phase = Phase::Idle;
                 }
                 0
             }
-            0x0A if self.kind.is_flash() => { // FLASH PAGE_PROGRAM
+            0x0A if self.kind.is_flash() => {
+                // FLASH PAGE_PROGRAM
                 if self.status & 0x02 != 0 {
-                    self.phase = Phase::Addr { cmd, remaining: addr_bytes, addr: 0 };
+                    self.phase = Phase::Addr {
+                        cmd,
+                        remaining: addr_bytes,
+                        addr: 0,
+                    };
                 } else {
                     self.phase = Phase::Idle;
                 }
                 0
             }
-            0xD8 if self.kind.is_flash() => { // FLASH SECTOR_ERASE
+            0xD8 if self.kind.is_flash() => {
+                // FLASH SECTOR_ERASE
                 if self.status & 0x02 != 0 {
-                    self.phase = Phase::Addr { cmd, remaining: addr_bytes, addr: 0 };
+                    self.phase = Phase::Addr {
+                        cmd,
+                        remaining: addr_bytes,
+                        addr: 0,
+                    };
                 } else {
                     self.phase = Phase::Idle;
                 }
                 0
             }
-            0x05 => { // READ_STATUS
+            0x05 => {
+                // READ_STATUS
                 self.phase = Phase::Data { cmd, addr: 0 };
                 0
             }
-            0x06 => { // WRITE_ENABLE
+            0x06 => {
+                // WRITE_ENABLE
                 self.status |= 0x02;
                 self.phase = Phase::Idle;
                 0
             }
-            0x04 => { // WRITE_DISABLE
+            0x04 => {
+                // WRITE_DISABLE
                 self.status &= !0x02;
                 self.phase = Phase::Idle;
                 0
             }
-            0x9F => { // READ_JEDEC_ID (FLASH only; EEPROM ignores)
+            0x9F => {
+                // READ_JEDEC_ID (FLASH only; EEPROM ignores)
                 self.phase = Phase::Data { cmd, addr: 0 };
                 0
             }
             _ => {
-                log::trace!("AUXSPI: unhandled cmd 0x{:02X} for kind {:?}", cmd, self.kind);
+                log::trace!(
+                    "AUXSPI: unhandled cmd 0x{:02X} for kind {:?}",
+                    cmd,
+                    self.kind
+                );
                 self.phase = Phase::Idle;
                 0xFF
             }
@@ -267,10 +323,14 @@ impl AuxSpi {
         match cmd {
             0x03 => {
                 let byte = self.storage.get(addr as usize).copied().unwrap_or(0xFF);
-                self.phase = Phase::Data { cmd, addr: addr.wrapping_add(1) };
+                self.phase = Phase::Data {
+                    cmd,
+                    addr: addr.wrapping_add(1),
+                };
                 byte
             }
-            0x02 | 0x0A => { // EEPROM WRITE or FLASH PAGE_PROGRAM
+            0x02 | 0x0A => {
+                // EEPROM WRITE or FLASH PAGE_PROGRAM
                 if let Some(slot) = self.storage.get_mut(addr as usize) {
                     if cmd == 0x0A {
                         // FLASH page-program AND-masks against existing data
@@ -280,10 +340,14 @@ impl AuxSpi {
                         *slot = byte_in;
                     }
                 }
-                self.phase = Phase::Data { cmd, addr: addr.wrapping_add(1) };
+                self.phase = Phase::Data {
+                    cmd,
+                    addr: addr.wrapping_add(1),
+                };
                 0
             }
-            0xD8 => { // FLASH SECTOR_ERASE — fires once on first data byte
+            0xD8 => {
+                // FLASH SECTOR_ERASE — fires once on first data byte
                 let base = (addr as usize) & !0xFFF; // 4 KB sectors
                 let end = (base + 0x1000).min(self.storage.len());
                 for b in &mut self.storage[base..end] {
@@ -305,7 +369,10 @@ impl AuxSpi {
                     [0xFF, 0xFF, 0xFF]
                 };
                 let idx = (addr as usize).min(2);
-                self.phase = Phase::Data { cmd, addr: addr.wrapping_add(1) };
+                self.phase = Phase::Data {
+                    cmd,
+                    addr: addr.wrapping_add(1),
+                };
                 id[idx]
             }
             _ => 0xFF,
@@ -321,7 +388,9 @@ impl AuxSpi {
 }
 
 impl Default for AuxSpi {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

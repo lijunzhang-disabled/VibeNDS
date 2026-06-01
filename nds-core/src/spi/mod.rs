@@ -29,12 +29,12 @@
 use serde::{Deserialize, Serialize};
 
 pub mod firmware;
-pub mod tsc;
 pub mod pmic;
+pub mod tsc;
 
 pub use firmware::Firmware;
-pub use tsc::Tsc;
 pub use pmic::Pmic;
+pub use tsc::Tsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Device {
@@ -90,7 +90,9 @@ impl SpiBus {
     }
 
     /// True if the master enable bit (bit 15) is set.
-    pub fn enabled(&self) -> bool { self.cnt & (1 << 15) != 0 }
+    pub fn enabled(&self) -> bool {
+        self.cnt & (1 << 15) != 0
+    }
 
     /// Returns the value the CPU reads from SPICNT (bit 7 always 0).
     pub fn read_cnt(&self) -> u16 {
@@ -103,7 +105,9 @@ impl SpiBus {
         self.cnt = val;
     }
 
-    pub fn read_data(&self) -> u8 { self.data }
+    pub fn read_data(&self) -> u8 {
+        self.data
+    }
 
     /// Triggered by a CPU write to `SPIDATA`. Performs the byte exchange
     /// and returns `true` if `SPICNT.transfer_complete_irq_enable` is set
@@ -161,7 +165,9 @@ impl SpiBus {
 }
 
 impl Default for SpiBus {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

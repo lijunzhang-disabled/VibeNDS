@@ -3,9 +3,9 @@
 //! 19 ARMv4T formats plus the ARMv5T `BLX` register/immediate additions
 //! gated on `is_arm9`.
 
-use super::Cpu;
-use super::alu::{ShiftType, add_with_carry, barrel_shift, sub_with_carry};
+use super::alu::{add_with_carry, barrel_shift, sub_with_carry, ShiftType};
 use super::bus::CpuBus;
+use super::Cpu;
 
 impl Cpu {
     pub fn execute_thumb<B: CpuBus>(&mut self, bus: &mut B, opcode: u16) -> u32 {
@@ -72,8 +72,11 @@ impl Cpu {
             0xF8..=0xFF => self.thumb_bl_suffix(opcode),
 
             _ => {
-                log::warn!("THUMB undefined: 0x{:04X} at PC=0x{:08X}",
-                    opcode, self.regs[15].wrapping_sub(4));
+                log::warn!(
+                    "THUMB undefined: 0x{:04X} at PC=0x{:08X}",
+                    opcode,
+                    self.regs[15].wrapping_sub(4)
+                );
                 1
             }
         }
@@ -191,52 +194,97 @@ impl Cpu {
         let b = self.reg(rs);
 
         match op {
-            0x0 => { let r = a & b; self.regs[rd as usize] = r; self.cpsr.set_nz(r); }
-            0x1 => { let r = a ^ b; self.regs[rd as usize] = r; self.cpsr.set_nz(r); }
+            0x0 => {
+                let r = a & b;
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+            }
+            0x1 => {
+                let r = a ^ b;
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+            }
             0x2 => {
                 let (r, c) = barrel_shift(a, ShiftType::Lsl, b as u8, self.cpsr.c(), false);
-                self.regs[rd as usize] = r; self.cpsr.set_nz(r); self.cpsr.set_c(c);
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
             }
             0x3 => {
                 let (r, c) = barrel_shift(a, ShiftType::Lsr, b as u8, self.cpsr.c(), false);
-                self.regs[rd as usize] = r; self.cpsr.set_nz(r); self.cpsr.set_c(c);
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
             }
             0x4 => {
                 let (r, c) = barrel_shift(a, ShiftType::Asr, b as u8, self.cpsr.c(), false);
-                self.regs[rd as usize] = r; self.cpsr.set_nz(r); self.cpsr.set_c(c);
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
             }
             0x5 => {
                 let (r, c, v) = add_with_carry(a, b, self.cpsr.c());
                 self.regs[rd as usize] = r;
-                self.cpsr.set_nz(r); self.cpsr.set_c(c); self.cpsr.set_v(v);
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
+                self.cpsr.set_v(v);
             }
             0x6 => {
                 let (r, c, v) = sub_with_carry(a, b, self.cpsr.c());
                 self.regs[rd as usize] = r;
-                self.cpsr.set_nz(r); self.cpsr.set_c(c); self.cpsr.set_v(v);
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
+                self.cpsr.set_v(v);
             }
             0x7 => {
                 let (r, c) = barrel_shift(a, ShiftType::Ror, b as u8, self.cpsr.c(), false);
-                self.regs[rd as usize] = r; self.cpsr.set_nz(r); self.cpsr.set_c(c);
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
             }
-            0x8 => { let r = a & b; self.cpsr.set_nz(r); }
+            0x8 => {
+                let r = a & b;
+                self.cpsr.set_nz(r);
+            }
             0x9 => {
                 let (r, c, v) = sub_with_carry(0, b, true);
                 self.regs[rd as usize] = r;
-                self.cpsr.set_nz(r); self.cpsr.set_c(c); self.cpsr.set_v(v);
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
+                self.cpsr.set_v(v);
             }
             0xA => {
                 let (r, c, v) = sub_with_carry(a, b, true);
-                self.cpsr.set_nz(r); self.cpsr.set_c(c); self.cpsr.set_v(v);
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
+                self.cpsr.set_v(v);
             }
             0xB => {
                 let (r, c, v) = add_with_carry(a, b, false);
-                self.cpsr.set_nz(r); self.cpsr.set_c(c); self.cpsr.set_v(v);
+                self.cpsr.set_nz(r);
+                self.cpsr.set_c(c);
+                self.cpsr.set_v(v);
             }
-            0xC => { let r = a | b; self.regs[rd as usize] = r; self.cpsr.set_nz(r); }
-            0xD => { let r = a.wrapping_mul(b); self.regs[rd as usize] = r; self.cpsr.set_nz(r); }
-            0xE => { let r = a & !b; self.regs[rd as usize] = r; self.cpsr.set_nz(r); }
-            0xF => { let r = !b; self.regs[rd as usize] = r; self.cpsr.set_nz(r); }
+            0xC => {
+                let r = a | b;
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+            }
+            0xD => {
+                let r = a.wrapping_mul(b);
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+            }
+            0xE => {
+                let r = a & !b;
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+            }
+            0xF => {
+                let r = !b;
+                self.regs[rd as usize] = r;
+                self.cpsr.set_nz(r);
+            }
             _ => unreachable!(),
         }
         1
@@ -291,7 +339,13 @@ impl Cpu {
             _ => unreachable!(),
         }
 
-        if (op == 0 || op == 2) && rd == 15 { 3 } else if op == 3 { 3 } else { 1 }
+        if (op == 0 || op == 2) && rd == 15 {
+            3
+        } else if op == 3 {
+            3
+        } else {
+            1
+        }
     }
 
     fn thumb_ldr_pc<B: CpuBus>(&mut self, bus: &mut B, opcode: u16) -> u32 {
@@ -349,7 +403,11 @@ impl Cpu {
         let rd = (opcode & 7) as u8;
 
         let base = self.reg(rb);
-        let addr = if b { base.wrapping_add(offset) } else { base.wrapping_add(offset << 2) };
+        let addr = if b {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_add(offset << 2)
+        };
 
         if l {
             if b {
@@ -496,7 +554,11 @@ impl Cpu {
 
         for i in 0..8u8 {
             if rlist & (1 << i) != 0 {
-                let val = if i == rb && rb_in_list && !rb_is_lowest { final_addr } else { self.reg(i) };
+                let val = if i == rb && rb_in_list && !rb_is_lowest {
+                    final_addr
+                } else {
+                    self.reg(i)
+                };
                 bus.write32(addr, val);
                 addr = addr.wrapping_add(4);
             }
@@ -647,19 +709,19 @@ mod tests {
     fn test_thumb_blx_register_arm9() {
         let (mut cpu, mut bus) = arm9_thumb(0x100);
         cpu.regs[15] = 0x100; // PC = exec+4
-        cpu.regs[2] = 0x40;   // ARM target (bit 0 = 0)
-        // Format 5 op=11 with h1=1: BLX Rm. Encoding bits:
-        //   [15:8] = 0100_0111 (0x47), [7:6] = 0b11 (op=3), bit 7 = h1 = 1
-        // Actually the format is:
-        //   [15:10] = 010001
-        //   [9:8]   = op
-        //   [7]     = H1
-        //   [6]     = H2
-        //   [5:3]   = Rs (low)
-        //   [2:0]   = Rd (low)
-        // BLX Rm: op=11, H1=1, so bits [9:7] = 111, [15:10] = 010001
-        // Top byte = 0100_0111 = 0x47, low byte = 1_H2_Rs(3)_000 with H2=0, Rs=2 → 1_0_010_000 = 0x90
-        // Full opcode = 0x4790
+        cpu.regs[2] = 0x40; // ARM target (bit 0 = 0)
+                            // Format 5 op=11 with h1=1: BLX Rm. Encoding bits:
+                            //   [15:8] = 0100_0111 (0x47), [7:6] = 0b11 (op=3), bit 7 = h1 = 1
+                            // Actually the format is:
+                            //   [15:10] = 010001
+                            //   [9:8]   = op
+                            //   [7]     = H1
+                            //   [6]     = H2
+                            //   [5:3]   = Rs (low)
+                            //   [2:0]   = Rd (low)
+                            // BLX Rm: op=11, H1=1, so bits [9:7] = 111, [15:10] = 010001
+                            // Top byte = 0100_0111 = 0x47, low byte = 1_H2_Rs(3)_000 with H2=0, Rs=2 → 1_0_010_000 = 0x90
+                            // Full opcode = 0x4790
         cpu.execute_thumb(&mut bus, 0x4790);
         assert_eq!(cpu.regs[14], (0x100 - 2) | 1); // LR = next | 1
         assert_eq!(cpu.regs[15], 0x40);

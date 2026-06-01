@@ -24,7 +24,13 @@ impl ShiftType {
 }
 
 #[inline]
-pub fn barrel_shift(value: u32, shift_type: ShiftType, amount: u8, carry_in: bool, immediate: bool) -> (u32, bool) {
+pub fn barrel_shift(
+    value: u32,
+    shift_type: ShiftType,
+    amount: u8,
+    carry_in: bool,
+    immediate: bool,
+) -> (u32, bool) {
     match shift_type {
         ShiftType::Lsl => shift_lsl(value, amount, carry_in),
         ShiftType::Lsr => shift_lsr(value, amount, carry_in, immediate),
@@ -113,19 +119,43 @@ fn shift_ror(value: u32, amount: u8, carry_in: bool, immediate: bool) -> (u32, b
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AluOp {
-    And = 0x0, Eor = 0x1, Sub = 0x2, Rsb = 0x3,
-    Add = 0x4, Adc = 0x5, Sbc = 0x6, Rsc = 0x7,
-    Tst = 0x8, Teq = 0x9, Cmp = 0xA, Cmn = 0xB,
-    Orr = 0xC, Mov = 0xD, Bic = 0xE, Mvn = 0xF,
+    And = 0x0,
+    Eor = 0x1,
+    Sub = 0x2,
+    Rsb = 0x3,
+    Add = 0x4,
+    Adc = 0x5,
+    Sbc = 0x6,
+    Rsc = 0x7,
+    Tst = 0x8,
+    Teq = 0x9,
+    Cmp = 0xA,
+    Cmn = 0xB,
+    Orr = 0xC,
+    Mov = 0xD,
+    Bic = 0xE,
+    Mvn = 0xF,
 }
 
 impl AluOp {
     pub fn from_u8(val: u8) -> Self {
         match val & 0xF {
-            0x0 => AluOp::And, 0x1 => AluOp::Eor, 0x2 => AluOp::Sub, 0x3 => AluOp::Rsb,
-            0x4 => AluOp::Add, 0x5 => AluOp::Adc, 0x6 => AluOp::Sbc, 0x7 => AluOp::Rsc,
-            0x8 => AluOp::Tst, 0x9 => AluOp::Teq, 0xA => AluOp::Cmp, 0xB => AluOp::Cmn,
-            0xC => AluOp::Orr, 0xD => AluOp::Mov, 0xE => AluOp::Bic, 0xF => AluOp::Mvn,
+            0x0 => AluOp::And,
+            0x1 => AluOp::Eor,
+            0x2 => AluOp::Sub,
+            0x3 => AluOp::Rsb,
+            0x4 => AluOp::Add,
+            0x5 => AluOp::Adc,
+            0x6 => AluOp::Sbc,
+            0x7 => AluOp::Rsc,
+            0x8 => AluOp::Tst,
+            0x9 => AluOp::Teq,
+            0xA => AluOp::Cmp,
+            0xB => AluOp::Cmn,
+            0xC => AluOp::Orr,
+            0xD => AluOp::Mov,
+            0xE => AluOp::Bic,
+            0xF => AluOp::Mvn,
             _ => unreachable!(),
         }
     }
@@ -137,8 +167,14 @@ impl AluOp {
     pub fn is_logical(self) -> bool {
         matches!(
             self,
-            AluOp::And | AluOp::Eor | AluOp::Tst | AluOp::Teq
-                | AluOp::Orr | AluOp::Mov | AluOp::Bic | AluOp::Mvn
+            AluOp::And
+                | AluOp::Eor
+                | AluOp::Tst
+                | AluOp::Teq
+                | AluOp::Orr
+                | AluOp::Mov
+                | AluOp::Bic
+                | AluOp::Mvn
         )
     }
 }
@@ -191,45 +227,93 @@ mod tests {
 
     #[test]
     fn test_lsl() {
-        assert_eq!(barrel_shift(0x80000000, ShiftType::Lsl, 1, false, false), (0, true));
-        assert_eq!(barrel_shift(1, ShiftType::Lsl, 31, false, false), (0x80000000, false));
-        assert_eq!(barrel_shift(0xFF, ShiftType::Lsl, 0, true, false), (0xFF, true));
-        assert_eq!(barrel_shift(0xFF, ShiftType::Lsl, 0, false, false), (0xFF, false));
+        assert_eq!(
+            barrel_shift(0x80000000, ShiftType::Lsl, 1, false, false),
+            (0, true)
+        );
+        assert_eq!(
+            barrel_shift(1, ShiftType::Lsl, 31, false, false),
+            (0x80000000, false)
+        );
+        assert_eq!(
+            barrel_shift(0xFF, ShiftType::Lsl, 0, true, false),
+            (0xFF, true)
+        );
+        assert_eq!(
+            barrel_shift(0xFF, ShiftType::Lsl, 0, false, false),
+            (0xFF, false)
+        );
     }
 
     #[test]
     fn test_lsr() {
         assert_eq!(barrel_shift(1, ShiftType::Lsr, 1, false, false), (0, true));
-        assert_eq!(barrel_shift(0x80000000, ShiftType::Lsr, 31, false, false), (1, false));
-        assert_eq!(barrel_shift(0x80000000, ShiftType::Lsr, 0, false, true), (0, true));
+        assert_eq!(
+            barrel_shift(0x80000000, ShiftType::Lsr, 31, false, false),
+            (1, false)
+        );
+        assert_eq!(
+            barrel_shift(0x80000000, ShiftType::Lsr, 0, false, true),
+            (0, true)
+        );
     }
 
     #[test]
     fn test_asr() {
-        assert_eq!(barrel_shift(0x80000000, ShiftType::Asr, 1, false, false), (0xC0000000, false));
-        assert_eq!(barrel_shift(0x80000000, ShiftType::Asr, 31, false, false), (0xFFFFFFFF, false));
-        assert_eq!(barrel_shift(0x80000000, ShiftType::Asr, 0, false, true), (0xFFFFFFFF, true));
-        assert_eq!(barrel_shift(0x7FFFFFFF, ShiftType::Asr, 0, false, true), (0, false));
+        assert_eq!(
+            barrel_shift(0x80000000, ShiftType::Asr, 1, false, false),
+            (0xC0000000, false)
+        );
+        assert_eq!(
+            barrel_shift(0x80000000, ShiftType::Asr, 31, false, false),
+            (0xFFFFFFFF, false)
+        );
+        assert_eq!(
+            barrel_shift(0x80000000, ShiftType::Asr, 0, false, true),
+            (0xFFFFFFFF, true)
+        );
+        assert_eq!(
+            barrel_shift(0x7FFFFFFF, ShiftType::Asr, 0, false, true),
+            (0, false)
+        );
     }
 
     #[test]
     fn test_ror() {
-        assert_eq!(barrel_shift(1, ShiftType::Ror, 1, false, false), (0x80000000, true));
-        assert_eq!(barrel_shift(0x80000000, ShiftType::Ror, 1, false, false), (0x40000000, false));
+        assert_eq!(
+            barrel_shift(1, ShiftType::Ror, 1, false, false),
+            (0x80000000, true)
+        );
+        assert_eq!(
+            barrel_shift(0x80000000, ShiftType::Ror, 1, false, false),
+            (0x40000000, false)
+        );
     }
 
     #[test]
     fn test_rrx() {
-        assert_eq!(barrel_shift(1, ShiftType::Ror, 0, true, true), (0x80000000, true));
+        assert_eq!(
+            barrel_shift(1, ShiftType::Ror, 0, true, true),
+            (0x80000000, true)
+        );
         assert_eq!(barrel_shift(1, ShiftType::Ror, 0, false, true), (0, true));
-        assert_eq!(barrel_shift(0, ShiftType::Ror, 0, true, true), (0x80000000, false));
+        assert_eq!(
+            barrel_shift(0, ShiftType::Ror, 0, true, true),
+            (0x80000000, false)
+        );
     }
 
     #[test]
     fn test_add_with_carry() {
         assert_eq!(add_with_carry(0xFFFFFFFF, 1, false), (0, true, false));
-        assert_eq!(add_with_carry(0x7FFFFFFF, 1, false), (0x80000000, false, true));
-        assert_eq!(add_with_carry(0x80000000, 0x80000000, false), (0, true, true));
+        assert_eq!(
+            add_with_carry(0x7FFFFFFF, 1, false),
+            (0x80000000, false, true)
+        );
+        assert_eq!(
+            add_with_carry(0x80000000, 0x80000000, false),
+            (0, true, true)
+        );
     }
 
     #[test]

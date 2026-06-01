@@ -10,8 +10,8 @@
 //! mapping: tiles arranged in a 32-tile-wide grid (256 px wide bitmap),
 //! same as GBA.
 
-use crate::vram::VramRouter;
 use super::{Engine2d, Which};
+use crate::vram::VramRouter;
 
 const SCREEN_WIDTH: usize = 256;
 
@@ -33,7 +33,10 @@ pub struct ObjLine {
 
 impl Default for ObjLine {
     fn default() -> Self {
-        ObjLine { pixel: [None; SCREEN_WIDTH], window: [false; SCREEN_WIDTH] }
+        ObjLine {
+            pixel: [None; SCREEN_WIDTH],
+            window: [false; SCREEN_WIDTH],
+        }
     }
 }
 
@@ -79,9 +82,13 @@ pub fn render_objs(
         let tile_num = (attr2 & 0x3FF) as u32;
 
         let mut sprite_y = (attr0 & 0xFF) as i32;
-        if sprite_y >= 192 { sprite_y -= 256; }
+        if sprite_y >= 192 {
+            sprite_y -= 256;
+        }
         let mut sprite_x = (attr1 & 0x1FF) as i32;
-        if sprite_x >= 256 { sprite_x -= 512; }
+        if sprite_x >= 256 {
+            sprite_x -= 512;
+        }
 
         let (box_w, box_h) = if affine && disable_or_double {
             (w as i32 * 2, h as i32 * 2)
@@ -101,9 +108,7 @@ pub fn render_objs(
             // Affine params live at OAM offsets 6,14,22,30 within each
             // 32-byte affine group: PA, PB, PC, PD.
             let group_base = affine_index * 32;
-            let read_i16 = |off: usize| -> i16 {
-                i16::from_le_bytes([oam[off], oam[off + 1]])
-            };
+            let read_i16 = |off: usize| -> i16 { i16::from_le_bytes([oam[off], oam[off + 1]]) };
             let pa = read_i16(group_base + 0x06) as i32;
             let pb = read_i16(group_base + 0x0E) as i32;
             let pc = read_i16(group_base + 0x16) as i32;
@@ -118,7 +123,9 @@ pub fn render_objs(
 
             for col_in_box in 0..box_w {
                 let screen_x = sprite_x + col_in_box;
-                if screen_x < 0 || screen_x >= SCREEN_WIDTH as i32 { continue; }
+                if screen_x < 0 || screen_x >= SCREEN_WIDTH as i32 {
+                    continue;
+                }
                 let dx_box = col_in_box - cx_box;
                 let tex_x = ((pa * dx_box + pb * dy_box) >> 8) + cx_tex;
                 let tex_y = ((pc * dx_box + pd * dy_box) >> 8) + cy_tex;
@@ -126,27 +133,61 @@ pub fn render_objs(
                     continue;
                 }
                 emit_obj_pixel(
-                    engine.which, vram, palette,
-                    tile_num, tex_x as u32, tex_y as u32,
-                    w, h, bpp_8, palette_num, priority, gfx_mode,
-                    one_d_mapping, boundary, obj_ext_palette,
-                    screen_x as usize, out,
+                    engine.which,
+                    vram,
+                    palette,
+                    tile_num,
+                    tex_x as u32,
+                    tex_y as u32,
+                    w,
+                    h,
+                    bpp_8,
+                    palette_num,
+                    priority,
+                    gfx_mode,
+                    one_d_mapping,
+                    boundary,
+                    obj_ext_palette,
+                    screen_x as usize,
+                    out,
                 );
             }
         } else {
             let h_flip = attr1 & (1 << 12) != 0;
             let v_flip = attr1 & (1 << 13) != 0;
-            let row = if v_flip { (h as i32 - 1 - row_in_box) as u32 } else { row_in_box as u32 };
+            let row = if v_flip {
+                (h as i32 - 1 - row_in_box) as u32
+            } else {
+                row_in_box as u32
+            };
             for col_in_box in 0..box_w {
                 let screen_x = sprite_x + col_in_box;
-                if screen_x < 0 || screen_x >= SCREEN_WIDTH as i32 { continue; }
-                let col = if h_flip { (w as i32 - 1 - col_in_box) as u32 } else { col_in_box as u32 };
+                if screen_x < 0 || screen_x >= SCREEN_WIDTH as i32 {
+                    continue;
+                }
+                let col = if h_flip {
+                    (w as i32 - 1 - col_in_box) as u32
+                } else {
+                    col_in_box as u32
+                };
                 emit_obj_pixel(
-                    engine.which, vram, palette,
-                    tile_num, col, row, w, h, bpp_8,
-                    palette_num, priority, gfx_mode,
-                    one_d_mapping, boundary, obj_ext_palette,
-                    screen_x as usize, out,
+                    engine.which,
+                    vram,
+                    palette,
+                    tile_num,
+                    col,
+                    row,
+                    w,
+                    h,
+                    bpp_8,
+                    palette_num,
+                    priority,
+                    gfx_mode,
+                    one_d_mapping,
+                    boundary,
+                    obj_ext_palette,
+                    screen_x as usize,
+                    out,
                 );
             }
         }
@@ -155,9 +196,18 @@ pub fn render_objs(
 
 fn obj_size(shape: u16, size: u16) -> (u32, u32) {
     match (shape, size) {
-        (0, 0) => (8, 8),     (0, 1) => (16, 16),  (0, 2) => (32, 32),  (0, 3) => (64, 64),
-        (1, 0) => (16, 8),    (1, 1) => (32, 8),   (1, 2) => (32, 16),  (1, 3) => (64, 32),
-        (2, 0) => (8, 16),    (2, 1) => (8, 32),   (2, 2) => (16, 32),  (2, 3) => (32, 64),
+        (0, 0) => (8, 8),
+        (0, 1) => (16, 16),
+        (0, 2) => (32, 32),
+        (0, 3) => (64, 64),
+        (1, 0) => (16, 8),
+        (1, 1) => (32, 8),
+        (1, 2) => (32, 16),
+        (1, 3) => (64, 32),
+        (2, 0) => (8, 16),
+        (2, 1) => (8, 32),
+        (2, 2) => (16, 32),
+        (2, 3) => (32, 64),
         _ => (8, 8),
     }
 }
@@ -168,8 +218,10 @@ fn emit_obj_pixel(
     vram: &VramRouter,
     palette: &[u8],
     tile_num: u32,
-    tex_x: u32, tex_y: u32,
-    w: u32, h: u32,
+    tex_x: u32,
+    tex_y: u32,
+    w: u32,
+    h: u32,
     bpp_8: bool,
     palette_num: u8,
     priority: u8,
@@ -215,7 +267,11 @@ fn emit_obj_pixel(
         let addr = base + in_y * 4 + (in_x >> 1);
         let byte = read_obj_u8(which, vram, addr);
         let nibble = if in_x & 1 != 0 { byte >> 4 } else { byte & 0xF };
-        if nibble != 0 { palette_num * 16 + nibble } else { 0 }
+        if nibble != 0 {
+            palette_num * 16 + nibble
+        } else {
+            0
+        }
     };
 
     if index == 0 {
@@ -228,11 +284,23 @@ fn emit_obj_pixel(
         return;
     }
 
-    let color = obj_palette_color(which, vram, palette, index, palette_num, bpp_8, obj_ext_palette);
+    let color = obj_palette_color(
+        which,
+        vram,
+        palette,
+        index,
+        palette_num,
+        bpp_8,
+        obj_ext_palette,
+    );
 
     // Lower OAM index wins on ties — only overwrite if currently unset.
     if out.pixel[screen_x].is_none() {
-        out.pixel[screen_x] = Some(ObjPixel { color, priority, gfx_mode });
+        out.pixel[screen_x] = Some(ObjPixel {
+            color,
+            priority,
+            gfx_mode,
+        });
     }
 }
 

@@ -22,20 +22,41 @@ pub const H_SIZE: usize = 32 * 1024;
 pub const I_SIZE: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BankId { A, B, C, D, E, F, G, H, I }
+pub enum BankId {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+}
 
 impl BankId {
     pub const ALL: [BankId; 9] = [
-        BankId::A, BankId::B, BankId::C, BankId::D,
-        BankId::E, BankId::F, BankId::G, BankId::H, BankId::I,
+        BankId::A,
+        BankId::B,
+        BankId::C,
+        BankId::D,
+        BankId::E,
+        BankId::F,
+        BankId::G,
+        BankId::H,
+        BankId::I,
     ];
 
     pub fn size(self) -> usize {
         match self {
-            BankId::A => A_SIZE, BankId::B => B_SIZE,
-            BankId::C => C_SIZE, BankId::D => D_SIZE,
-            BankId::E => E_SIZE, BankId::F => F_SIZE,
-            BankId::G => G_SIZE, BankId::H => H_SIZE,
+            BankId::A => A_SIZE,
+            BankId::B => B_SIZE,
+            BankId::C => C_SIZE,
+            BankId::D => D_SIZE,
+            BankId::E => E_SIZE,
+            BankId::F => F_SIZE,
+            BankId::G => G_SIZE,
+            BankId::H => H_SIZE,
             BankId::I => I_SIZE,
         }
     }
@@ -118,61 +139,111 @@ pub fn decode_target(bank: BankId, cnt: u8) -> VramTarget {
 
     match (bank, mst) {
         // ─── Bank A (128 KB) — mst 0..3
-        (BankId::A, 0) => VramTarget::Lcdc { lcdc_offset: 0x00000 },
-        (BankId::A, 1) => VramTarget::EngineABg { base: (offset as u32) * 0x20000 },
-        (BankId::A, 2) => VramTarget::EngineAObj { base: ((offset & 1) as u32) * 0x20000 },
+        (BankId::A, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x00000,
+        },
+        (BankId::A, 1) => VramTarget::EngineABg {
+            base: (offset as u32) * 0x20000,
+        },
+        (BankId::A, 2) => VramTarget::EngineAObj {
+            base: ((offset & 1) as u32) * 0x20000,
+        },
         (BankId::A, 3) => VramTarget::TextureImage { slot: offset },
 
         // ─── Bank B (128 KB)
-        (BankId::B, 0) => VramTarget::Lcdc { lcdc_offset: 0x20000 },
-        (BankId::B, 1) => VramTarget::EngineABg { base: (offset as u32) * 0x20000 },
-        (BankId::B, 2) => VramTarget::EngineAObj { base: ((offset & 1) as u32) * 0x20000 },
+        (BankId::B, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x20000,
+        },
+        (BankId::B, 1) => VramTarget::EngineABg {
+            base: (offset as u32) * 0x20000,
+        },
+        (BankId::B, 2) => VramTarget::EngineAObj {
+            base: ((offset & 1) as u32) * 0x20000,
+        },
         (BankId::B, 3) => VramTarget::TextureImage { slot: offset },
 
         // ─── Bank C (128 KB)
-        (BankId::C, 0) => VramTarget::Lcdc { lcdc_offset: 0x40000 },
-        (BankId::C, 1) => VramTarget::EngineABg { base: (offset as u32) * 0x20000 },
-        (BankId::C, 2) => VramTarget::Arm7 { base: ((offset & 1) as u32) * 0x20000 },
+        (BankId::C, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x40000,
+        },
+        (BankId::C, 1) => VramTarget::EngineABg {
+            base: (offset as u32) * 0x20000,
+        },
+        (BankId::C, 2) => VramTarget::Arm7 {
+            base: ((offset & 1) as u32) * 0x20000,
+        },
         (BankId::C, 3) => VramTarget::TextureImage { slot: offset },
         (BankId::C, 4) => VramTarget::EngineBBg { base: 0 },
 
         // ─── Bank D (128 KB)
-        (BankId::D, 0) => VramTarget::Lcdc { lcdc_offset: 0x60000 },
-        (BankId::D, 1) => VramTarget::EngineABg { base: (offset as u32) * 0x20000 },
-        (BankId::D, 2) => VramTarget::Arm7 { base: ((offset & 1) as u32) * 0x20000 },
+        (BankId::D, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x60000,
+        },
+        (BankId::D, 1) => VramTarget::EngineABg {
+            base: (offset as u32) * 0x20000,
+        },
+        (BankId::D, 2) => VramTarget::Arm7 {
+            base: ((offset & 1) as u32) * 0x20000,
+        },
         (BankId::D, 3) => VramTarget::TextureImage { slot: offset },
         (BankId::D, 4) => VramTarget::EngineBObj { base: 0 },
 
         // ─── Bank E (64 KB)
-        (BankId::E, 0) => VramTarget::Lcdc { lcdc_offset: 0x80000 },
+        (BankId::E, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x80000,
+        },
         (BankId::E, 1) => VramTarget::EngineABg { base: 0 },
         (BankId::E, 2) => VramTarget::EngineAObj { base: 0 },
         (BankId::E, 3) => VramTarget::TexturePalette { slot: 0 },
         (BankId::E, 4) => VramTarget::BgExtPalA { slot: 0 },
 
         // ─── Bank F (16 KB) — offset encoding is bit 1 (×0x4000) | bit 0 (×0x10000)
-        (BankId::F, 0) => VramTarget::Lcdc { lcdc_offset: 0x90000 },
-        (BankId::F, 1) => VramTarget::EngineABg { base: f_g_bg_offset(offset) },
-        (BankId::F, 2) => VramTarget::EngineAObj { base: f_g_bg_offset(offset) },
-        (BankId::F, 3) => VramTarget::TexturePalette { slot: f_g_texpal_slot(offset) },
-        (BankId::F, 4) => VramTarget::BgExtPalA { slot: (offset & 1) as u8 },
+        (BankId::F, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x90000,
+        },
+        (BankId::F, 1) => VramTarget::EngineABg {
+            base: f_g_bg_offset(offset),
+        },
+        (BankId::F, 2) => VramTarget::EngineAObj {
+            base: f_g_bg_offset(offset),
+        },
+        (BankId::F, 3) => VramTarget::TexturePalette {
+            slot: f_g_texpal_slot(offset),
+        },
+        (BankId::F, 4) => VramTarget::BgExtPalA {
+            slot: (offset & 1) as u8,
+        },
         (BankId::F, 5) => VramTarget::ObjExtPalA,
 
         // ─── Bank G (16 KB)
-        (BankId::G, 0) => VramTarget::Lcdc { lcdc_offset: 0x94000 },
-        (BankId::G, 1) => VramTarget::EngineABg { base: f_g_bg_offset(offset) },
-        (BankId::G, 2) => VramTarget::EngineAObj { base: f_g_bg_offset(offset) },
-        (BankId::G, 3) => VramTarget::TexturePalette { slot: f_g_texpal_slot(offset) },
-        (BankId::G, 4) => VramTarget::BgExtPalA { slot: (offset & 1) as u8 },
+        (BankId::G, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x94000,
+        },
+        (BankId::G, 1) => VramTarget::EngineABg {
+            base: f_g_bg_offset(offset),
+        },
+        (BankId::G, 2) => VramTarget::EngineAObj {
+            base: f_g_bg_offset(offset),
+        },
+        (BankId::G, 3) => VramTarget::TexturePalette {
+            slot: f_g_texpal_slot(offset),
+        },
+        (BankId::G, 4) => VramTarget::BgExtPalA {
+            slot: (offset & 1) as u8,
+        },
         (BankId::G, 5) => VramTarget::ObjExtPalA,
 
         // ─── Bank H (32 KB)
-        (BankId::H, 0) => VramTarget::Lcdc { lcdc_offset: 0x98000 },
+        (BankId::H, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0x98000,
+        },
         (BankId::H, 1) => VramTarget::EngineBBg { base: 0 },
         (BankId::H, 2) => VramTarget::BgExtPalB { slot: 0 },
 
         // ─── Bank I (16 KB)
-        (BankId::I, 0) => VramTarget::Lcdc { lcdc_offset: 0xA0000 },
+        (BankId::I, 0) => VramTarget::Lcdc {
+            lcdc_offset: 0xA0000,
+        },
         (BankId::I, 1) => VramTarget::EngineBBg { base: 0x8000 },
         (BankId::I, 2) => VramTarget::EngineBObj { base: 0 },
         (BankId::I, 3) => VramTarget::ObjExtPalB,
@@ -469,7 +540,9 @@ impl VramRouter {
 }
 
 impl Default for VramRouter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Read from a bank if the ARM9 address `addr` (in 0x06xxxxxx) maps to it.
@@ -482,7 +555,9 @@ fn bank_read_arm9(bank: &VramBank, addr: u32) -> Option<u8> {
             let bg = win.wrapping_sub(0x000000) & 0x07_FFFF;
             if win < 0x20_0000 && bg >= base && bg < base + span {
                 Some(bank.data[(bg - base) as usize])
-            } else { None }
+            } else {
+                None
+            }
         }
         VramTarget::EngineAObj { base } => {
             // 0x06400000-0x0641FFFF (and mirrors up to 0x06600000)
@@ -490,24 +565,36 @@ fn bank_read_arm9(bank: &VramBank, addr: u32) -> Option<u8> {
                 let off = (win - 0x40_0000) & 0x03_FFFF;
                 if off >= base && off < base + span {
                     Some(bank.data[(off - base) as usize])
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         VramTarget::EngineBBg { base } => {
             if (0x20_0000..0x40_0000).contains(&win) {
                 let off = (win - 0x20_0000) & 0x01_FFFF;
                 if off >= base && off < base + span {
                     Some(bank.data[(off - base) as usize])
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         VramTarget::EngineBObj { base } => {
             if (0x60_0000..0x80_0000).contains(&win) {
                 let off = (win - 0x60_0000) & 0x01_FFFF;
                 if off >= base && off < base + span {
                     Some(bank.data[(off - base) as usize])
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         VramTarget::Lcdc { lcdc_offset } => {
             // 0x06800000-0x068A3FFF: flat LCDC view (ARM9 only).
@@ -515,8 +602,12 @@ fn bank_read_arm9(bank: &VramBank, addr: u32) -> Option<u8> {
                 let off = win - 0x80_0000;
                 if off >= lcdc_offset && off < lcdc_offset + span {
                     Some(bank.data[(off - lcdc_offset) as usize])
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         _ => None,
     }

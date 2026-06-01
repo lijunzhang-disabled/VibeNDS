@@ -333,13 +333,13 @@ User-requested sweep order:
      was interpreted as a dummy byte for the previous command. EEPROM
      `RDID` now returns `0xFFFFFF` while flash chips keep the placeholder
      JEDEC ID path, matching libnds' type probe expectations.
-   - `filesystem/libfat/libfatdir` still needs a ROM-level pass. The emulator
-     now has an initial DLDI/PXI block-device service that answers Calico
-     block-device channel requests for DLDI init, presence, sector reads, and
-     sector writes against a synthetic FAT16 image. Unit coverage verifies
-     sector-count exposure and boot-sector reads. The actual devkitPro
-     `libfatdir` ROM has not yet produced a successful root directory
-     listing, so keep this stage open.
+   - `filesystem/libfat/libfatdir` now mounts the emulator-backed DLDI FAT16
+     volume and lists the synthetic root directory. A 900-frame console probe
+     shows `README.TXT` and `[GAMES]`, `dldi_len=16777216`, empty IPC queues,
+     and both CPUs parked in runtime wait paths. The final ROM-level fix was
+     the FAT16 BPB total-sector field: libfat's VBR probe expects the 16-bit
+     total-sector field to be populated for a 32K-sector FAT16 volume rather
+     than relying on the 32-bit field.
    - Current core regression count after these fixes: `cargo test -p
      nds-core` reports `326 passed; 0 failed`.
 6. Homebrew games/demos — **first broad candidates tested**:
@@ -377,10 +377,14 @@ User-requested sweep order:
      nonzero `49152`, top unique colors `81`, `DISPCNT_A=0x40010000`,
      `DISPCNT_B=0xc0111c10`, BG2/BG3 active on Engine B, and both CPUs
      halted in VBlank wait paths.
-   - `Spelunky DS` now reaches its title/menu screen. A 600-frame capture
-     shows the cave/title art plus menu text; top nonzero `49152`, bottom
-     nonzero `49152`, `DISPCNT_A=0x00111910`,
-     `DISPCNT_B=0x00111810`, and both CPUs halted in VBlank wait paths.
+   - `Spelunky DS` now reaches its title/menu screen and can be driven into
+     gameplay. A 600-frame no-input capture shows the cave/title art plus
+     menu text; top nonzero `49152`, bottom nonzero `49152`,
+     `DISPCNT_A=0x00111910`, `DISPCNT_B=0x00111810`, and both CPUs halted in
+     VBlank wait paths. A 1200-frame input probe holding Left for frames
+     100-175 and L for frames 175-520 reaches an in-level cave scene with HUD,
+     ladders, enemies, and the player character; top unique colors increase
+     from the title-screen `11` to `53`.
    - `cellsDS.sc.nds` is not a direct-boot candidate in its current form:
      the header load values point outside the ROM image and the emulator
      rejects it with `OutOfRangeRom`.

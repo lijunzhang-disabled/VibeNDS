@@ -37,15 +37,11 @@ impl SampleFormat {
 
 /// IMA-ADPCM step table (89 entries).
 pub const IMA_STEP_TABLE: [i32; 89] = [
-       7,    8,    9,   10,   11,   12,   13,   14,   16,   17,
-      19,   21,   23,   25,   28,   31,   34,   37,   41,   45,
-      50,   55,   60,   66,   73,   80,   88,   97,  107,  118,
-     130,  143,  157,  173,  190,  209,  230,  253,  279,  307,
-     337,  371,  408,  449,  494,  544,  598,  658,  724,  796,
-     876,  963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
-    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
-    5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
-    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
+    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+    494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272,
+    2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493,
+    10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 ];
 
 /// IMA-ADPCM step-index delta table for the 4-bit nibble's low 3 bits.
@@ -56,9 +52,15 @@ pub fn decode_adpcm_nibble(predictor: i16, step_index: u8, nibble: u8) -> (i16, 
     let step = IMA_STEP_TABLE[step_index as usize];
     // Diff = step / 8 + step / 4 * (n0?1:0) + step / 2 * (n1?1:0) + step * (n2?1:0)
     let mut diff = step >> 3;
-    if nibble & 1 != 0 { diff += step >> 2; }
-    if nibble & 2 != 0 { diff += step >> 1; }
-    if nibble & 4 != 0 { diff += step; }
+    if nibble & 1 != 0 {
+        diff += step >> 2;
+    }
+    if nibble & 2 != 0 {
+        diff += step >> 1;
+    }
+    if nibble & 4 != 0 {
+        diff += step;
+    }
     let sign = nibble & 8 != 0;
     let new_pred = if sign {
         (predictor as i32 - diff).max(i16::MIN as i32)
@@ -76,7 +78,11 @@ pub fn decode_adpcm_nibble(predictor: i16, step_index: u8, nibble: u8) -> (i16, 
 #[inline]
 pub fn psg_square_sample(phase: u32, duty: u32) -> i16 {
     let high_count = (duty + 1).min(7);
-    if (phase & 7) < high_count { i16::MAX / 2 } else { -i16::MAX / 2 }
+    if (phase & 7) < high_count {
+        i16::MAX / 2
+    } else {
+        -i16::MAX / 2
+    }
 }
 
 /// 15-bit LFSR step. Returns the next LFSR and the sample value (+/-).
@@ -84,7 +90,11 @@ pub fn noise_step(lfsr: u16) -> (u16, i16) {
     // Standard LFSR for noise: bit 0 XOR bit 1, fed into bit 14.
     let bit = (lfsr ^ (lfsr >> 1)) & 1;
     let next = (lfsr >> 1) | (bit << 14);
-    let sample = if next & 1 != 0 { i16::MAX / 4 } else { -i16::MAX / 4 };
+    let sample = if next & 1 != 0 {
+        i16::MAX / 4
+    } else {
+        -i16::MAX / 4
+    };
     (next & 0x7FFF, sample)
 }
 
@@ -106,7 +116,9 @@ pub fn advance_channel(
     channel_id: usize,
     bus_read8: &mut dyn FnMut(u32) -> u8,
 ) -> i16 {
-    if !ch.active { return 0; }
+    if !ch.active {
+        return 0;
+    }
 
     let fmt = ch.format();
     let pnt = ch.pnt as u32;
@@ -117,7 +129,10 @@ pub fn advance_channel(
         SampleFormat::Pcm8 => {
             let byte = bus_read8(ch.sad.wrapping_add(ch.pos_word * 4 + ch.pos_frac));
             ch.pos_frac += 1;
-            if ch.pos_frac >= 4 { ch.pos_frac = 0; ch.pos_word += 1; }
+            if ch.pos_frac >= 4 {
+                ch.pos_frac = 0;
+                ch.pos_word += 1;
+            }
             ((byte as i8) as i16).saturating_mul(256)
         }
         SampleFormat::Pcm16 => {
@@ -125,7 +140,10 @@ pub fn advance_channel(
             let lo = bus_read8(base) as u16;
             let hi = bus_read8(base.wrapping_add(1)) as u16;
             ch.pos_frac += 2;
-            if ch.pos_frac >= 4 { ch.pos_frac = 0; ch.pos_word += 1; }
+            if ch.pos_frac >= 4 {
+                ch.pos_frac = 0;
+                ch.pos_word += 1;
+            }
             (lo | (hi << 8)) as i16
         }
         SampleFormat::Adpcm => {
@@ -147,12 +165,20 @@ pub fn advance_channel(
                 ch.adpcm_loop_step_index = ch.adpcm_step_index;
             }
             let byte = bus_read8(ch.sad.wrapping_add(ch.pos_word * 4 + (ch.pos_frac >> 1)));
-            let nibble = if ch.pos_frac & 1 == 0 { byte & 0xF } else { byte >> 4 };
-            let (new_pred, new_idx) = decode_adpcm_nibble(ch.adpcm_predictor, ch.adpcm_step_index, nibble);
+            let nibble = if ch.pos_frac & 1 == 0 {
+                byte & 0xF
+            } else {
+                byte >> 4
+            };
+            let (new_pred, new_idx) =
+                decode_adpcm_nibble(ch.adpcm_predictor, ch.adpcm_step_index, nibble);
             ch.adpcm_predictor = new_pred;
             ch.adpcm_step_index = new_idx;
             ch.pos_frac += 1;
-            if ch.pos_frac >= 8 { ch.pos_frac = 0; ch.pos_word += 1; }
+            if ch.pos_frac >= 8 {
+                ch.pos_frac = 0;
+                ch.pos_word += 1;
+            }
             new_pred
         }
         SampleFormat::PsgOrNoise => {
@@ -172,8 +198,10 @@ pub fn advance_channel(
     };
 
     // Handle end-of-sample (PCM / ADPCM only; PSG/Noise never end).
-    if matches!(fmt, SampleFormat::Pcm8 | SampleFormat::Pcm16 | SampleFormat::Adpcm)
-        && ch.pos_word >= end_word
+    if matches!(
+        fmt,
+        SampleFormat::Pcm8 | SampleFormat::Pcm16 | SampleFormat::Adpcm
+    ) && ch.pos_word >= end_word
     {
         match ch.repeat() {
             RepeatMode::OneShot | RepeatMode::Manual => {
@@ -204,11 +232,20 @@ mod tests {
         // Encode a known signal would be ideal but we can just verify the
         // decoder advances state predictably.
         let (p1, i1) = decode_adpcm_nibble(0, 0, 0x4); // high bit: positive step
-        assert!(p1 > 0, "positive nibble should increase predictor; got {}", p1);
+        assert!(
+            p1 > 0,
+            "positive nibble should increase predictor; got {}",
+            p1
+        );
         assert!(i1 > 0, "step index should advance; got {}", i1);
 
         let (p2, _i2) = decode_adpcm_nibble(p1, i1, 0xC); // sign bit + step
-        assert!(p2 < p1, "negative nibble should decrease predictor; got {} (prev {})", p2, p1);
+        assert!(
+            p2 < p1,
+            "negative nibble should decrease predictor; got {} (prev {})",
+            p2,
+            p1
+        );
     }
 
     #[test]

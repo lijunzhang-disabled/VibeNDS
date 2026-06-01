@@ -54,12 +54,11 @@ impl CartHeader {
         let read_u32 = |off: usize| -> u32 {
             u32::from_le_bytes([rom[off], rom[off + 1], rom[off + 2], rom[off + 3]])
         };
-        let read_u16 = |off: usize| -> u16 {
-            u16::from_le_bytes([rom[off], rom[off + 1]])
-        };
+        let read_u16 = |off: usize| -> u16 { u16::from_le_bytes([rom[off], rom[off + 1]]) };
 
         let title = String::from_utf8_lossy(&rom[0x00..0x0C])
-            .trim_end_matches('\0').to_string();
+            .trim_end_matches('\0')
+            .to_string();
         let mut gamecode = [0u8; 4];
         gamecode.copy_from_slice(&rom[0x0C..0x10]);
         let mut makercode = [0u8; 2];
@@ -78,23 +77,23 @@ impl CartHeader {
             rom_version: rom[0x1E],
 
             arm9_rom_offset: read_u32(0x20),
-            arm9_entry:      read_u32(0x24),
-            arm9_load:       read_u32(0x28),
-            arm9_size:       read_u32(0x2C),
+            arm9_entry: read_u32(0x24),
+            arm9_load: read_u32(0x28),
+            arm9_size: read_u32(0x2C),
 
             arm7_rom_offset: read_u32(0x30),
-            arm7_entry:      read_u32(0x34),
-            arm7_load:       read_u32(0x38),
-            arm7_size:       read_u32(0x3C),
+            arm7_entry: read_u32(0x34),
+            arm7_load: read_u32(0x38),
+            arm7_size: read_u32(0x3C),
 
             fnt_offset: read_u32(0x40),
-            fnt_size:   read_u32(0x44),
+            fnt_size: read_u32(0x44),
             fat_offset: read_u32(0x48),
-            fat_size:   read_u32(0x4C),
+            fat_size: read_u32(0x4C),
 
-            icon_offset:    read_u32(0x68),
+            icon_offset: read_u32(0x68),
             total_used_rom: read_u32(0x80),
-            header_size:    read_u32(0x84),
+            header_size: read_u32(0x84),
 
             header_crc,
             computed_header_crc,
@@ -128,7 +127,11 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ParseError::TooShort(len) => {
-                write!(f, "ROM too short: {} bytes, header needs {}", len, HEADER_SIZE)
+                write!(
+                    f,
+                    "ROM too short: {} bytes, header needs {}",
+                    len, HEADER_SIZE
+                )
             }
         }
     }
@@ -210,9 +213,12 @@ mod tests {
     fn test_header_crc_valid() {
         let rom = synth_header();
         let h = CartHeader::parse(&rom).expect("parse");
-        assert!(h.header_crc_valid(),
+        assert!(
+            h.header_crc_valid(),
             "synthetic header should have a valid CRC; got 0x{:04X} vs computed 0x{:04X}",
-            h.header_crc, h.computed_header_crc);
+            h.header_crc,
+            h.computed_header_crc
+        );
     }
 
     #[test]
@@ -226,7 +232,10 @@ mod tests {
     #[test]
     fn test_too_short_rom() {
         let rom = vec![0u8; 0x100];
-        assert!(matches!(CartHeader::parse(&rom), Err(ParseError::TooShort(_))));
+        assert!(matches!(
+            CartHeader::parse(&rom),
+            Err(ParseError::TooShort(_))
+        ));
     }
 
     #[test]

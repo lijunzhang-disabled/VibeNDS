@@ -963,6 +963,36 @@ mod tests {
     }
 
     #[test]
+    fn test_alpha_test_ref_masks_to_five_bits() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write16(0x0400_0340, 0x00F2);
+
+        assert_eq!(bus.shared.gpu3d.rasterizer.alpha_test_ref, 0x12);
+    }
+
+    #[test]
+    fn test_disp3dcnt_write_ignores_status_and_unused_bits() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write16(0x0400_0060, 0xFFFF);
+
+        assert_eq!(bus.shared.gpu3d.rasterizer.disp3dcnt, 0x4FFF);
+    }
+
+    #[test]
     fn test_io_register_per_cpu_isolation() {
         let mut nds = Nds::new(None, None);
         // Write IE on ARM9 — should not be visible from ARM7's IE.
@@ -1418,9 +1448,10 @@ mod tests {
                     tex: [0, 0],
                 },
             ],
-            attr: 0x1F << 16, // alpha = 31 = opaque
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7), // opaque, render front/back
             tex_image_param: 0,
             palette_base: 0,
+            front_area_negative: true,
         });
         nds.shared.gpu3d.swap_pending = true;
         // Rasterize directly so the framebuffer is populated before any
@@ -1492,9 +1523,10 @@ mod tests {
                     tex: [0, 0],
                 },
             ],
-            attr: 0x1F << 16,
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            front_area_negative: true,
         });
         nds.shared.gpu3d.swap_pending = true;
         nds.shared.gpu3d.swap_buffers(None);
@@ -1528,6 +1560,7 @@ mod tests {
 
             // BEGIN_VTXS triangles (cmd 0x40, 1 param). Direct port at
             // 0x0400_0440 + (0x40 - 0x10) * 4 = 0x0400_0500.
+            bus.write32(0x0400_04A4, (1 << 13) | (0x1F << 16) | (1 << 6) | (1 << 7));
             bus.write32(0x0400_0500, 0);
 
             // VTX_16 (cmd 0x23, 2 params). Direct port at 0x0400_048C.
@@ -1558,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gxstat_low_reflects_empty_fifo_at_boot() {
+    fn test_out_of_list_vtx_does_not_seed_inherited_position_via_io() {
         let mut nds = Nds::new(None, None);
         let mut bus = Bus9::new(
             &mut nds.mem9,
@@ -1566,9 +1599,51 @@ mod tests {
             nds.cpu9.cp15.itcm,
             nds.cpu9.cp15.dtcm,
         );
-        // GXSTAT at 0x0400_0600. Bit 0 = empty.
+
+        bus.write32(0x0400_048C, (7u32 << 12) | ((7u32 << 12) << 16));
+        bus.write32(0x0400_048C, 7u32 << 12);
+        assert_eq!(bus.shared.gpu3d.vertex.last_pos, [0, 0, 0]);
+
+        bus.write32(0x0400_0500, 0); // BEGIN_VTXS triangles
+        bus.write32(0x0400_0494, 0); // VTX_XY inherits Z from last_pos
+
+        assert_eq!(bus.shared.gpu3d.vertex.last_pos, [0, 0, 0]);
+        assert_eq!(bus.shared.gpu3d.vertex.vertex_buffer[0].clip[2], 0);
+    }
+
+    #[test]
+    fn test_gxfifo_packed_port_mirror_accepts_commands() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_0404, 0x0000_0010); // MTX_MODE via GXFIFO mirror.
+        bus.write32(0x0400_0404, 1);
+        drop(bus);
+
+        assert!(matches!(
+            nds.shared.gpu3d.stacks.mode,
+            gpu3d::stacks::MtxMode::Position
+        ));
+    }
+
+    #[test]
+    fn test_gxstat_low_reflects_idle_geometry_at_boot() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+        // GXSTAT low half: test busy/result, stack pointers, stack busy,
+        // overflow. At boot those should all be clear.
         let stat = bus.read16(0x0400_0600);
-        assert!(stat & 0x1 != 0, "FIFO empty at boot");
+        assert_eq!(stat, 0);
     }
 
     #[test]
@@ -1602,6 +1677,195 @@ mod tests {
         assert_eq!(bus.read32(0x0400_0600) & (3 << 30), 1 << 30);
         drop(bus);
         assert_ne!(nds.shared.irq9.read_if() & interrupt::Irq::GxFifo.bit(), 0);
+    }
+
+    #[test]
+    fn test_gx_ram_count_reports_geometry_buffer() {
+        let mut nds = Nds::new(None, None);
+        use crate::gpu3d::viewport::{ScreenPolygon, ScreenVertex};
+        nds.shared.gpu3d.geometry_polygons.push(ScreenPolygon {
+            vertices: vec![
+                ScreenVertex {
+                    screen_x: 0,
+                    screen_y: 0,
+                    depth_z: 0,
+                    w: 4096,
+                    color: 0,
+                    tex: [0, 0],
+                },
+                ScreenVertex {
+                    screen_x: 1,
+                    screen_y: 0,
+                    depth_z: 0,
+                    w: 4096,
+                    color: 0,
+                    tex: [0, 0],
+                },
+                ScreenVertex {
+                    screen_x: 0,
+                    screen_y: 1,
+                    depth_z: 0,
+                    w: 4096,
+                    color: 0,
+                    tex: [0, 0],
+                },
+            ],
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 0,
+            palette_base: 0,
+            front_area_negative: true,
+        });
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        let count = bus.read32(0x0400_0604);
+
+        assert_eq!(count & 0x0FFF, 1);
+        assert_eq!((count >> 16) & 0x1FFF, 3);
+    }
+
+    #[test]
+    fn test_disp_1dot_depth_register_round_trip() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write16(0x0400_0610, 0xFFFF);
+
+        assert_eq!(bus.read16(0x0400_0610), 0x7FFF);
+        assert_eq!(bus.read32(0x0400_0610), 0x7FFF);
+    }
+
+    #[test]
+    fn test_gx_readable_clip_matrix_exposes_current_transform() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_0440, 1); // MTX_MODE position
+        bus.write32(0x0400_0470, 2 << 12);
+        bus.write32(0x0400_0470, 3 << 12);
+        bus.write32(0x0400_0470, 4 << 12);
+
+        assert_eq!(bus.read32(0x0400_0670), (2u32 << 12));
+        assert_eq!(bus.read32(0x0400_0674), (3u32 << 12));
+        assert_eq!(bus.read32(0x0400_0678), (4u32 << 12));
+    }
+
+    #[test]
+    fn test_pos_test_writes_result_registers() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_05C4, (2u32 << 12) | ((3u32 << 12) << 16));
+        bus.write32(0x0400_05C4, 4u32 << 12);
+
+        assert_eq!(bus.read32(0x0400_0620), 2u32 << 12);
+        assert_eq!(bus.read32(0x0400_0624), 3u32 << 12);
+        assert_eq!(bus.read32(0x0400_0628), 4u32 << 12);
+        assert_eq!(bus.read32(0x0400_062C), 1u32 << 12);
+    }
+
+    #[test]
+    fn test_geometry_result_registers_support_halfword_reads() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.gpu3d.stacks.vector.m[0] = 0x1234_5678;
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_05C4, 0x5678_1234);
+        bus.write32(0x0400_05C4, 0);
+
+        assert_eq!(bus.read16(0x0400_0620), 0x1234);
+        assert_eq!(bus.read16(0x0400_0622), 0x0000);
+        assert_eq!(bus.read16(0x0400_0624), 0x5678);
+
+        assert_eq!(bus.read16(0x0400_0640), 0x1000);
+        assert_eq!(bus.read16(0x0400_0642), 0x0000);
+
+        assert_eq!(bus.read16(0x0400_0680), 0x5678);
+        assert_eq!(bus.read16(0x0400_0682), 0x1234);
+    }
+
+    #[test]
+    fn test_vec_test_writes_direction_result_registers() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_05C8, 1);
+
+        assert_eq!(bus.read16(0x0400_0630), 8);
+        assert_eq!(bus.read16(0x0400_0632), 0);
+        assert_eq!(bus.read16(0x0400_0634), 0);
+    }
+
+    #[test]
+    fn test_arm9_fog_table_halfword_writes_are_contiguous() {
+        let mut nds = Nds::new(None, None);
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+
+            bus.write16(0x0400_0360, 0x2211);
+            bus.write16(0x0400_0362, 0x4433);
+        }
+
+        assert_eq!(
+            &nds.shared.gpu3d.rasterizer.fog_table[0..4],
+            &[0x11, 0x22, 0x33, 0x44]
+        );
+    }
+
+    #[test]
+    fn test_box_test_sets_gxstat_visible_bit() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_05C0, 0);
+        bus.write32(0x0400_05C0, 0);
+        bus.write32(0x0400_05C0, 0);
+
+        assert_ne!(bus.read16(0x0400_0600) & (1 << 1), 0);
+        assert_eq!(
+            bus.read16(0x0400_0600) & 1,
+            0,
+            "test busy should clear immediately in HLE"
+        );
     }
 
     #[test]
@@ -1749,7 +2013,10 @@ mod tests {
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (7 << 24));
 
-        assert_eq!(bus.read32(0x0400_01A4) & ((1 << 31) | (1 << 23)), (1 << 31) | (1 << 23));
+        assert_eq!(
+            bus.read32(0x0400_01A4) & ((1 << 31) | (1 << 23)),
+            (1 << 31) | (1 << 23)
+        );
         assert_eq!(bus.read32(0x0410_0010), 0x0302_0100);
         assert_eq!(bus.read32(0x0400_01A4) & ((1 << 31) | (1 << 23)), 0);
     }
@@ -1832,7 +2099,10 @@ mod tests {
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (7 << 24) | (1 << 14));
 
-        assert_ne!(nds.shared.irq9.read_if() & interrupt::Irq::Slot1Data.bit(), 0);
+        assert_ne!(
+            nds.shared.irq9.read_if() & interrupt::Irq::Slot1Data.bit(),
+            0
+        );
     }
 
     #[test]
@@ -1849,10 +2119,16 @@ mod tests {
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_00B0, 0x0410_0010);
         bus.write32(0x0400_00B4, 0x0200_1000);
-        bus.write32(0x0400_00B8, (1u32 << 31) | (1 << 26) | (2 << 23) | (5 << 27) | 2);
+        bus.write32(
+            0x0400_00B8,
+            (1u32 << 31) | (1 << 26) | (2 << 23) | (5 << 27) | 2,
+        );
         bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
 
-        assert_eq!(&nds.shared.main_ram[0x1000..0x1008], &[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            &nds.shared.main_ram[0x1000..0x1008],
+            &[0, 1, 2, 3, 4, 5, 6, 7]
+        );
     }
 
     #[test]
@@ -1870,9 +2146,15 @@ mod tests {
         bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
         bus.write32(0x0400_00BC, 0x0410_0010);
         bus.write32(0x0400_00C0, 0x0200_2000);
-        bus.write32(0x0400_00C4, (1u32 << 31) | (1 << 26) | (2 << 23) | (5 << 27) | 4);
+        bus.write32(
+            0x0400_00C4,
+            (1u32 << 31) | (1 << 26) | (2 << 23) | (5 << 27) | 4,
+        );
 
-        assert_eq!(&nds.shared.main_ram[0x2000..0x2010], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(
+            &nds.shared.main_ram[0x2000..0x2010],
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
         assert_eq!(nds.shared.slot1_data.len(), 124);
         assert_eq!(nds.shared.dma9.read_control(1) & (1 << 31), 0);
     }

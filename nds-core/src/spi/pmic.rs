@@ -37,7 +37,10 @@ impl Pmic {
         let mut regs = [0u8; 8];
         // Reasonable defaults — both backlights on, sound enabled.
         regs[0] = (1 << 0) | (1 << 4) | (1 << 5);
-        Pmic { regs, phase: Phase::Idle }
+        Pmic {
+            regs,
+            phase: Phase::Idle,
+        }
     }
 
     pub fn reset(&mut self) {
@@ -72,7 +75,9 @@ impl Pmic {
 }
 
 impl Default for Pmic {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -93,10 +98,10 @@ mod tests {
     fn test_write_then_read_back() {
         let mut p = Pmic::new();
         // Write 0x42 to reg 2 (amplifier gain). One SPI transaction.
-        let _ = p.xfer(0x02, true);    // address byte, write
-        let _ = p.xfer(0x42, false);   // data byte
-        // Real hardware: hold=false → CS deassert → device resets.
-        // Mirror that here so the next transaction starts from Idle.
+        let _ = p.xfer(0x02, true); // address byte, write
+        let _ = p.xfer(0x42, false); // data byte
+                                     // Real hardware: hold=false → CS deassert → device resets.
+                                     // Mirror that here so the next transaction starts from Idle.
         p.reset();
 
         let _ = p.xfer(0x80 | 0x02, true); // address byte, read

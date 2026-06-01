@@ -50,6 +50,11 @@ pub struct GxFifo {
     /// because we need to count raw words for the half-full DMA threshold.
     pub words: VecDeque<u32>,
 
+    /// Number of 40-bit FIFO entries occupied by decoded commands. Commands
+    /// without parameters count as one entry; commands with N parameters
+    /// count as N entries.
+    pub entries: usize,
+
     /// Decoder state for the packed (`0x04000400`) write path.
     /// When a packed word arrives we extract up to 4 command IDs and
     /// remember how many params each is still owed. As parameter words
@@ -69,6 +74,11 @@ pub struct GxFifo {
 
     /// GXSTAT bits 30-31: 0=never, 1=less-than-half, 2=empty.
     pub irq_mode: u8,
+
+    /// Packed FIFO rule: if the command word's final command takes no
+    /// parameters, the next word is a dummy parameter before another command
+    /// word may be accepted.
+    needs_zero_param_tail_dummy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,41 +92,51 @@ impl GxFifo {
     pub fn new() -> Self {
         GxFifo {
             words: VecDeque::with_capacity(FIFO_CAPACITY),
+            entries: 0,
             pending_cmds: VecDeque::new(),
             ready: VecDeque::new(),
             overflow: false,
             fell_below_half: false,
             irq_mode: 0,
+            needs_zero_param_tail_dummy: false,
         }
     }
 
-    pub fn is_empty(&self) -> bool { self.words.is_empty() }
-    pub fn is_full(&self)  -> bool { self.words.len() >= FIFO_CAPACITY }
-    pub fn len(&self)      -> usize { self.words.len() }
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+    pub fn is_full(&self) -> bool {
+        self.entries >= FIFO_CAPACITY
+    }
+    pub fn len(&self) -> usize {
+        self.entries
+    }
 
     /// Write to the packed-format port at `0x04000400`. Pushes one word
     /// into the FIFO and decodes commands as parameter words accumulate.
     pub fn write_packed(&mut self, word: u32) {
-        if self.is_full() {
+        if self.words.len() >= FIFO_CAPACITY {
             self.overflow = true;
             return;
         }
-        let prev_len = self.words.len();
+        let prev_len = self.entries;
         self.words.push_back(word);
 
-        // If no commands are currently waiting on parameters, this word
-        // is itself a packed-command word: extract 4 command IDs.
-        if self.pending_cmds.is_empty() {
-            self.unpack_packed_word(word);
-        } else {
+        if !self.pending_cmds.is_empty() {
             // Otherwise this word is a parameter for the front pending cmd.
             self.consume_param(word);
+        } else if self.needs_zero_param_tail_dummy {
+            self.needs_zero_param_tail_dummy = false;
+        } else {
+            // If no commands are currently waiting on parameters, this word
+            // is itself a packed-command word: extract 4 command IDs.
+            self.unpack_packed_word(word);
         }
 
         self.maybe_emit_zero_param_cmds();
 
         // Track the half-full transition for the DMA dispatcher.
-        if prev_len >= FIFO_HALF && self.words.len() < FIFO_HALF {
+        if prev_len >= FIFO_HALF && self.entries < FIFO_HALF {
             // This branch never fires on push (we add, not remove). But we
             // capture half-full-after-drain in `pop_op` below.
             self.fell_below_half = true;
@@ -127,7 +147,7 @@ impl GxFifo {
     /// First write supplies parameter 1; subsequent writes to the same
     /// command continue the parameter sequence until satisfied.
     pub fn write_direct(&mut self, cmd: GxCmd, word: u32) {
-        if self.is_full() {
+        if self.entries >= FIFO_CAPACITY {
             self.overflow = true;
             return;
         }
@@ -140,16 +160,24 @@ impl GxFifo {
         let needed = cmd.param_count();
 
         if needed == 0 {
-            self.ready.push_back(GxOp { cmd: cmd_byte, params: Vec::new() });
+            self.entries += 1;
+            self.ready.push_back(GxOp {
+                cmd: cmd_byte,
+                params: Vec::new(),
+            });
             return;
         }
 
         if let Some(front) = self.pending_cmds.back_mut() {
             if front.cmd == cmd_byte && (front.params.len() as u8) < front.remaining {
+                self.entries += 1;
                 front.params.push(word);
                 if front.params.len() as u8 == front.remaining {
                     let done = self.pending_cmds.pop_back().unwrap();
-                    self.ready.push_back(GxOp { cmd: done.cmd, params: done.params });
+                    self.ready.push_back(GxOp {
+                        cmd: done.cmd,
+                        params: done.params,
+                    });
                 }
                 return;
             }
@@ -157,8 +185,13 @@ impl GxFifo {
 
         // New command — push and accumulate.
         if needed == 1 {
-            self.ready.push_back(GxOp { cmd: cmd_byte, params: vec![word] });
+            self.entries += 1;
+            self.ready.push_back(GxOp {
+                cmd: cmd_byte,
+                params: vec![word],
+            });
         } else {
+            self.entries += 1;
             self.pending_cmds.push_back(PackedCmd {
                 cmd: cmd_byte,
                 remaining: needed,
@@ -169,28 +202,54 @@ impl GxFifo {
 
     fn unpack_packed_word(&mut self, word: u32) {
         // Four command IDs, LSB-first.
+        let mut saw_command = false;
+        let mut last_remaining = 0;
+        let mut planned_entries = self.entries;
         for shift in [0u32, 8, 16, 24] {
             let id = ((word >> shift) & 0xFF) as u8;
-            if id == 0 { continue; } // padding — skip
-            if let Some(cmd) = GxCmd::from_u8(id) {
-                let needed = cmd.param_count();
-                self.pending_cmds.push_back(PackedCmd {
-                    cmd: id,
-                    remaining: needed,
-                    params: Vec::with_capacity(needed as usize),
-                });
-            } else {
-                log::trace!("GXFIFO: unknown cmd byte 0x{:02X}", id);
+            if id == 0 {
+                // Command 0 terminates the packed command list. Hardware
+                // requires zero padding only after all real commands; do not
+                // accept later non-zero bytes from malformed command words.
+                break;
             }
+            let Some(cmd) = GxCmd::from_u8(id) else {
+                // Invalid command indices behave like command 0, so they
+                // terminate the packed command list.
+                log::trace!("GXFIFO: unknown cmd byte 0x{:02X}", id);
+                break;
+            };
+            let needed = cmd.param_count();
+            planned_entries += needed.max(1) as usize;
+            if planned_entries > FIFO_CAPACITY {
+                self.overflow = true;
+                break;
+            }
+            saw_command = true;
+            last_remaining = needed;
+            self.pending_cmds.push_back(PackedCmd {
+                cmd: id,
+                remaining: needed,
+                params: Vec::with_capacity(needed as usize),
+            });
         }
+        self.needs_zero_param_tail_dummy = saw_command && last_remaining == 0;
     }
 
     fn consume_param(&mut self, word: u32) {
+        if self.entries >= FIFO_CAPACITY {
+            self.overflow = true;
+            return;
+        }
         if let Some(front) = self.pending_cmds.front_mut() {
+            self.entries += 1;
             front.params.push(word);
             if front.params.len() as u8 == front.remaining {
                 let done = self.pending_cmds.pop_front().unwrap();
-                self.ready.push_back(GxOp { cmd: done.cmd, params: done.params });
+                self.ready.push_back(GxOp {
+                    cmd: done.cmd,
+                    params: done.params,
+                });
             }
         }
     }
@@ -200,7 +259,11 @@ impl GxFifo {
         while let Some(front) = self.pending_cmds.front() {
             if front.remaining == 0 {
                 let done = self.pending_cmds.pop_front().unwrap();
-                self.ready.push_back(GxOp { cmd: done.cmd, params: done.params });
+                self.entries += 1;
+                self.ready.push_back(GxOp {
+                    cmd: done.cmd,
+                    params: done.params,
+                });
             } else {
                 break;
             }
@@ -214,6 +277,8 @@ impl GxFifo {
     /// the caller can fire GxFifo DMA.
     pub fn pop_op(&mut self) -> Option<GxOp> {
         let op = self.ready.pop_front()?;
+        let consumed_entries = op.params.len().max(1);
+        self.entries = self.entries.saturating_sub(consumed_entries);
         // Drop `1 + params.len()` words (header byte share + parameter words).
         // The header-byte share is fractional (4 cmds share one word), so we
         // approximate by dropping `params.len()` actual words and counting
@@ -221,9 +286,11 @@ impl GxFifo {
         // overcount slightly toward "free" rather than miss a refill.
         let to_drop = op.params.len().max(1);
         for _ in 0..to_drop {
-            if self.words.pop_front().is_none() { break; }
+            if self.words.pop_front().is_none() {
+                break;
+            }
         }
-        if self.words.len() < FIFO_HALF {
+        if self.entries < FIFO_HALF {
             self.fell_below_half = true;
         }
         Some(op)
@@ -239,6 +306,7 @@ impl GxFifo {
     pub fn reconcile_after_drain(&mut self) {
         if self.ready.is_empty() && self.pending_cmds.is_empty() && !self.words.is_empty() {
             self.words.clear();
+            self.entries = 0;
             self.fell_below_half = true;
         }
     }
@@ -247,21 +315,35 @@ impl GxFifo {
     /// holds command-list-size and similar fields managed elsewhere).
     pub fn stat_low(&self) -> u16 {
         let mut v = 0u16;
-        if self.words.is_empty() { v |= 1 << 0; }           // FIFO empty
-        if self.is_full() { v |= 1 << 1; }                  // FIFO full
-        if self.words.len() < FIFO_HALF { v |= 1 << 2; }    // less than half full
-        // Bit 3 = command-list-overflow (also reported via overflow flag)
-        if self.overflow { v |= 1 << 15; }
+        if self.entries == 0 {
+            v |= 1 << 0;
+        } // FIFO empty
+        if self.is_full() {
+            v |= 1 << 1;
+        } // FIFO full
+        if self.entries < FIFO_HALF {
+            v |= 1 << 2;
+        } // less than half full
+          // Bit 3 = command-list-overflow (also reported via overflow flag)
+        if self.overflow {
+            v |= 1 << 15;
+        }
         v
     }
 
     pub fn stat_high(&self) -> u16 {
-        let count = self.words.len().min(256) as u16;
+        let count = self.entries.min(256) as u16;
         let mut v = count;
-        if self.is_full() { v |= 1 << 8; }                  // GXSTAT bit 24
-        if self.words.len() < FIFO_HALF { v |= 1 << 9; }    // GXSTAT bit 25
-        if self.words.is_empty() { v |= 1 << 10; }          // GXSTAT bit 26
-        v |= (self.irq_mode as u16) << 14;                  // GXSTAT bits 30-31
+        if self.is_full() {
+            v |= 1 << 8;
+        } // GXSTAT bit 24
+        if self.entries < FIFO_HALF {
+            v |= 1 << 9;
+        } // GXSTAT bit 25
+        if self.entries == 0 {
+            v |= 1 << 10;
+        } // GXSTAT bit 26
+        v |= (self.irq_mode as u16) << 14; // GXSTAT bits 30-31
         v
     }
 
@@ -271,15 +353,33 @@ impl GxFifo {
 
     pub fn irq_condition(&self) -> bool {
         match self.irq_mode {
-            1 => self.words.len() < FIFO_HALF,
-            2 => self.words.is_empty(),
+            1 => self.entries < FIFO_HALF,
+            2 => self.entries == 0,
             _ => false,
         }
+    }
+
+    pub fn gxstat_high_bits(&self, general_busy: bool) -> u16 {
+        let count = self.entries.min(256) as u16;
+        let mut v = count;
+        if self.entries < FIFO_HALF {
+            v |= 1 << 9;
+        } // GXSTAT bit 25
+        if self.entries == 0 {
+            v |= 1 << 10;
+        } // GXSTAT bit 26
+        if general_busy {
+            v |= 1 << 11;
+        } // GXSTAT bit 27
+        v |= (self.irq_mode as u16) << 14; // GXSTAT bits 30-31
+        v
     }
 }
 
 impl Default for GxFifo {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -319,10 +419,98 @@ mod tests {
 
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
         assert_eq!(ops.len(), 4);
-        assert_eq!(ops[0].cmd, 0x11); assert!(ops[0].params.is_empty());
-        assert_eq!(ops[1].cmd, 0x10); assert_eq!(ops[1].params, vec![2]);
-        assert_eq!(ops[2].cmd, 0x15); assert!(ops[2].params.is_empty());
-        assert_eq!(ops[3].cmd, 0x12); assert_eq!(ops[3].params, vec![5]);
+        assert_eq!(ops[0].cmd, 0x11);
+        assert!(ops[0].params.is_empty());
+        assert_eq!(ops[1].cmd, 0x10);
+        assert_eq!(ops[1].params, vec![2]);
+        assert_eq!(ops[2].cmd, 0x15);
+        assert!(ops[2].params.is_empty());
+        assert_eq!(ops[3].cmd, 0x12);
+        assert_eq!(ops[3].params, vec![5]);
+    }
+
+    #[test]
+    fn test_packed_zero_param_commands_count_as_fifo_entries() {
+        let mut f = GxFifo::new();
+        f.write_packed(0x1515_1515);
+
+        assert_eq!(f.len(), 4);
+        assert_eq!(f.gxstat_high_bits(false) & 0x01FF, 4);
+
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 4);
+        assert_eq!(f.len(), 0);
+    }
+
+    #[test]
+    fn test_packed_command_word_cannot_overfill_fifo_entries() {
+        let mut f = GxFifo::new();
+        f.entries = FIFO_CAPACITY - 1;
+
+        f.write_packed(0x1515_1515);
+
+        assert!(f.overflow);
+        assert_eq!(f.len(), FIFO_CAPACITY);
+        assert_eq!(f.ready.len(), 1);
+    }
+
+    #[test]
+    fn test_packed_word_stops_at_first_zero_command_byte() {
+        let mut f = GxFifo::new();
+        // MTX_PUSH, then zero padding, then malformed non-zero bytes that
+        // must not be accepted as commands.
+        f.write_packed(0x1215_0011);
+
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].cmd, 0x11);
+        assert!(ops[0].params.is_empty());
+    }
+
+    #[test]
+    fn test_packed_word_invalid_command_byte_acts_like_zero() {
+        let mut f = GxFifo::new();
+        // MTX_PUSH, invalid byte 0xFF, then valid bytes that must be ignored.
+        f.write_packed(0x1215_FF11);
+
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].cmd, 0x11);
+        assert!(ops[0].params.is_empty());
+    }
+
+    #[test]
+    fn test_packed_word_ending_with_zero_param_command_requires_dummy_word() {
+        let mut f = GxFifo::new();
+        f.write_packed(0x0000_0011); // MTX_PUSH, zero params, tail command.
+        f.write_packed(0x0000_0010); // Required dummy, not MTX_MODE command word.
+        f.write_packed(0x0000_0010); // Actual MTX_MODE command word.
+        f.write_packed(1);
+
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].cmd, 0x11);
+        assert_eq!(ops[1].cmd, 0x10);
+        assert_eq!(ops[1].params, vec![1]);
+    }
+
+    #[test]
+    fn test_packed_word_tail_dummy_waits_until_prior_params_consumed() {
+        let mut f = GxFifo::new();
+        // MTX_MODE needs one parameter, MTX_PUSH is the zero-param tail.
+        f.write_packed(0x0000_1110);
+        f.write_packed(2); // MTX_MODE parameter.
+        f.write_packed(0x0000_0012); // Required dummy, not MTX_POP command word.
+        f.write_packed(0x0000_0012); // Actual MTX_POP command word.
+        f.write_packed(1);
+
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 3);
+        assert_eq!(ops[0].cmd, 0x10);
+        assert_eq!(ops[0].params, vec![2]);
+        assert_eq!(ops[1].cmd, 0x11);
+        assert_eq!(ops[2].cmd, 0x12);
+        assert_eq!(ops[2].params, vec![1]);
     }
 
     #[test]
@@ -332,21 +520,44 @@ mod tests {
         f.write_direct(GxCmd::Vtx16, 0xAAAA_AAAA);
         // Not yet ready — needs 1 more.
         assert!(f.ready.is_empty());
+        assert_eq!(f.len(), 1);
         f.write_direct(GxCmd::Vtx16, 0xBBBB_BBBB);
+        assert_eq!(f.len(), 2);
         let op = f.pop_op().expect("op");
         assert_eq!(op.cmd, 0x23);
         assert_eq!(op.params, vec![0xAAAA_AAAA, 0xBBBB_BBBB]);
+        assert_eq!(f.len(), 0);
+    }
+
+    #[test]
+    fn test_packed_command_params_count_as_entries_as_they_arrive() {
+        let mut f = GxFifo::new();
+        f.write_packed(0x0000_0023); // VTX_16, two parameters.
+        assert_eq!(f.len(), 0);
+
+        f.write_packed(0xAAAA_AAAA);
+        assert_eq!(f.len(), 1);
+        assert!(f.ready.is_empty());
+
+        f.write_packed(0xBBBB_BBBB);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f.ready.len(), 1);
+
+        let op = f.pop_op().expect("op");
+        assert_eq!(op.cmd, 0x23);
+        assert_eq!(op.params, vec![0xAAAA_AAAA, 0xBBBB_BBBB]);
+        assert_eq!(f.len(), 0);
     }
 
     #[test]
     fn test_full_then_overflow() {
         let mut f = GxFifo::new();
         for _ in 0..FIFO_CAPACITY {
-            f.write_packed(0); // padding word
+            f.write_direct(GxCmd::MtxPush, 0);
         }
         assert!(f.is_full());
         assert!(!f.overflow);
-        f.write_packed(0xDEADBEEF);
+        f.write_direct(GxCmd::MtxPush, 0);
         assert!(f.overflow);
     }
 
@@ -359,19 +570,39 @@ mod tests {
             f.write_packed(0x0000_0011); // MTX_PUSH, zero params
         }
         let _ = f.take_below_half_edge(); // discard whatever push set
-        // Drain back below 128.
+                                          // Drain back below 128.
         for _ in 0..80 {
             let _ = f.pop_op();
         }
-        assert!(f.take_below_half_edge(), "should signal below-half on drain");
+        assert!(
+            f.take_below_half_edge(),
+            "should signal below-half on drain"
+        );
     }
 
     #[test]
     fn test_stat_low_bits_for_empty_fifo() {
         let f = GxFifo::new();
-        let s = f.stat_low();
-        assert!(s & (1 << 0) != 0, "empty");
-        assert!(s & (1 << 2) != 0, "less than half");
-        assert!(s & (1 << 1) == 0, "not full");
+        let s = f.gxstat_high_bits(false);
+        assert!(s & (1 << 10) != 0, "empty");
+        assert!(s & (1 << 9) != 0, "less than half");
+        assert!(s & (1 << 11) == 0, "not busy");
+    }
+
+    #[test]
+    fn test_less_than_half_irq_uses_decoded_entry_count() {
+        let mut f = GxFifo::new();
+        f.set_irq_mode(1);
+
+        for _ in 0..32 {
+            f.write_packed(0x1515_1515);
+            f.write_packed(0);
+        }
+
+        assert_eq!(f.len(), FIFO_HALF);
+        assert!(
+            !f.irq_condition(),
+            "128 decoded entries is not less than half full"
+        );
     }
 }

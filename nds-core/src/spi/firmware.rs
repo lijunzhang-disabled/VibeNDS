@@ -154,7 +154,11 @@ impl Firmware {
     pub fn xfer(&mut self, byte_in: u8, _hold: bool) -> u8 {
         match self.phase {
             Phase::Idle => self.handle_command(byte_in),
-            Phase::AddressBytes { cmd, remaining, addr } => {
+            Phase::AddressBytes {
+                cmd,
+                remaining,
+                addr,
+            } => {
                 let new_addr = (addr << 8) | byte_in as u32;
                 if remaining > 1 {
                     self.phase = Phase::AddressBytes {
@@ -179,7 +183,10 @@ impl Firmware {
                     self.status &= !0x02; // erase consumes the write-enable latch
                     self.phase = Phase::Idle;
                 } else {
-                    self.phase = Phase::Data { cmd, addr: final_addr };
+                    self.phase = Phase::Data {
+                        cmd,
+                        addr: final_addr,
+                    };
                 }
                 0
             }
@@ -189,34 +196,53 @@ impl Firmware {
 
     fn handle_command(&mut self, cmd: u8) -> u8 {
         match cmd {
-            0x03 => { // READ
-                self.phase = Phase::AddressBytes { cmd, remaining: 3, addr: 0 };
+            0x03 => {
+                // READ
+                self.phase = Phase::AddressBytes {
+                    cmd,
+                    remaining: 3,
+                    addr: 0,
+                };
                 0
             }
-            0x05 => { // READ_STATUS
+            0x05 => {
+                // READ_STATUS
                 self.phase = Phase::Data { cmd, addr: 0 };
                 0
             }
-            0x06 => { // WRITE_ENABLE
+            0x06 => {
+                // WRITE_ENABLE
                 self.status |= 0x02; // WEL
                 self.phase = Phase::Idle;
                 0
             }
-            0x04 => { // WRITE_DISABLE
+            0x04 => {
+                // WRITE_DISABLE
                 self.status &= !0x02;
                 self.phase = Phase::Idle;
                 0
             }
-            0x9F => { // READ_JEDEC_ID
+            0x9F => {
+                // READ_JEDEC_ID
                 self.phase = Phase::Data { cmd, addr: 0 };
                 0
             }
-            0x0A => { // PAGE_PROGRAM
-                self.phase = Phase::AddressBytes { cmd, remaining: 3, addr: 0 };
+            0x0A => {
+                // PAGE_PROGRAM
+                self.phase = Phase::AddressBytes {
+                    cmd,
+                    remaining: 3,
+                    addr: 0,
+                };
                 0
             }
-            0xD8 => { // SECTOR_ERASE — 256-byte sectors on DS firmware
-                self.phase = Phase::AddressBytes { cmd, remaining: 3, addr: 0 };
+            0xD8 => {
+                // SECTOR_ERASE — 256-byte sectors on DS firmware
+                self.phase = Phase::AddressBytes {
+                    cmd,
+                    remaining: 3,
+                    addr: 0,
+                };
                 0
             }
             _ => {
@@ -228,34 +254,48 @@ impl Firmware {
 
     fn handle_data(&mut self, cmd: u8, addr: u32, byte_in: u8) -> u8 {
         match cmd {
-            0x03 => { // READ — stream bytes; address auto-increments
+            0x03 => {
+                // READ — stream bytes; address auto-increments
                 let byte = self.data[(addr as usize) & (FIRMWARE_SIZE - 1)];
-                self.phase = Phase::Data { cmd, addr: addr.wrapping_add(1) };
+                self.phase = Phase::Data {
+                    cmd,
+                    addr: addr.wrapping_add(1),
+                };
                 byte
             }
-            0x05 => { // READ_STATUS — repeat status until CS deasserts
+            0x05 => {
+                // READ_STATUS — repeat status until CS deasserts
                 let s = self.status;
                 // Stay in Data so subsequent reads keep returning status.
                 self.phase = Phase::Data { cmd, addr: 0 };
                 s
             }
-            0x9F => { // JEDEC ID: synthesize three bytes (manufacturer + 2 device)
+            0x9F => {
+                // JEDEC ID: synthesize three bytes (manufacturer + 2 device)
                 // We return Macronix-ish (0xC2) + reasonable device codes.
                 let id: [u8; 3] = [0xC2, 0x22, 0x14];
                 let idx = (addr as usize) % 3;
-                self.phase = Phase::Data { cmd, addr: addr.wrapping_add(1) };
+                self.phase = Phase::Data {
+                    cmd,
+                    addr: addr.wrapping_add(1),
+                };
                 id[idx]
             }
-            0x0A => { // PAGE_PROGRAM — write while WEL is set
+            0x0A => {
+                // PAGE_PROGRAM — write while WEL is set
                 if self.status & 0x02 != 0 {
                     self.data[(addr as usize) & (FIRMWARE_SIZE - 1)] = byte_in;
-                    self.phase = Phase::Data { cmd, addr: addr.wrapping_add(1) };
+                    self.phase = Phase::Data {
+                        cmd,
+                        addr: addr.wrapping_add(1),
+                    };
                 } else {
                     log::trace!("SPI Firmware: PAGE_PROGRAM with WEL clear, dropping byte");
                 }
                 0
             }
-            0xD8 => { // SECTOR_ERASE — 256-byte aligned, fill with 0xFF
+            0xD8 => {
+                // SECTOR_ERASE — 256-byte aligned, fill with 0xFF
                 if self.status & 0x02 != 0 {
                     let base = (addr as usize) & !0xFF & (FIRMWARE_SIZE - 1);
                     for b in &mut self.data[base..base + 0x100] {
@@ -272,7 +312,9 @@ impl Firmware {
 }
 
 impl Default for Firmware {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -298,7 +340,8 @@ mod tests {
     #[test]
     fn test_default_user_settings_crc_valid() {
         let fw = Firmware::new();
-        let settings = &fw.data[USER_SETTINGS_OFFSET_1..USER_SETTINGS_OFFSET_1 + USER_SETTINGS_SIZE];
+        let settings =
+            &fw.data[USER_SETTINGS_OFFSET_1..USER_SETTINGS_OFFSET_1 + USER_SETTINGS_SIZE];
         let stored = u16::from_le_bytes([settings[0x72], settings[0x73]]);
         let computed = crate::cart::header::crc16_modbus(&settings[..0x70]);
         assert_eq!(stored, computed);
@@ -336,13 +379,13 @@ mod tests {
         // Set WEL, then write.
         let _ = fw.xfer(0x06, false); // WRITE_ENABLE
         let _ = send_command(&mut fw, 0x0A, 0x1000, 1); // writes 0
-        // Page-program writes byte_in (which is 0 here); switch to a non-zero byte.
+                                                        // Page-program writes byte_in (which is 0 here); switch to a non-zero byte.
         let _ = fw.xfer(0x06, false);
         let _ = fw.xfer(0x0A, true);
         let _ = fw.xfer(0, true);
         let _ = fw.xfer(0x10, true);
         let _ = fw.xfer(0x00, false); // first data byte = 0x42... actually
-        // Easier: just verify status reads work.
+                                      // Easier: just verify status reads work.
         let _ = fw.xfer(0x05, true);
         let s = fw.xfer(0, false);
         // WEL might still be set or not depending on cmd sequencing; the

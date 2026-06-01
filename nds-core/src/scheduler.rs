@@ -74,10 +74,15 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new() -> Self {
-        Scheduler { timestamp: 0, events: BinaryHeap::new() }
+        Scheduler {
+            timestamp: 0,
+            events: BinaryHeap::new(),
+        }
     }
 
-    pub fn timestamp(&self) -> u64 { self.timestamp }
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
 
     pub fn add_cycles(&mut self, cycles: u64) {
         self.timestamp = self.timestamp.wrapping_add(cycles);
@@ -119,16 +124,28 @@ mod tests {
     #[test]
     fn test_min_heap_ordering() {
         let mut s = Scheduler::new();
-        s.schedule(Event { fire_time: 100, kind: EventKind::VBlank });
-        s.schedule(Event { fire_time: 50,  kind: EventKind::HBlank });
-        s.schedule(Event { fire_time: 75,  kind: EventKind::AudioSample });
+        s.schedule(Event {
+            fire_time: 100,
+            kind: EventKind::VBlank,
+        });
+        s.schedule(Event {
+            fire_time: 50,
+            kind: EventKind::HBlank,
+        });
+        s.schedule(Event {
+            fire_time: 75,
+            kind: EventKind::AudioSample,
+        });
         assert_eq!(s.peek_time(), Some(50));
     }
 
     #[test]
     fn test_pop_if_ready_respects_timestamp() {
         let mut s = Scheduler::new();
-        s.schedule(Event { fire_time: 100, kind: EventKind::VBlank });
+        s.schedule(Event {
+            fire_time: 100,
+            kind: EventKind::VBlank,
+        });
         assert!(s.pop_if_ready().is_none());
         s.advance_to(100);
         assert_eq!(s.pop_if_ready().unwrap().kind, EventKind::VBlank);
@@ -137,9 +154,18 @@ mod tests {
     #[test]
     fn test_cancel_removes_specific_event() {
         let mut s = Scheduler::new();
-        s.schedule(Event { fire_time: 1, kind: EventKind::HBlank });
-        s.schedule(Event { fire_time: 2, kind: EventKind::VBlank });
-        s.schedule(Event { fire_time: 3, kind: EventKind::HBlank });
+        s.schedule(Event {
+            fire_time: 1,
+            kind: EventKind::HBlank,
+        });
+        s.schedule(Event {
+            fire_time: 2,
+            kind: EventKind::VBlank,
+        });
+        s.schedule(Event {
+            fire_time: 3,
+            kind: EventKind::HBlank,
+        });
         s.cancel(EventKind::HBlank);
         s.advance_to(10);
         assert_eq!(s.pop_if_ready().unwrap().kind, EventKind::VBlank);

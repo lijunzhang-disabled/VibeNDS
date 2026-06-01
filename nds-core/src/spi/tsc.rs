@@ -45,7 +45,11 @@ enum Phase {
     /// Waiting for control byte.
     Idle,
     /// Control byte consumed; latched the 12-bit value; sending high byte next.
-    HighByte { value12: u16, channel: u8, eight_bit: bool },
+    HighByte {
+        value12: u16,
+        channel: u8,
+        eight_bit: bool,
+    },
     /// Sent high byte; sending low byte next.
     LowByte { value12: u16, eight_bit: bool },
 }
@@ -94,7 +98,11 @@ impl Tsc {
 
     /// Z (pressure): non-zero when pen is down, zero when not.
     fn adc_z(&self) -> u16 {
-        if self.pen_down { 0x0800 } else { 0x0000 }
+        if self.pen_down {
+            0x0800
+        } else {
+            0x0000
+        }
     }
 
     pub fn xfer(&mut self, byte_in: u8, _hold: bool) -> u8 {
@@ -112,15 +120,23 @@ impl Tsc {
                     2 => 0x0CCC,           // battery voltage (~80% of full scale)
                     3 | 4 => self.adc_z(), // touch pressure
                     5 => self.adc_x(),
-                    _ => 0,                // AUX / temperature — return 0
+                    _ => 0, // AUX / temperature — return 0
                 };
 
                 // Real chip returns 0 for the channel-byte response (the
                 // result lands on the *next* two transfers).
-                self.phase = Phase::HighByte { value12: raw & 0x0FFF, channel, eight_bit };
+                self.phase = Phase::HighByte {
+                    value12: raw & 0x0FFF,
+                    channel,
+                    eight_bit,
+                };
                 0
             }
-            Phase::HighByte { value12, channel: _, eight_bit } => {
+            Phase::HighByte {
+                value12,
+                channel: _,
+                eight_bit,
+            } => {
                 let hi = if eight_bit {
                     // 8-bit mode: full result in one byte; second byte is 0.
                     ((value12 >> 4) & 0xFF) as u8
@@ -145,7 +161,9 @@ impl Tsc {
 }
 
 impl Default for Tsc {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -167,9 +185,17 @@ mod tests {
     fn test_x_endpoints_round_trip() {
         let mut tsc = Tsc::new();
         tsc.set_touch(0, 0, true);
-        assert_eq!(read_channel(&mut tsc, 5), ADC_X1, "X=0 should map to ADC_X1");
+        assert_eq!(
+            read_channel(&mut tsc, 5),
+            ADC_X1,
+            "X=0 should map to ADC_X1"
+        );
         tsc.set_touch(255, 0, true);
-        assert_eq!(read_channel(&mut tsc, 5), ADC_X2, "X=255 should map to ADC_X2");
+        assert_eq!(
+            read_channel(&mut tsc, 5),
+            ADC_X2,
+            "X=255 should map to ADC_X2"
+        );
     }
 
     #[test]

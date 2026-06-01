@@ -20,13 +20,18 @@ pub struct TcmRegion {
 
 impl TcmRegion {
     pub const fn disabled() -> Self {
-        TcmRegion { base: 0, size_bytes: 0 }
+        TcmRegion {
+            base: 0,
+            size_bytes: 0,
+        }
     }
 
     /// True when `addr` falls within the TCM window.
     #[inline]
     pub fn contains(&self, addr: u32) -> bool {
-        if self.size_bytes == 0 { return false; }
+        if self.size_bytes == 0 {
+            return false;
+        }
         let offset = addr.wrapping_sub(self.base);
         offset < self.size_bytes
     }
@@ -40,14 +45,20 @@ pub struct MpuRegion {
 
 impl MpuRegion {
     #[inline]
-    pub fn enable(&self) -> bool { self.raw & 1 != 0 }
+    pub fn enable(&self) -> bool {
+        self.raw & 1 != 0
+    }
 
     #[inline]
-    pub fn base(&self) -> u32 { self.raw & 0xFFFF_F000 }
+    pub fn base(&self) -> u32 {
+        self.raw & 0xFFFF_F000
+    }
 
     /// Size field, 0..31. Real region size is `2 ^ (size_field + 1)` bytes.
     #[inline]
-    pub fn size_field(&self) -> u32 { (self.raw >> 1) & 0x1F }
+    pub fn size_field(&self) -> u32 {
+        (self.raw >> 1) & 0x1F
+    }
 }
 
 /// CP15 register set.
@@ -120,7 +131,9 @@ impl Cp15 {
     /// True when CP15 c1 bit 13 is set — exception vectors live at
     /// `0xFFFF_0000` instead of `0x0000_0000`.
     #[inline]
-    pub fn high_vectors(&self) -> bool { (self.control >> 13) & 1 != 0 }
+    pub fn high_vectors(&self) -> bool {
+        (self.control >> 13) & 1 != 0
+    }
 
     /// Programmatically set the high-vector bit. Used by `Cpu::new_arm9` to
     /// match the NDS power-on state.
@@ -133,21 +146,27 @@ impl Cp15 {
     }
 
     #[inline]
-    pub fn icache_enabled(&self) -> bool { (self.control >> 12) & 1 != 0 }
+    pub fn icache_enabled(&self) -> bool {
+        (self.control >> 12) & 1 != 0
+    }
 
     #[inline]
-    pub fn dcache_enabled(&self) -> bool { (self.control >> 2) & 1 != 0 }
+    pub fn dcache_enabled(&self) -> bool {
+        (self.control >> 2) & 1 != 0
+    }
 
     #[inline]
-    pub fn mpu_enabled(&self) -> bool { self.control & 1 != 0 }
+    pub fn mpu_enabled(&self) -> bool {
+        self.control & 1 != 0
+    }
 
     /// MRC: read CP15 register identified by `(crn, crm, op1, op2)`.
     pub fn read(&self, crn: u32, crm: u32, op1: u32, op2: u32) -> u32 {
         let _ = op1;
         match (crn, crm, op2) {
-            (0, 0, 0) => 0x4105_9461,         // ARM946E-S Main ID register
-            (0, 0, 1) => 0x0F0D_2112,         // Cache type: 8KB I-cache, 4KB D-cache, 4-way, 32B lines
-            (0, 0, 2) => 0x0014_0180,         // TCM size register (ITCM 32K, DTCM 16K reset values)
+            (0, 0, 0) => 0x4105_9461, // ARM946E-S Main ID register
+            (0, 0, 1) => 0x0F0D_2112, // Cache type: 8KB I-cache, 4KB D-cache, 4-way, 32B lines
+            (0, 0, 2) => 0x0014_0180, // TCM size register (ITCM 32K, DTCM 16K reset values)
             (1, 0, 0) => self.control,
             (2, 0, 0) => self.cacheable_data,
             (2, 0, 1) => self.cacheable_instr,
@@ -197,7 +216,13 @@ impl Cp15 {
             }
             (13, 0, 1) => self.context_id = val,
             _ => {
-                log::trace!("CP15 write to unhandled c{},c{},opc2={}: 0x{:08X}", crn, crm, op2, val);
+                log::trace!(
+                    "CP15 write to unhandled c{},c{},opc2={}: 0x{:08X}",
+                    crn,
+                    crm,
+                    op2,
+                    val
+                );
             }
         }
     }
@@ -213,17 +238,35 @@ impl Cp15 {
         // base is honored.
         let dtcm_size = if self.dtcm_raw != 0 {
             let sf = (self.dtcm_raw >> 1) & 0x1F;
-            if sf > 31 { 0 } else { 512u32.wrapping_shl(sf) }
-        } else { 0 };
+            if sf > 31 {
+                0
+            } else {
+                512u32.wrapping_shl(sf)
+            }
+        } else {
+            0
+        };
         let dtcm_base = self.dtcm_raw & 0xFFFF_F000;
 
         let itcm_size = if self.itcm_raw != 0 {
             let sf = (self.itcm_raw >> 1) & 0x1F;
-            if sf > 31 { 0 } else { 512u32.wrapping_shl(sf) }
-        } else { 0 };
+            if sf > 31 {
+                0
+            } else {
+                512u32.wrapping_shl(sf)
+            }
+        } else {
+            0
+        };
 
-        self.dtcm = TcmRegion { base: dtcm_base, size_bytes: dtcm_size };
-        self.itcm = TcmRegion { base: 0, size_bytes: itcm_size };
+        self.dtcm = TcmRegion {
+            base: dtcm_base,
+            size_bytes: dtcm_size,
+        };
+        self.itcm = TcmRegion {
+            base: 0,
+            size_bytes: itcm_size,
+        };
     }
 }
 

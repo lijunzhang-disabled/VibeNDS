@@ -17,10 +17,10 @@ use super::stacks::MatrixStacks;
 /// Primitive type from `BEGIN_VTXS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrimitiveType {
-    Triangles,      // every 3 verts = 1 triangle
-    Quads,          // every 4 verts = 1 quad
-    TriangleStrip,  // 0,1,2 then 1,2,3 then 2,3,4 ...
-    QuadStrip,      // 0,1,3,2 then 2,3,5,4 then ...
+    Triangles,     // every 3 verts = 1 triangle
+    Quads,         // every 4 verts = 1 quad
+    TriangleStrip, // 0,1,2 then 1,2,3 then 2,3,4 ...
+    QuadStrip,     // 0,1,3,2 then 2,3,5,4 then ...
 }
 
 impl PrimitiveType {
@@ -66,25 +66,41 @@ pub struct Polygon {
     pub attr: u32,
     pub tex_image_param: u32,
     pub palette_base: u16,
+    /// True when a negative signed screen-space area is the polygon's front
+    /// side. Triangle strips invert this for every second triangle on DS.
+    #[serde(default = "default_front_area_negative")]
+    pub front_area_negative: bool,
 }
 
 /// Per-engine vertex pipeline state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VertexState {
     pub primitive: Option<PrimitiveType>,
+    /// True while a vertex list is open between BEGIN_VTXS and END_VTXS.
+    pub list_active: bool,
     /// Last submitted vertex position (the "current" pos for `VTX_DIFF`).
     pub last_pos: [i32; 3],
     /// Current per-vertex color (5+5+5 = BGR555 packed in u16).
     pub current_color: u16,
     /// Current per-vertex texture coordinates (S, T) in 1.11.4 fixed-point.
     pub current_tex: [i16; 2],
+    /// Most recent raw TEXCOORD values, before optional texture matrix use.
+    pub raw_tex: [i16; 2],
 
     /// `POLYGON_ATTR` — frozen into each polygon at assembly time.
     pub polygon_attr: u32,
+    /// Deferred polygon attributes for the next vertex list. Hardware defers
+    /// POLYGON_ATTR writes made during an active list until the next BEGIN.
+    pub pending_polygon_attr: Option<u32>,
     /// `TEXIMAGE_PARAM` — likewise.
     pub tex_image_param: u32,
     /// `PLTT_BASE` — texture palette base.
     pub palette_base: u16,
+    /// Texture state latched at BEGIN_VTXS for strip primitives. Hardware
+    /// allows texture state per polygon except within strips, where connected
+    /// polygons keep the list-start texture binding.
+    pub strip_tex_image_param: u32,
+    pub strip_palette_base: u16,
 
     /// Vertices accumulated for the current primitive. Cleared at
     /// `BEGIN_VTXS`; popped as polygons get emitted.
@@ -96,27 +112,58 @@ pub struct VertexState {
 
 /// Build a polygon from N vertices (N ∈ {3, 4}). Snapshots the engine's
 /// current polygon-attr and texture state.
-fn make_polygon(verts: Vec<Vertex>, state: &VertexState) -> Polygon {
+fn default_front_area_negative() -> bool {
+    true
+}
+
+fn make_polygon(
+    verts: Vec<Vertex>,
+    state: &VertexState,
+    primitive: PrimitiveType,
+    front_area_negative: bool,
+) -> Polygon {
+    let (tex_image_param, palette_base) = if primitive.is_strip() {
+        (state.strip_tex_image_param, state.strip_palette_base)
+    } else {
+        (state.tex_image_param, state.palette_base)
+    };
     Polygon {
         vertices: verts,
         attr: state.polygon_attr,
-        tex_image_param: state.tex_image_param,
-        palette_base: state.palette_base,
+        tex_image_param,
+        palette_base,
+        front_area_negative,
     }
 }
 
 impl VertexState {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// `BEGIN_VTXS` — start a new primitive group.
     pub fn begin(&mut self, primitive: PrimitiveType) {
+        if let Some(attr) = self.pending_polygon_attr.take() {
+            self.polygon_attr = attr;
+        }
         self.primitive = Some(primitive);
+        self.list_active = true;
         self.vertex_buffer.clear();
+        self.strip_tex_image_param = self.tex_image_param;
+        self.strip_palette_base = self.palette_base;
     }
 
-    /// `END_VTXS` — no-op on real hardware. Real engines just look at the
-    /// next `BEGIN_VTXS` to know when a primitive group ends.
+    /// `END_VTXS` — real hardware treats this as an optional compatibility
+    /// marker. It does not disturb the active vertex list.
     pub fn end(&mut self) {}
+
+    /// Internal list termination used for events that really do close the
+    /// active list, such as buffer swaps.
+    pub fn force_end(&mut self) {
+        self.primitive = None;
+        self.list_active = false;
+        self.vertex_buffer.clear();
+    }
 
     /// `COLOR` — pack BGR555 from the parameter word's low 15 bits.
     pub fn set_color(&mut self, param: u32) {
@@ -124,15 +171,20 @@ impl VertexState {
     }
 
     /// `TEXCOORD` — two signed 16-bit values, packed in one word.
-    pub fn set_texcoord(&mut self, param: u32) {
+    pub fn set_texcoord(&mut self, param: u32, stacks: &MatrixStacks) {
         let s = param as i16;
         let t = (param >> 16) as i16;
-        self.current_tex = [s, t];
+        self.raw_tex = [s, t];
+        self.current_tex = match self.texcoord_transform_mode() {
+            1 => transform_texcoord_source([s, t], &stacks.texture),
+            // Modes 2 and 3 are evaluated by NORMAL and VTX commands.
+            _ => [s, t],
+        };
     }
 
-    /// `POLYGON_ATTR` — applies to all polygons *after* the next BEGIN_VTXS.
+    /// `POLYGON_ATTR` — applies to all polygons after the next `BEGIN_VTXS`.
     pub fn set_polygon_attr(&mut self, param: u32) {
-        self.polygon_attr = param;
+        self.pending_polygon_attr = Some(param);
     }
 
     /// `TEXIMAGE_PARAM`.
@@ -140,27 +192,32 @@ impl VertexState {
         self.tex_image_param = param;
     }
 
-    /// `PLTT_BASE` — texture palette base address (low 16 bits).
+    /// `PLTT_BASE` — texture palette base address (low 13 bits).
     pub fn set_palette_base(&mut self, param: u32) {
-        self.palette_base = (param & 0xFFFF) as u16;
+        self.palette_base = (param & 0x1FFF) as u16;
     }
 
     /// Process a fully-decoded vertex position (in object space). Transforms
     /// by the clip matrix and appends to the vertex buffer; emits a polygon
     /// when enough vertices accumulate for the current primitive type.
     pub fn submit_vertex(&mut self, pos_obj: [i32; 3], stacks: &MatrixStacks) {
-        self.last_pos = pos_obj;
-
         let primitive = match self.primitive {
             Some(p) => p,
             None => return, // BEGIN_VTXS wasn't called; ignore the vertex
         };
 
+        self.last_pos = pos_obj;
+
         // Transform to clip space.
         let clip_mat = stacks.clip_matrix();
         let clip = clip_mat.mul_vec4([pos_obj[0], pos_obj[1], pos_obj[2], ONE]);
 
-        let v = Vertex::new(clip, self.current_color, self.current_tex);
+        let tex = if self.texcoord_transform_mode() == 3 {
+            transform_vertex_source(pos_obj, self.raw_tex, &stacks.texture)
+        } else {
+            self.current_tex
+        };
+        let v = Vertex::new(clip, self.current_color, tex);
         self.vertex_buffer.push(v);
 
         let n = primitive.vertices_per_polygon();
@@ -168,29 +225,38 @@ impl VertexState {
             PrimitiveType::Triangles => {
                 if self.vertex_buffer.len() == n {
                     let verts = self.vertex_buffer.drain(..).collect::<Vec<_>>();
-                    self.polygon_buffer.push(make_polygon(verts, self));
+                    self.polygon_buffer
+                        .push(make_polygon(verts, self, primitive, true));
                 }
             }
             PrimitiveType::Quads => {
                 if self.vertex_buffer.len() == n {
                     let verts = self.vertex_buffer.drain(..).collect::<Vec<_>>();
-                    self.polygon_buffer.push(make_polygon(verts, self));
+                    self.polygon_buffer
+                        .push(make_polygon(verts, self, primitive, true));
                 }
             }
             PrimitiveType::TriangleStrip => {
                 if self.vertex_buffer.len() >= 3 {
                     let len = self.vertex_buffer.len();
-                    // Take the last 3 vertices in the right winding order.
-                    // Even N: 0,1,2; Odd N: 0,2,1 (to keep CCW winding consistent).
+                    // DS triangle strips keep natural connected order:
+                    // 0,1,2 then 1,2,3 then 2,3,4. Every second triangle has
+                    // the opposite front-facing winding rule.
                     let i0 = len - 3;
                     let i1 = len - 2;
                     let i2 = len - 1;
-                    let verts = if (len - 3) % 2 == 0 {
-                        vec![self.vertex_buffer[i0], self.vertex_buffer[i1], self.vertex_buffer[i2]]
-                    } else {
-                        vec![self.vertex_buffer[i0], self.vertex_buffer[i2], self.vertex_buffer[i1]]
-                    };
-                    self.polygon_buffer.push(make_polygon(verts, self));
+                    let front_area_negative = (len - 3) % 2 == 0;
+                    let verts = vec![
+                        self.vertex_buffer[i0],
+                        self.vertex_buffer[i1],
+                        self.vertex_buffer[i2],
+                    ];
+                    self.polygon_buffer.push(make_polygon(
+                        verts,
+                        self,
+                        primitive,
+                        front_area_negative,
+                    ));
                 }
             }
             PrimitiveType::QuadStrip => {
@@ -209,11 +275,87 @@ impl VertexState {
                         self.vertex_buffer[i2],
                         self.vertex_buffer[i3],
                     ];
-                    self.polygon_buffer.push(make_polygon(verts, self));
+                    self.polygon_buffer
+                        .push(make_polygon(verts, self, primitive, true));
                 }
             }
         }
     }
+
+    /// Apply texture-coordinate transform mode 2. The normal components are
+    /// raw 1.0.9 signed values from the NORMAL command.
+    pub fn apply_normal_texcoord_transform(&mut self, normal: [i32; 3], stacks: &MatrixStacks) {
+        if self.texcoord_transform_mode() == 2 {
+            self.current_tex = transform_normal_source(normal, self.raw_tex, &stacks.texture);
+        }
+    }
+
+    fn texcoord_transform_mode(&self) -> u32 {
+        (self.effective_tex_image_param() >> 30) & 0x3
+    }
+
+    fn effective_tex_image_param(&self) -> u32 {
+        if self.list_active && self.primitive.is_some_and(PrimitiveType::is_strip) {
+            self.strip_tex_image_param
+        } else {
+            self.tex_image_param
+        }
+    }
+}
+
+impl PrimitiveType {
+    fn is_strip(self) -> bool {
+        matches!(
+            self,
+            PrimitiveType::TriangleStrip | PrimitiveType::QuadStrip
+        )
+    }
+}
+
+#[inline]
+fn narrow_texcoord(value: i64) -> i16 {
+    value as i16
+}
+
+fn transform_texcoord_source(tex: [i16; 2], m: &Matrix) -> [i16; 2] {
+    let s = tex[0] as i64;
+    let t = tex[1] as i64;
+    let c = 1i64; // 1/16 in texture-coordinate units.
+    let out_s =
+        ((s * m.m[0] as i64) + (t * m.m[4] as i64) + (c * m.m[8] as i64) + (c * m.m[12] as i64))
+            >> 12;
+    let out_t =
+        ((s * m.m[1] as i64) + (t * m.m[5] as i64) + (c * m.m[9] as i64) + (c * m.m[13] as i64))
+            >> 12;
+    [narrow_texcoord(out_s), narrow_texcoord(out_t)]
+}
+
+fn transform_normal_source(normal: [i32; 3], tex: [i16; 2], m: &Matrix) -> [i16; 2] {
+    let nx = normal[0] as i64;
+    let ny = normal[1] as i64;
+    let nz = normal[2] as i64;
+    let base_s = tex[0] as i64;
+    let base_t = tex[1] as i64;
+    let out_s = ((nx * m.m[0] as i64) + (ny * m.m[4] as i64) + (nz * m.m[8] as i64)) >> 17;
+    let out_t = ((nx * m.m[1] as i64) + (ny * m.m[5] as i64) + (nz * m.m[9] as i64)) >> 17;
+    [
+        narrow_texcoord(out_s + base_s),
+        narrow_texcoord(out_t + base_t),
+    ]
+}
+
+fn transform_vertex_source(pos: [i32; 3], tex: [i16; 2], m: &Matrix) -> [i16; 2] {
+    let vx = pos[0] as i64;
+    let vy = pos[1] as i64;
+    let vz = pos[2] as i64;
+    let base_s = tex[0] as i64;
+    let base_t = tex[1] as i64;
+    let out_s = ((vx * m.m[0] as i64) + (vy * m.m[4] as i64) + (vz * m.m[8] as i64)) >> 20;
+    let out_t = ((vx * m.m[1] as i64) + (vy * m.m[5] as i64) + (vz * m.m[9] as i64)) >> 20;
+    [
+        narrow_texcoord(out_s + base_s),
+        narrow_texcoord(out_t + base_t),
+    ]
 }
 
 /// Decode `VTX_16` — two 32-bit parameter words supply the three signed
@@ -252,19 +394,25 @@ pub fn decode_vtx_pair(param: u32, last: [i32; 3], axis: VtxAxisPair) -> [i32; 3
 /// Decode `VTX_DIFF` — three 10-bit signed *deltas* applied to `last_pos`.
 pub fn decode_vtx_diff(param: u32, last: [i32; 3]) -> [i32; 3] {
     let sign_ext = |b: u32| -> i32 { (((b & 0x3FF) << 22) as i32) >> 22 };
-    let dx = sign_ext(param) << 3;       // delta is 1.0.6 -> shift by 6 to 1.0.12
-    let dy = sign_ext(param >> 10) << 3;
-    let dz = sign_ext(param >> 20) << 3;
+    // VTX_DIFF stores a signed 10-bit delta in the same 12-fractional-bit
+    // coordinate units as VTX_16. The raw range is therefore about +/-0.125.
+    let dx = sign_ext(param);
+    let dy = sign_ext(param >> 10);
+    let dz = sign_ext(param >> 20);
     [last[0] + dx, last[1] + dy, last[2] + dz]
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum VtxAxisPair { XY, XZ, YZ }
+pub enum VtxAxisPair {
+    XY,
+    XZ,
+    YZ,
+}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::stacks::MtxMode;
+    use super::*;
 
     fn ident_stacks() -> MatrixStacks {
         // Projection and position both identity → clip == object space.
@@ -310,14 +458,17 @@ mod tests {
         assert_eq!(t0.vertices[0].clip[0], 0);
         assert_eq!(t0.vertices[1].clip[0], ONE);
         assert_eq!(t0.vertices[2].clip[0], 0);
+        assert!(t0.front_area_negative);
 
         v.submit_vertex([ONE, ONE, 0], &s);
         assert_eq!(v.polygon_buffer.len(), 2);
-        // Second triangle: odd N (=1), so winding is swapped (i0, i2, i1).
+        // Second triangle keeps connected order (v1, v2, v3), but its
+        // front-facing area rule is inverted.
         let t1 = &v.polygon_buffer[1];
         assert_eq!(t1.vertices[0].clip[0], ONE); // v1
-        assert_eq!(t1.vertices[1].clip[0], ONE); // v3
-        assert_eq!(t1.vertices[2].clip[0], 0);   // v2
+        assert_eq!(t1.vertices[1].clip[0], 0); // v2
+        assert_eq!(t1.vertices[2].clip[0], ONE); // v3
+        assert!(!t1.front_area_negative);
     }
 
     #[test]
@@ -368,10 +519,10 @@ mod tests {
     #[test]
     fn test_vertex_carries_color_and_texcoord() {
         let mut v = VertexState::new();
-        v.set_color(0x1F);
-        v.set_texcoord(0x0010_FFF0u32);
-        v.begin(PrimitiveType::Triangles);
         let s = ident_stacks();
+        v.set_color(0x1F);
+        v.set_texcoord(0x0010_FFF0u32, &s);
+        v.begin(PrimitiveType::Triangles);
         for _ in 0..3 {
             v.submit_vertex([0, 0, 0], &s);
         }
@@ -381,18 +532,138 @@ mod tests {
     }
 
     #[test]
+    fn test_texcoord_transform_mode_1_uses_texture_matrix() {
+        let mut v = VertexState::new();
+        let mut s = ident_stacks();
+        s.set_mode(MtxMode::Texture);
+        s.load(Matrix::identity().mul_translate(4 * ONE, -2 * ONE, 0));
+
+        v.set_tex_image_param(1 << 30);
+        v.set_texcoord(0x0020_0010u32, &s);
+
+        assert_eq!(v.current_tex, [0x14, 0x1E]);
+    }
+
+    #[test]
+    fn test_texcoord_transform_mode_3_uses_vertex_source() {
+        let mut v = VertexState::new();
+        let mut s = ident_stacks();
+        s.set_mode(MtxMode::Texture);
+        s.load(Matrix::identity().mul_scale(2 * ONE, 3 * ONE, ONE));
+
+        v.set_tex_image_param(3 << 30);
+        v.set_texcoord(0, &s);
+        v.begin(PrimitiveType::Triangles);
+        for _ in 0..3 {
+            v.submit_vertex([2 * ONE, 4 * ONE, 0], &s);
+        }
+
+        assert_eq!(v.polygon_buffer[0].vertices[0].tex, [4 << 4, 12 << 4]);
+    }
+
+    #[test]
     fn test_polygon_attr_snapshot_per_polygon() {
         let mut v = VertexState::new();
         let s = ident_stacks();
         v.set_polygon_attr(0xAAAA_AAAA);
+        assert_eq!(v.polygon_attr, 0);
         v.begin(PrimitiveType::Triangles);
-        for _ in 0..3 { v.submit_vertex([0, 0, 0], &s); }
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
         assert_eq!(v.polygon_buffer[0].attr, 0xAAAA_AAAA);
 
         v.set_polygon_attr(0xBBBB_BBBB);
         v.begin(PrimitiveType::Triangles);
-        for _ in 0..3 { v.submit_vertex([0, 0, 0], &s); }
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
         assert_eq!(v.polygon_buffer[1].attr, 0xBBBB_BBBB);
+    }
+
+    #[test]
+    fn test_polygon_attr_write_during_list_defers_until_next_begin() {
+        let mut v = VertexState::new();
+        let s = ident_stacks();
+
+        v.set_polygon_attr(0x1111_1111);
+        v.begin(PrimitiveType::Triangles);
+        v.submit_vertex([0, 0, 0], &s);
+        v.set_polygon_attr(0x2222_2222);
+        v.submit_vertex([0, 0, 0], &s);
+        v.submit_vertex([0, 0, 0], &s);
+
+        assert_eq!(v.polygon_buffer[0].attr, 0x1111_1111);
+
+        v.begin(PrimitiveType::Triangles);
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
+
+        assert_eq!(v.polygon_buffer[1].attr, 0x2222_2222);
+    }
+
+    #[test]
+    fn test_separate_triangles_snapshot_texture_per_polygon() {
+        let mut v = VertexState::new();
+        let s = ident_stacks();
+
+        v.set_tex_image_param(0x1111);
+        v.set_palette_base(0x0020);
+        v.begin(PrimitiveType::Triangles);
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
+
+        v.set_tex_image_param(0x2222);
+        v.set_palette_base(0x0040);
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
+
+        assert_eq!(v.polygon_buffer[0].tex_image_param, 0x1111);
+        assert_eq!(v.polygon_buffer[0].palette_base, 0x0020);
+        assert_eq!(v.polygon_buffer[1].tex_image_param, 0x2222);
+        assert_eq!(v.polygon_buffer[1].palette_base, 0x0040);
+    }
+
+    #[test]
+    fn test_triangle_strip_keeps_texture_state_from_begin() {
+        let mut v = VertexState::new();
+        let s = ident_stacks();
+
+        v.set_tex_image_param(0x1111);
+        v.set_palette_base(0x0020);
+        v.begin(PrimitiveType::TriangleStrip);
+        v.submit_vertex([0, 0, 0], &s);
+        v.submit_vertex([ONE, 0, 0], &s);
+        v.submit_vertex([0, ONE, 0], &s);
+
+        v.set_tex_image_param(0x2222);
+        v.set_palette_base(0x0040);
+        v.submit_vertex([ONE, ONE, 0], &s);
+
+        assert_eq!(v.polygon_buffer.len(), 2);
+        assert_eq!(v.polygon_buffer[0].tex_image_param, 0x1111);
+        assert_eq!(v.polygon_buffer[0].palette_base, 0x0020);
+        assert_eq!(v.polygon_buffer[1].tex_image_param, 0x1111);
+        assert_eq!(v.polygon_buffer[1].palette_base, 0x0020);
+
+        v.begin(PrimitiveType::Triangles);
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
+        assert_eq!(v.polygon_buffer[2].tex_image_param, 0x2222);
+        assert_eq!(v.polygon_buffer[2].palette_base, 0x0040);
+    }
+
+    #[test]
+    fn test_palette_base_masks_to_thirteen_bits() {
+        let mut v = VertexState::new();
+
+        v.set_palette_base(0xFFFF);
+
+        assert_eq!(v.palette_base, 0x1FFF);
     }
 
     #[test]
@@ -401,6 +672,24 @@ mod tests {
         let s = ident_stacks();
         v.submit_vertex([ONE, 0, 0], &s);
         assert!(v.polygon_buffer.is_empty());
+        assert!(v.vertex_buffer.is_empty());
+        assert_eq!(v.last_pos, [0, 0, 0]);
+    }
+
+    #[test]
+    fn test_end_vtxs_does_not_disturb_active_list() {
+        let mut v = VertexState::new();
+        let s = ident_stacks();
+
+        v.begin(PrimitiveType::Triangles);
+        v.submit_vertex([0, 0, 0], &s);
+        v.end();
+        v.submit_vertex([ONE, 0, 0], &s);
+        v.submit_vertex([0, ONE, 0], &s);
+
+        assert_eq!(v.polygon_buffer.len(), 1);
+        assert!(v.list_active);
+        assert_eq!(v.primitive, Some(PrimitiveType::Triangles));
         assert!(v.vertex_buffer.is_empty());
     }
 
@@ -421,11 +710,23 @@ mod tests {
     #[test]
     fn test_vtx_diff_adds_to_last() {
         let last = [ONE, 2 * ONE, 3 * ONE];
-        // VTX_DIFF deltas of (1, -1, 0) in 10-bit → shifted to 1.0.12
+        // VTX_DIFF deltas are already in 12-fractional-bit coordinate units.
         let param = 0x0001u32 | (0x3FFu32 << 10);
         let r = decode_vtx_diff(param, last);
-        assert!(r[0] > last[0]);
-        assert!(r[1] < last[1]);
+        assert_eq!(r[0], last[0] + 1);
+        assert_eq!(r[1], last[1] - 1);
         assert_eq!(r[2], last[2]);
+    }
+
+    #[test]
+    fn test_vtx_diff_max_range_is_one_eighth_unit() {
+        let last = [0, 0, 0];
+        let param = 0x1FFu32 | (0x200u32 << 10) | (0x001u32 << 20);
+
+        let r = decode_vtx_diff(param, last);
+
+        assert_eq!(r, [0x1FF, -0x200, 1]);
+        assert!(r[0] < ONE / 8, "positive max remains below +0.125");
+        assert_eq!(r[1], -ONE / 8, "negative max is exactly -0.125");
     }
 }

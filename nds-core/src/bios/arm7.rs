@@ -173,5 +173,4 @@ mod tests {
         assert!(handle_swi(&mut cpu, &mut bus, 0x0F));
         assert_eq!(cpu.regs[0], 0);
     }
-
 }

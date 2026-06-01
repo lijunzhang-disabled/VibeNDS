@@ -34,29 +34,29 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Irq {
-    VBlank          = 0,
-    HBlank          = 1,
-    VCountMatch     = 2,
-    Timer0          = 3,
-    Timer1          = 4,
-    Timer2          = 5,
-    Timer3          = 6,
-    Sio             = 7,   // ARM7 only
-    Dma0            = 8,
-    Dma1            = 9,
-    Dma2            = 10,
-    Dma3            = 11,
-    Keypad          = 12,
-    GbaSlot         = 13,
-    IpcSync         = 16,
-    IpcSendEmpty    = 17,
+    VBlank = 0,
+    HBlank = 1,
+    VCountMatch = 2,
+    Timer0 = 3,
+    Timer1 = 4,
+    Timer2 = 5,
+    Timer3 = 6,
+    Sio = 7, // ARM7 only
+    Dma0 = 8,
+    Dma1 = 9,
+    Dma2 = 10,
+    Dma3 = 11,
+    Keypad = 12,
+    GbaSlot = 13,
+    IpcSync = 16,
+    IpcSendEmpty = 17,
     IpcRecvNotEmpty = 18,
-    Slot1Data       = 19,
-    Slot1Card       = 20,
-    GxFifo          = 21,  // ARM9 only
-    LidOpen         = 22,  // ARM7 only
-    Spi             = 23,  // ARM7 only
-    WiFi            = 24,  // ARM7 only
+    Slot1Data = 19,
+    Slot1Card = 20,
+    GxFifo = 21,  // ARM9 only
+    LidOpen = 22, // ARM7 only
+    Spi = 23,     // ARM7 only
+    WiFi = 24,    // ARM7 only
 }
 
 impl Irq {
@@ -80,7 +80,11 @@ pub struct InterruptController {
 
 impl InterruptController {
     pub fn new() -> Self {
-        InterruptController { ie: 0, iflag: 0, ime: false }
+        InterruptController {
+            ie: 0,
+            iflag: 0,
+            ime: false,
+        }
     }
 
     pub fn request(&mut self, irq: Irq) {
@@ -119,16 +123,30 @@ impl InterruptController {
         (self.ie & self.iflag & mask) != 0
     }
 
-    pub fn read_ie(&self) -> u32 { self.ie }
-    pub fn write_ie(&mut self, v: u32) { self.ie = v; }
-    pub fn read_if(&self) -> u32 { self.iflag }
-    pub fn write_if(&mut self, v: u32) { self.acknowledge(v); }
-    pub fn read_ime(&self) -> u32 { self.ime as u32 }
-    pub fn write_ime(&mut self, v: u32) { self.ime = v & 1 != 0; }
+    pub fn read_ie(&self) -> u32 {
+        self.ie
+    }
+    pub fn write_ie(&mut self, v: u32) {
+        self.ie = v;
+    }
+    pub fn read_if(&self) -> u32 {
+        self.iflag
+    }
+    pub fn write_if(&mut self, v: u32) {
+        self.acknowledge(v);
+    }
+    pub fn read_ime(&self) -> u32 {
+        self.ime as u32
+    }
+    pub fn write_ime(&mut self, v: u32) {
+        self.ime = v & 1 != 0;
+    }
 }
 
 impl Default for InterruptController {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

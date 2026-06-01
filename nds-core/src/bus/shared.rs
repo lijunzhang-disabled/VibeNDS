@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-use crate::bus::math::MathUnit;
 use crate::audio::Audio;
+use crate::bus::math::MathUnit;
 use crate::cart::AuxSpi;
 use crate::dma::DmaController;
 use crate::gpu2d::{Engine2d, Which as EngineWhich};

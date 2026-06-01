@@ -23,10 +23,18 @@ pub struct Timer {
 }
 
 impl Timer {
-    pub fn enabled(&self) -> bool { self.control & (1 << 7) != 0 }
-    pub fn cascade(&self) -> bool { self.control & (1 << 2) != 0 }
-    pub fn irq_enabled(&self) -> bool { self.control & (1 << 6) != 0 }
-    pub fn prescaler(&self) -> u32 { PRESCALER_DIVIDERS[(self.control & 3) as usize] }
+    pub fn enabled(&self) -> bool {
+        self.control & (1 << 7) != 0
+    }
+    pub fn cascade(&self) -> bool {
+        self.control & (1 << 2) != 0
+    }
+    pub fn irq_enabled(&self) -> bool {
+        self.control & (1 << 6) != 0
+    }
+    pub fn prescaler(&self) -> u32 {
+        PRESCALER_DIVIDERS[(self.control & 3) as usize]
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -41,10 +49,16 @@ pub struct TimerTickResult {
 }
 
 impl Timers {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn read_counter(&self, id: usize) -> u16 { self.timers[id].counter }
-    pub fn read_control(&self, id: usize) -> u16 { self.timers[id].control }
+    pub fn read_counter(&self, id: usize) -> u16 {
+        self.timers[id].counter
+    }
+    pub fn read_control(&self, id: usize) -> u16 {
+        self.timers[id].control
+    }
 
     pub fn write_reload(&mut self, id: usize, value: u16) {
         self.timers[id].reload = value;
@@ -72,13 +86,21 @@ impl Timers {
             }
 
             let overflows = if self.timers[i].cascade() && i > 0 {
-                if prev_overflow { self.increment(i, 1) } else { 0 }
+                if prev_overflow {
+                    self.increment(i, 1)
+                } else {
+                    0
+                }
             } else {
                 let prescaler = self.timers[i].prescaler();
                 self.timers[i].prescaler_counter += cycles;
                 let ticks = self.timers[i].prescaler_counter / prescaler;
                 self.timers[i].prescaler_counter %= prescaler;
-                if ticks > 0 { self.increment(i, ticks) } else { 0 }
+                if ticks > 0 {
+                    self.increment(i, ticks)
+                } else {
+                    0
+                }
             };
 
             prev_overflow = overflows > 0;

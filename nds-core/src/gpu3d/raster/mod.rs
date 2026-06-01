@@ -11,9 +11,9 @@
 //! reads from that buffer per scanline when `DISPCNT` bit 3 is set —
 //! same shape as the 2D engines' BG renderers.
 
-pub mod triangle;
-pub mod texture;
 pub mod postfx;
+pub mod texture;
+pub mod triangle;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,11 +45,24 @@ pub struct Rasterizer {
     /// to identify polygon boundaries.
     #[serde(with = "crate::bus::shared::serde_bytes_vec")]
     pub id_buffer: Vec<u8>,
+    /// 256×192 edge-mark eligibility flag. Only opaque polygons and
+    /// wireframes participate in the edge-marking post-pass.
+    #[serde(with = "crate::bus::shared::serde_bytes_vec")]
+    pub edge_enable_buffer: Vec<u8>,
+    /// 256×192 per-pixel fog enable flag, latched from POLYGON_ATTR bit 15.
+    #[serde(with = "crate::bus::shared::serde_bytes_vec")]
+    pub fog_enable_buffer: Vec<u8>,
+    /// 256×192 shadow stencil buffer. Shadow polygon mode first writes a
+    /// mask with polygon ID 0, then draws visible shadow polygons against it.
+    #[serde(with = "crate::bus::shared::serde_bytes_vec")]
+    pub shadow_stencil: Vec<u8>,
 
     /// `CLEAR_COLOR` register — used to fill the framebuffer at frame start.
     pub clear_color: u32,
     /// `CLEAR_DEPTH` register — 16-bit value, scaled to depth buffer range.
     pub clear_depth: u16,
+    /// `CLRIMAGE_OFFSET` register — rear-plane bitmap scroll offsets.
+    pub clear_image_offset: u16,
     /// `DISP3DCNT` register. Bit assignments per GBATEK:
     /// ```text
     /// [0]  Texture mapping enable
@@ -79,6 +92,12 @@ pub struct Rasterizer {
     /// `ALPHA_TEST_REF` — pixels with alpha < this are discarded when
     /// alpha-test is enabled (DISP3DCNT bit 2).
     pub alpha_test_ref: u8,
+
+    /// SWAP_BUFFERS bit 0. When clear, translucent polygons are sorted by Y;
+    /// when set, software order is preserved.
+    pub manual_translucent_sort: bool,
+    /// SWAP_BUFFERS bit 1. When set, depth tests use per-vertex W instead of Z.
+    pub w_buffering: bool,
 }
 
 impl Rasterizer {
@@ -87,8 +106,12 @@ impl Rasterizer {
             framebuffer: vec![0u16; FB_PIXELS],
             depth_buffer: vec![DEPTH_MAX; FB_PIXELS],
             id_buffer: vec![0u8; FB_PIXELS],
+            edge_enable_buffer: vec![0u8; FB_PIXELS],
+            fog_enable_buffer: vec![0u8; FB_PIXELS],
+            shadow_stencil: vec![0u8; FB_PIXELS],
             clear_color: 0,
             clear_depth: 0x7FFF,
+            clear_image_offset: 0,
             disp3dcnt: 0,
             edge_color: [0; 8],
             fog_color: 0,
@@ -96,25 +119,89 @@ impl Rasterizer {
             fog_table: [0; 32],
             toon_table: [0; 32],
             alpha_test_ref: 0,
+            manual_translucent_sort: false,
+            w_buffering: false,
         }
+    }
+
+    pub fn set_swap_attrs(&mut self, attrs: u32) {
+        self.manual_translucent_sort = attrs & 1 != 0;
+        self.w_buffering = attrs & 2 != 0;
     }
 
     /// Clear framebuffer + depth + id buffers from the clear registers.
     pub fn clear(&mut self) {
+        self.clear_with_vram(None);
+    }
+
+    /// Clear framebuffer + depth + id buffers from the rear plane. When
+    /// DISP3DCNT bit 14 is set, the rear plane comes from texture slots 2/3.
+    pub fn clear_with_vram(&mut self, vram: Option<&VramRouter>) {
+        if self.disp3dcnt & (1 << 14) != 0 {
+            if let Some(vram) = vram {
+                self.clear_from_rear_bitmap(vram);
+                return;
+            }
+        }
+
         // BGR555 from CLEAR_COLOR low 15 bits; bit 15 = alpha (0 means
         // "no 3D pixel here", lets the 2D compositor see through).
         let alpha = ((self.clear_color >> 16) & 0x1F) != 0;
-        let color = (self.clear_color & 0x7FFF) as u16
-                  | if alpha { 1 << 15 } else { 0 };
-        for p in self.framebuffer.iter_mut() { *p = color; }
+        let color = (self.clear_color & 0x7FFF) as u16 | if alpha { 1 << 15 } else { 0 };
+        for p in self.framebuffer.iter_mut() {
+            *p = color;
+        }
 
-        // CLEAR_DEPTH is a 16-bit value; expand to the 24-bit depth range
-        // we use internally so it can be compared against per-pixel
-        // depths computed in Phase 6's NDC space.
-        let depth = (self.clear_depth as i32) << 9 | 0x1FF;
-        for d in self.depth_buffer.iter_mut() { *d = depth; }
+        // CLEAR_DEPTH is a 15-bit value expanded to the 24-bit hardware
+        // depth range: X * 0x200 + ((X + 1) / 0x8000) * 0x1FF.
+        let depth = expand_clear_depth(self.clear_depth);
+        for d in self.depth_buffer.iter_mut() {
+            *d = depth;
+        }
 
-        for i in self.id_buffer.iter_mut() { *i = 0; }
+        let clear_poly_id = ((self.clear_color >> 24) & 0x3F) as u8;
+        for i in self.id_buffer.iter_mut() {
+            *i = clear_poly_id;
+        }
+        for e in self.edge_enable_buffer.iter_mut() {
+            *e = 0;
+        }
+        let clear_fog = if self.clear_color & (1 << 15) != 0 {
+            1
+        } else {
+            0
+        };
+        for f in self.fog_enable_buffer.iter_mut() {
+            *f = clear_fog;
+        }
+        for s in self.shadow_stencil.iter_mut() {
+            *s = 0;
+        }
+    }
+
+    fn clear_from_rear_bitmap(&mut self, vram: &VramRouter) {
+        let clear_poly_id = ((self.clear_color >> 24) & 0x3F) as u8;
+        let x_off = (self.clear_image_offset & 0x00FF) as usize;
+        let y_off = ((self.clear_image_offset >> 8) & 0x00FF) as usize;
+
+        for y in 0..FB_HEIGHT {
+            for x in 0..FB_WIDTH {
+                let src_x = (x + x_off) & 0xFF;
+                let src_y = (y + y_off) & 0xFF;
+                let src = ((src_y * 256 + src_x) * 2) as u32;
+                let idx = y * FB_WIDTH + x;
+
+                let color = read_texture_image_u16(vram, 0x4_0000 + src);
+                let depth = read_texture_image_u16(vram, 0x6_0000 + src);
+
+                self.framebuffer[idx] = color;
+                self.depth_buffer[idx] = expand_clear_depth(depth);
+                self.id_buffer[idx] = clear_poly_id;
+                self.edge_enable_buffer[idx] = 0;
+                self.fog_enable_buffer[idx] = if depth & (1 << 15) != 0 { 1 } else { 0 };
+                self.shadow_stencil[idx] = 0;
+            }
+        }
     }
 
     /// Rasterize every polygon into the framebuffer, then apply post-effects.
@@ -123,10 +210,14 @@ impl Rasterizer {
     /// - `vram` is `None` for unit tests that only care about per-vertex
     ///   color paths; `Some(...)` for the real pipeline so textures work.
     pub fn render_frame(&mut self, polygons: &[ScreenPolygon], vram: Option<&VramRouter>) {
-        self.clear();
+        self.clear_with_vram(vram);
 
-        let (opaque, translucent): (Vec<_>, Vec<_>) =
+        let (opaque, mut translucent): (Vec<_>, Vec<_>) =
             polygons.iter().partition(|p| !is_translucent(p));
+
+        if !self.manual_translucent_sort {
+            translucent.sort_by_key(|p| polygon_y_sort_key(p));
+        }
 
         for p in &opaque {
             triangle::rasterize_polygon(p, self, vram);
@@ -140,11 +231,135 @@ impl Rasterizer {
     }
 }
 
+fn expand_clear_depth(value: u16) -> i32 {
+    let x = (value & 0x7FFF) as i32;
+    (x << 9) + (((x + 1) >> 15) * 0x1FF)
+}
+
+fn read_texture_image_u16(vram: &VramRouter, addr: u32) -> u16 {
+    let lo = vram.read_texture_image(addr) as u16;
+    let hi = vram.read_texture_image(addr + 1) as u16;
+    lo | (hi << 8)
+}
+
 impl Default for Rasterizer {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn is_translucent(p: &ScreenPolygon) -> bool {
     let alpha = (p.attr >> 16) & 0x1F;
-    alpha != 0 && alpha != 31
+    if alpha == 0 {
+        return false;
+    }
+    if alpha != 0 && alpha != 31 {
+        return true;
+    }
+
+    // A3I5 and A5I3 carry per-texel alpha. In modulation and toon/highlight
+    // modes, that alpha contributes to the final pixel alpha even when
+    // POLYGON_ATTR alpha=31, so these polygons need the late translucent pass.
+    // Decal mode uses texture alpha only as a color-mix ratio; final alpha is
+    // Av, so an alpha=31 decal polygon remains opaque.
+    let mode = (p.attr >> 4) & 0x3;
+    let tex_format = (p.tex_image_param >> 26) & 0x7;
+    matches!(mode, 0 | 2) && matches!(tex_format, 1 | 6)
+}
+
+fn polygon_y_sort_key(p: &&ScreenPolygon) -> i32 {
+    p.vertices.iter().map(|v| v.screen_y).min().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vram::{BankId, VramRouter};
+
+    #[test]
+    fn test_clear_color_bit15_initializes_rear_plane_fog_flag() {
+        let mut r = Rasterizer::new();
+        r.clear_color = (1 << 15) | (0x1F << 16);
+
+        r.clear();
+
+        assert!(r.fog_enable_buffer.iter().all(|&f| f == 1));
+    }
+
+    #[test]
+    fn test_clear_color_initializes_rear_plane_polygon_id() {
+        let mut r = Rasterizer::new();
+        r.clear_color = 0x2A << 24;
+
+        r.clear();
+
+        assert!(r.id_buffer.iter().all(|&id| id == 0x2A));
+    }
+
+    #[test]
+    fn test_clear_depth_expands_to_hardware_depth_range() {
+        assert_eq!(expand_clear_depth(0), 0);
+        assert_eq!(expand_clear_depth(1), 0x200);
+        assert_eq!(expand_clear_depth(0x7FFE), 0x00FF_FC00);
+        assert_eq!(expand_clear_depth(0x7FFF), DEPTH_MAX);
+        assert_eq!(expand_clear_depth(0xFFFF), DEPTH_MAX);
+    }
+
+    #[test]
+    fn test_rear_bitmap_clear_uses_texture_slots_and_scroll() {
+        let mut vram = VramRouter::new();
+        vram.write_cnt(BankId::C, 0x80 | (2 << 3) | 3);
+        vram.write_cnt(BankId::D, 0x80 | (3 << 3) | 3);
+
+        let src = (3 * 256 + 2) * 2;
+        {
+            let color = &mut vram.banks[BankId::C as usize].data;
+            color[src] = 0x1F;
+            color[src + 1] = 0x80;
+        }
+        {
+            let depth = &mut vram.banks[BankId::D as usize].data;
+            depth[src] = 0x34;
+            depth[src + 1] = 0x92;
+        }
+
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 14;
+        r.clear_color = 0x2A << 24;
+        r.clear_image_offset = (3 << 8) | 2;
+
+        r.clear_with_vram(Some(&vram));
+
+        assert_eq!(r.framebuffer[0], 0x801F);
+        assert_eq!(r.depth_buffer[0], expand_clear_depth(0x1234));
+        assert_eq!(r.id_buffer[0], 0x2A);
+        assert_eq!(r.fog_enable_buffer[0], 1);
+        assert_eq!(r.edge_enable_buffer[0], 0);
+    }
+
+    #[test]
+    fn test_translucent_texture_formats_are_sorted_with_translucent_polygons_in_modulate_mode() {
+        let p = ScreenPolygon {
+            vertices: Vec::new(),
+            attr: (31 << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 6 << 26,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+
+        assert!(is_translucent(&p));
+    }
+
+    #[test]
+    fn test_opaque_decal_translucent_texture_stays_in_opaque_pass() {
+        let p = ScreenPolygon {
+            vertices: Vec::new(),
+            attr: (1 << 4) | (31 << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 6 << 26,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+
+        assert!(!is_translucent(&p));
+    }
 }

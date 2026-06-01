@@ -49,7 +49,9 @@ pub fn swi_cpu_set<B: CpuBus>(cpu: &mut Cpu, bus: &mut B) {
         for _ in 0..count {
             let v = if fill { value } else { bus.read32(src) };
             bus.write32(dst, v);
-            if !fill { src = src.wrapping_add(4); }
+            if !fill {
+                src = src.wrapping_add(4);
+            }
             dst = dst.wrapping_add(4);
         }
     } else {
@@ -57,7 +59,9 @@ pub fn swi_cpu_set<B: CpuBus>(cpu: &mut Cpu, bus: &mut B) {
         for _ in 0..count {
             let v = if fill { value } else { bus.read16(src) };
             bus.write16(dst, v);
-            if !fill { src = src.wrapping_add(2); }
+            if !fill {
+                src = src.wrapping_add(2);
+            }
             dst = dst.wrapping_add(2);
         }
     }
@@ -105,7 +109,11 @@ pub fn swi_get_crc16<B: CpuBus>(cpu: &mut Cpu, bus: &mut B) {
         for byte in val.to_le_bytes() {
             crc ^= byte as u16;
             for _ in 0..8 {
-                if crc & 1 != 0 { crc = (crc >> 1) ^ 0xA001; } else { crc >>= 1; }
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xA001;
+                } else {
+                    crc >>= 1;
+                }
             }
         }
         ptr = ptr.wrapping_add(2);
@@ -134,7 +142,12 @@ pub fn swi_lz77_uncomp<B: CpuBus>(cpu: &mut Cpu, bus: &mut B, vram: bool) {
     // VRAM variant must use halfword writes (no 8-bit access). We accumulate
     // byte pairs and flush via write16; the WRAM variant just uses write8.
     let mut pending: Option<u8> = None;
-    let flush = |bus: &mut B, dst: &mut u32, written: &mut u32, pending: &mut Option<u8>, byte: u8, vram: bool| {
+    let flush = |bus: &mut B,
+                 dst: &mut u32,
+                 written: &mut u32,
+                 pending: &mut Option<u8>,
+                 byte: u8,
+                 vram: bool| {
         if vram {
             if let Some(low) = pending.take() {
                 let v = (low as u16) | ((byte as u16) << 8);
@@ -154,7 +167,9 @@ pub fn swi_lz77_uncomp<B: CpuBus>(cpu: &mut Cpu, bus: &mut B, vram: bool) {
         let flags = bus.read8(src);
         src = src.wrapping_add(1);
         for bit in 0..8 {
-            if written >= total { break; }
+            if written >= total {
+                break;
+            }
             if flags & (0x80 >> bit) == 0 {
                 // Literal
                 let b = bus.read8(src);
@@ -170,12 +185,22 @@ pub fn swi_lz77_uncomp<B: CpuBus>(cpu: &mut Cpu, bus: &mut B, vram: bool) {
                 // Read back from the *destination* — already-written bytes.
                 // Distance is disp+1 from the next byte to write.
                 for _ in 0..length {
-                    if written >= total { break; }
-                    let read_addr = dst.wrapping_sub(disp + 1).wrapping_sub(if vram { pending.is_some() as u32 } else { 0 });
+                    if written >= total {
+                        break;
+                    }
+                    let read_addr = dst.wrapping_sub(disp + 1).wrapping_sub(if vram {
+                        pending.is_some() as u32
+                    } else {
+                        0
+                    });
                     let b = if vram && pending.is_some() {
                         // Pending half — synthesize from already-written halfword.
                         let halfword = bus.read16(read_addr & !1);
-                        if read_addr & 1 != 0 { (halfword >> 8) as u8 } else { halfword as u8 }
+                        if read_addr & 1 != 0 {
+                            (halfword >> 8) as u8
+                        } else {
+                            halfword as u8
+                        }
                     } else {
                         bus.read8(read_addr)
                     };
@@ -264,7 +289,10 @@ mod tests {
         cpu.regs[2] = 16 | (1 << 26); // 16 words, word transfer
         swi_cpu_set(&mut cpu, &mut bus);
         for i in 0..16 {
-            assert_eq!(bus.mem[(0x100 + i * 4) as usize], bus.mem[(0x200 + i * 4) as usize]);
+            assert_eq!(
+                bus.mem[(0x100 + i * 4) as usize],
+                bus.mem[(0x200 + i * 4) as usize]
+            );
         }
     }
 
@@ -346,8 +374,13 @@ mod tests {
         swi_lz77_uncomp(&mut cpu, &mut bus, false);
 
         for i in 0..8 {
-            assert_eq!(bus.mem[0x200 + i], b'A',
-                "byte {} should be 'A', got {}", i, bus.mem[0x200 + i]);
+            assert_eq!(
+                bus.mem[0x200 + i],
+                b'A',
+                "byte {} should be 'A', got {}",
+                i,
+                bus.mem[0x200 + i]
+            );
         }
     }
 }

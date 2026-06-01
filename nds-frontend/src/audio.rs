@@ -56,7 +56,9 @@ impl AudioOutput {
         };
         let queue: SharedQueue = Arc::new(Mutex::new(VecDeque::with_capacity(8192)));
         let queue_for_cb = Arc::clone(&queue);
-        let device = match audio.open_playback(None, &spec, |_| Callback { queue: queue_for_cb }) {
+        let device = match audio.open_playback(None, &spec, |_| Callback {
+            queue: queue_for_cb,
+        }) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("warning: open_playback failed: {} — silent run", e);
@@ -64,7 +66,10 @@ impl AudioOutput {
             }
         };
         device.resume();
-        Some(AudioOutput { queue, _device: device })
+        Some(AudioOutput {
+            queue,
+            _device: device,
+        })
     }
 
     /// Push interleaved stereo samples into the shared queue. Drops old
@@ -74,7 +79,9 @@ impl AudioOutput {
         let mut q = self.queue.lock().unwrap();
         if q.len() + samples.len() > MAX_QUEUE {
             let drop = q.len() + samples.len() - MAX_QUEUE;
-            for _ in 0..drop { q.pop_front(); }
+            for _ in 0..drop {
+                q.pop_front();
+            }
         }
         q.extend(samples.iter().copied());
     }

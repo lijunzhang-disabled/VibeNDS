@@ -7,7 +7,7 @@
 use super::SharedState;
 use crate::cart::chip_id::chip_id_for_rom;
 use crate::gpu2d::Engine2d;
-use crate::gpu3d::{GxCmd};
+use crate::gpu3d::GxCmd;
 use crate::interrupt::Irq;
 use crate::ipc::{self, Side};
 
@@ -20,8 +20,12 @@ fn classify_engine(offset: u32) -> Option<(EngineSel, u32)> {
         // 0x04 = DISPSTAT, 0x06 = VCOUNT are shared between both CPUs.
         // 0x60-0x6B are 3D-engine / capture / main-mem-FIFO regs (not
         // really Engine A's, just happen to live in its address window).
-        if offset == 0x04 || offset == 0x06 { return None; }
-        if (0x60..0x6C).contains(&offset) { return None; }
+        if offset == 0x04 || offset == 0x06 {
+            return None;
+        }
+        if (0x60..0x6C).contains(&offset) {
+            return None;
+        }
         Some((EngineSel::A, offset))
     } else if (0x1000..0x1070).contains(&offset) {
         Some((EngineSel::B, offset - 0x1000))
@@ -31,16 +35,25 @@ fn classify_engine(offset: u32) -> Option<(EngineSel, u32)> {
 }
 
 #[derive(Clone, Copy)]
-enum EngineSel { A, B }
+enum EngineSel {
+    A,
+    B,
+}
 
 #[inline]
 fn engine_mut(shared: &mut SharedState, sel: EngineSel) -> &mut Engine2d {
-    match sel { EngineSel::A => &mut shared.engine_a, EngineSel::B => &mut shared.engine_b }
+    match sel {
+        EngineSel::A => &mut shared.engine_a,
+        EngineSel::B => &mut shared.engine_b,
+    }
 }
 
 #[inline]
 fn engine(shared: &SharedState, sel: EngineSel) -> &Engine2d {
-    match sel { EngineSel::A => &shared.engine_a, EngineSel::B => &shared.engine_b }
+    match sel {
+        EngineSel::A => &shared.engine_a,
+        EngineSel::B => &shared.engine_b,
+    }
 }
 
 /// Read a single 16-bit engine register identified by `local_off` (offset
@@ -119,10 +132,22 @@ fn write_engine_reg16(eng: &mut Engine2d, local_off: u32, val: u16) {
 fn write_engine_reg32(eng: &mut Engine2d, local_off: u32, val: u32) {
     match local_off {
         0x00 => eng.dispcnt = val,
-        0x28 => { eng.bg2_x_latch = sign_extend_28(val); eng.bg2_x_int = eng.bg2_x_latch; }
-        0x2C => { eng.bg2_y_latch = sign_extend_28(val); eng.bg2_y_int = eng.bg2_y_latch; }
-        0x38 => { eng.bg3_x_latch = sign_extend_28(val); eng.bg3_x_int = eng.bg3_x_latch; }
-        0x3C => { eng.bg3_y_latch = sign_extend_28(val); eng.bg3_y_int = eng.bg3_y_latch; }
+        0x28 => {
+            eng.bg2_x_latch = sign_extend_28(val);
+            eng.bg2_x_int = eng.bg2_x_latch;
+        }
+        0x2C => {
+            eng.bg2_y_latch = sign_extend_28(val);
+            eng.bg2_y_int = eng.bg2_y_latch;
+        }
+        0x38 => {
+            eng.bg3_x_latch = sign_extend_28(val);
+            eng.bg3_x_int = eng.bg3_x_latch;
+        }
+        0x3C => {
+            eng.bg3_y_latch = sign_extend_28(val);
+            eng.bg3_y_int = eng.bg3_y_latch;
+        }
         _ => {
             write_engine_reg16(eng, local_off, val as u16);
             write_engine_reg16(eng, local_off + 2, (val >> 16) as u16);
@@ -142,7 +167,11 @@ pub fn in_io_page(addr: u32) -> bool {
 
 pub fn read_io8(shared: &SharedState, addr: u32) -> u8 {
     let r = read_io16(shared, addr & !1);
-    if addr & 1 != 0 { (r >> 8) as u8 } else { r as u8 }
+    if addr & 1 != 0 {
+        (r >> 8) as u8
+    } else {
+        r as u8
+    }
 }
 
 pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
@@ -183,20 +212,49 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x0212 => (shared.irq9.read_ie() >> 16) as u16,
         0x0214 => shared.irq9.read_if() as u16,
         0x0216 => (shared.irq9.read_if() >> 16) as u16,
-        0x0240 => (shared.vram.read_cnt(BankId::A) as u16)
-                | ((shared.vram.read_cnt(BankId::B) as u16) << 8),
-        0x0242 => (shared.vram.read_cnt(BankId::C) as u16)
-                | ((shared.vram.read_cnt(BankId::D) as u16) << 8),
-        0x0244 => (shared.vram.read_cnt(BankId::E) as u16)
-                | ((shared.vram.read_cnt(BankId::F) as u16) << 8),
-        0x0246 => (shared.vram.read_cnt(BankId::G) as u16)
-                | ((shared.wramcnt as u16) << 8),
-        0x0248 => (shared.vram.read_cnt(BankId::H) as u16)
-                | ((shared.vram.read_cnt(BankId::I) as u16) << 8),
+        0x0240 => {
+            (shared.vram.read_cnt(BankId::A) as u16)
+                | ((shared.vram.read_cnt(BankId::B) as u16) << 8)
+        }
+        0x0242 => {
+            (shared.vram.read_cnt(BankId::C) as u16)
+                | ((shared.vram.read_cnt(BankId::D) as u16) << 8)
+        }
+        0x0244 => {
+            (shared.vram.read_cnt(BankId::E) as u16)
+                | ((shared.vram.read_cnt(BankId::F) as u16) << 8)
+        }
+        0x0246 => (shared.vram.read_cnt(BankId::G) as u16) | ((shared.wramcnt as u16) << 8),
+        0x0248 => {
+            (shared.vram.read_cnt(BankId::H) as u16)
+                | ((shared.vram.read_cnt(BankId::I) as u16) << 8)
+        }
         0x0304 => shared.powcnt1,
         0x0060 => shared.gpu3d.rasterizer.disp3dcnt,
-        0x0600 => shared.gpu3d.fifo.stat_low(),
-        0x0602 => shared.gpu3d.fifo.stat_high(),
+        0x0600 => shared.gpu3d.gxstat_low(),
+        0x0602 => shared.gpu3d.gxstat_high(),
+        0x0604 => shared.gpu3d.ram_count() as u16,
+        0x0606 => (shared.gpu3d.ram_count() >> 16) as u16,
+        0x0610 => shared.gpu3d.disp_1dot_depth,
+        0x0620..=0x062E => {
+            let idx = ((local - 0x0620) / 4) as usize;
+            let shift = ((local - 0x0620) & 2) * 8;
+            (shared.gpu3d.read_pos_test_word(idx) >> shift) as u16
+        }
+        0x0630..=0x0634 => {
+            let idx = ((local - 0x0630) / 2) as usize;
+            shared.gpu3d.read_vec_test_halfword(idx)
+        }
+        0x0640..=0x067E => {
+            let idx = ((local - 0x0640) / 4) as usize;
+            let shift = ((local - 0x0640) & 2) * 8;
+            (shared.gpu3d.read_clip_matrix_word(idx) >> shift) as u16
+        }
+        0x0680..=0x06A2 => {
+            let idx = ((local - 0x0680) / 4) as usize;
+            let shift = ((local - 0x0680) & 2) * 8;
+            (shared.gpu3d.read_direction_matrix_word(idx) >> shift) as u16
+        }
         _ => 0,
     }
 }
@@ -207,7 +265,9 @@ pub fn read_io32(shared: &SharedState, addr: u32) -> u32 {
     let local = addr & 0x00FF_FFFC;
     if let Some((sel, off)) = classify_engine(local) {
         let eng = engine(shared, sel);
-        if off == 0x00 { return eng.dispcnt; }
+        if off == 0x00 {
+            return eng.dispcnt;
+        }
     }
     if let Some(v) = shared.math.read32(local) {
         return v;
@@ -224,6 +284,21 @@ pub fn read_io32(shared: &SharedState, addr: u32) -> u32 {
     }
     match local {
         0x01A4 => slot1_romctrl_status(shared),
+        0x0600 => shared.gpu3d.gxstat(),
+        0x0604 => shared.gpu3d.ram_count(),
+        0x0610 => shared.gpu3d.disp_1dot_depth as u32,
+        0x0620..=0x062C => {
+            let idx = ((local - 0x0620) / 4) as usize;
+            shared.gpu3d.read_pos_test_word(idx)
+        }
+        0x0640..=0x067C => {
+            let idx = ((local - 0x0640) / 4) as usize;
+            shared.gpu3d.read_clip_matrix_word(idx)
+        }
+        0x0680..=0x06A0 => {
+            let idx = ((local - 0x0680) / 4) as usize;
+            shared.gpu3d.read_direction_matrix_word(idx)
+        }
         0x0210 => shared.irq9.read_ie(),
         0x0214 => shared.irq9.read_if(),
         0x0208 => shared.irq9.read_ime(),
@@ -250,7 +325,9 @@ pub fn read_io32_mut(shared: &mut SharedState, addr: u32) -> u32 {
 /// Decode a DMA register address (relative to 0x040000B0). Returns
 /// (channel, kind) where kind is 0 = SAD, 1 = DAD, 2 = CNT.
 fn decode_dma_reg(local: u32) -> Option<(usize, u32)> {
-    if !(0xB0..0xE0).contains(&local) { return None; }
+    if !(0xB0..0xE0).contains(&local) {
+        return None;
+    }
     let off = local - 0xB0;
     let ch = (off / 0xC) as usize;
     let kind = (off % 0xC) / 4;
@@ -328,7 +405,7 @@ fn start_slot1_transfer(shared: &mut SharedState, val: u32) {
     let bytes = slot1_transfer_len(val);
 
     match cmd {
-        0x00 => queue_rom_bytes(shared, 0, bytes),      // header read
+        0x00 => queue_rom_bytes(shared, 0, bytes), // header read
         0x9F => queue_repeat(shared, 0xFFFF_FFFF, bytes), // dummy/reset stream
         0x90 | 0xB8 => queue_repeat(shared, chip_id_for_rom(&shared.slot1_rom), bytes.max(4)),
         0xA0 => {}
@@ -458,7 +535,9 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         }
         0x0212 => {
             let prev = shared.irq9.read_ie();
-            shared.irq9.write_ie((prev & 0x0000_FFFF) | ((val as u32) << 16));
+            shared
+                .irq9
+                .write_ie((prev & 0x0000_FFFF) | ((val as u32) << 16));
         }
         0x0214 => shared.irq9.write_if(val as u32),
         0x0216 => shared.irq9.write_if((val as u32) << 16),
@@ -480,36 +559,45 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0184 => write_fifocnt(shared, val),
         0x0204 => shared.exmemcnt = val,
         0x0246 => shared.wramcnt = val as u8,
-        0x0060 => shared.gpu3d.rasterizer.disp3dcnt = val,
+        0x0060 => shared.gpu3d.rasterizer.disp3dcnt = val & 0x4FFF,
         0x0600 => {
-            shared.gpu3d.fifo.set_irq_mode((val >> 14) as u8);
+            shared.gpu3d.write_gxstat(val as u32);
             update_gxfifo_irq(shared);
         }
         0x0602 => {
-            shared.gpu3d.fifo.set_irq_mode((val >> 14) as u8);
+            shared.gpu3d.write_gxstat((val as u32) << 16);
             update_gxfifo_irq(shared);
         }
+        0x0610 => shared.gpu3d.disp_1dot_depth = val & 0x7FFF,
         0x0304 => shared.powcnt1 = val,
         0x0330..=0x033F => {
             // EDGE_COLOR table — 8 × u16.
             let idx = ((local - 0x0330) / 2) as usize;
             shared.gpu3d.rasterizer.edge_color[idx] = val & 0x7FFF;
         }
-        0x0340 => shared.gpu3d.rasterizer.alpha_test_ref = val as u8,
-        0x0350 => shared.gpu3d.rasterizer.clear_color =
-                  (shared.gpu3d.rasterizer.clear_color & 0xFFFF_0000) | val as u32,
-        0x0352 => shared.gpu3d.rasterizer.clear_color =
-                  (shared.gpu3d.rasterizer.clear_color & 0x0000_FFFF) | ((val as u32) << 16),
+        0x0340 => shared.gpu3d.rasterizer.alpha_test_ref = (val & 0x1F) as u8,
+        0x0350 => {
+            shared.gpu3d.rasterizer.clear_color =
+                (shared.gpu3d.rasterizer.clear_color & 0xFFFF_0000) | val as u32
+        }
+        0x0352 => {
+            shared.gpu3d.rasterizer.clear_color =
+                (shared.gpu3d.rasterizer.clear_color & 0x0000_FFFF) | ((val as u32) << 16)
+        }
         0x0354 => shared.gpu3d.rasterizer.clear_depth = val,
-        0x0356 => { /* CLEAR_IMAGE_OFFSET — unused */ }
-        0x0358 => shared.gpu3d.rasterizer.fog_color =
-                  (shared.gpu3d.rasterizer.fog_color & 0xFFFF_0000) | (val as u32),
-        0x035A => shared.gpu3d.rasterizer.fog_color =
-                  (shared.gpu3d.rasterizer.fog_color & 0x0000_FFFF) | ((val as u32) << 16),
+        0x0356 => shared.gpu3d.rasterizer.clear_image_offset = val,
+        0x0358 => {
+            shared.gpu3d.rasterizer.fog_color =
+                (shared.gpu3d.rasterizer.fog_color & 0xFFFF_0000) | (val as u32)
+        }
+        0x035A => {
+            shared.gpu3d.rasterizer.fog_color =
+                (shared.gpu3d.rasterizer.fog_color & 0x0000_FFFF) | ((val as u32) << 16)
+        }
         0x035C => shared.gpu3d.rasterizer.fog_offset = val,
         0x0360..=0x037F => {
             // 32-byte FOG_TABLE — one byte per entry, packed in u16 writes.
-            let base = ((local - 0x0360) * 2) as usize;
+            let base = (local - 0x0360) as usize;
             if base + 1 < 32 {
                 shared.gpu3d.rasterizer.fog_table[base] = val as u8;
                 shared.gpu3d.rasterizer.fog_table[base + 1] = (val >> 8) as u8;
@@ -523,7 +611,11 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
             }
         }
         _ => {
-            log::trace!("ARM9 I/O write16 to unhandled 0x{:08X} = 0x{:04X}", addr, val);
+            log::trace!(
+                "ARM9 I/O write16 to unhandled 0x{:08X} = 0x{:04X}",
+                addr,
+                val
+            );
         }
     }
 }
@@ -554,9 +646,9 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
         return Write32Effect::None;
     }
 
-    // GXFIFO (packed format) at 0x04000400 + the direct-port range
-    // 0x04000440..0x040005FF.
-    if local == 0x0400 {
+    // GXFIFO packed format at 0x04000400, mirrored through 0x0400043F,
+    // plus the direct-port range 0x04000440..0x040005FF.
+    if (0x0400..0x0440).contains(&local) {
         shared.gpu3d.fifo.write_packed(val);
         shared.gpu3d.drain_fifo();
         update_gxfifo_irq(shared);
@@ -580,9 +672,12 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
     }
 
     match local {
-        0x0188 => { write_fifosend(shared, val); Write32Effect::None }
+        0x0188 => {
+            write_fifosend(shared, val);
+            Write32Effect::None
+        }
         0x0600 => {
-            shared.gpu3d.fifo.set_irq_mode((val >> 30) as u8);
+            shared.gpu3d.write_gxstat(val);
             update_gxfifo_irq(shared);
             Write32Effect::None
         }
@@ -596,9 +691,18 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
             }
             Write32Effect::None
         }
-        0x0208 => { shared.irq9.write_ime(val); Write32Effect::None }
-        0x0210 => { shared.irq9.write_ie(val); Write32Effect::None }
-        0x0214 => { shared.irq9.write_if(val); Write32Effect::None }
+        0x0208 => {
+            shared.irq9.write_ime(val);
+            Write32Effect::None
+        }
+        0x0210 => {
+            shared.irq9.write_ie(val);
+            Write32Effect::None
+        }
+        0x0214 => {
+            shared.irq9.write_if(val);
+            Write32Effect::None
+        }
         _ => {
             write_io16(shared, addr, val as u16);
             write_io16(shared, addr.wrapping_add(2), (val >> 16) as u16);
@@ -610,8 +714,14 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
 fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Write32Effect {
     use crate::dma::WriteControlEffect;
     match kind {
-        0 => { shared.dma9.write_sad(ch, val); Write32Effect::None }
-        1 => { shared.dma9.write_dad(ch, val); Write32Effect::None }
+        0 => {
+            shared.dma9.write_sad(ch, val);
+            Write32Effect::None
+        }
+        1 => {
+            shared.dma9.write_dad(ch, val);
+            Write32Effect::None
+        }
         2 => {
             // Combined CNT register: low 21 bits = count, high 11 = control flags.
             let count = val & 0x001F_FFFF;
@@ -619,7 +729,9 @@ fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Wr
             let effect = shared.dma9.write_control(ch, val);
             match effect {
                 WriteControlEffect::RunNow => Write32Effect::RunDma9(ch),
-                WriteControlEffect::Armed(crate::dma::DmaTiming::Slot1) if !shared.slot1_data.is_empty() => {
+                WriteControlEffect::Armed(crate::dma::DmaTiming::Slot1)
+                    if !shared.slot1_data.is_empty() =>
+                {
                     Write32Effect::FireSlot1Dma
                 }
                 _ => Write32Effect::None,
