@@ -230,7 +230,7 @@ fn draw_wire_line(
                 }
                 rast.id_buffer[idx] = poly_id;
                 rast.edge_enable_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
-                rast.fog_enable_buffer[idx] = if attr & (1 << 15) != 0 { 1 } else { 0 };
+                update_fog_flag(rast, idx, attr, effective_alpha);
             }
         }
         if advance_line_cursor(&mut x0, &mut y0, x1, y1, sx, sy, dx, dy, &mut err) {
@@ -323,8 +323,7 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
     let depth_24 = depth_to_buffer(v.depth_z, v.w, rast.w_buffering);
     let idx = y as usize * FB_WIDTH + x as usize;
     if depth_test_passes(attr, depth_24, rast.depth_buffer[idx]) {
-        if !is_shadow_mode(attr)
-            && translucent_same_id_rejects(rast, idx, poly_id, effective_alpha)
+        if !is_shadow_mode(attr) && translucent_same_id_rejects(rast, idx, poly_id, effective_alpha)
         {
             return;
         }
@@ -346,7 +345,7 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
         }
         rast.id_buffer[idx] = poly_id;
         rast.edge_enable_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
-        rast.fog_enable_buffer[idx] = if attr & (1 << 15) != 0 { 1 } else { 0 };
+        update_fog_flag(rast, idx, attr, effective_alpha);
     }
 }
 
@@ -670,12 +669,7 @@ fn rasterize_scanline(
             }
             rast.id_buffer[idx] = a.poly_id;
             rast.edge_enable_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
-            let polygon_fog = if a.attr & (1 << 15) != 0 { 1 } else { 0 };
-            rast.fog_enable_buffer[idx] = if effective_alpha < 31 {
-                rast.fog_enable_buffer[idx] & polygon_fog
-            } else {
-                polygon_fog
-            };
+            update_fog_flag(rast, idx, a.attr, effective_alpha);
         }
     }
 }
@@ -791,6 +785,15 @@ fn depth_to_buffer(z: i32, w: i32, w_buffering: bool) -> i32 {
 
 fn translucent_updates_depth(attr: u32) -> bool {
     attr & (1 << 11) != 0
+}
+
+fn update_fog_flag(rast: &mut Rasterizer, idx: usize, attr: u32, effective_alpha: u8) {
+    let polygon_fog = if attr & (1 << 15) != 0 { 1 } else { 0 };
+    rast.fog_enable_buffer[idx] = if effective_alpha < 31 {
+        rast.fog_enable_buffer[idx] & polygon_fog
+    } else {
+        polygon_fog
+    };
 }
 
 #[cfg(test)]
@@ -1008,10 +1011,7 @@ mod tests {
     #[test]
     fn test_z_depth_expands_to_depth_buffer_range() {
         assert_eq!(depth_to_buffer(-crate::gpu3d::matrix::ONE, 0, false), 0);
-        assert_eq!(
-            depth_to_buffer(0, 0, false),
-            0x3FFF << 9
-        );
+        assert_eq!(depth_to_buffer(0, 0, false), 0x3FFF << 9);
         assert_eq!(
             depth_to_buffer(crate::gpu3d::matrix::ONE / 2, 0, false),
             0x5FFF << 9
@@ -1398,6 +1398,46 @@ mod tests {
     }
 
     #[test]
+    fn test_translucent_zero_dot_ands_existing_fog_flag() {
+        let mut r = Rasterizer::new();
+        let idx = (20 * FB_WIDTH) + 20;
+        r.clear_color = (1 << 15) | (0x1F << 16);
+        r.clear();
+        assert_eq!(r.fog_enable_buffer[idx], 1);
+
+        let mut dot = colored_poly_with_id(
+            vec![sv(20, 20, 0x001F), sv(20, 20, 0x001F), sv(20, 20, 0x001F)],
+            16,
+            1,
+        );
+        dot.attr &= !(1 << 15);
+
+        rasterize_polygon(&dot, &mut r, None);
+
+        assert_eq!(r.fog_enable_buffer[idx], 0);
+    }
+
+    #[test]
+    fn test_translucent_line_ands_existing_fog_flag() {
+        let mut r = Rasterizer::new();
+        let idx = (20 * FB_WIDTH) + 20;
+        r.clear_color = (1 << 15) | (0x1F << 16);
+        r.clear();
+        assert_eq!(r.fog_enable_buffer[idx], 1);
+
+        let mut line = colored_poly_with_id(
+            vec![sv(20, 20, 0x001F), sv(30, 20, 0x001F), sv(20, 20, 0x001F)],
+            16,
+            1,
+        );
+        line.attr &= !(1 << 15);
+
+        rasterize_polygon(&line, &mut r, None);
+
+        assert_eq!(r.fog_enable_buffer[idx], 0);
+    }
+
+    #[test]
     fn test_clear_color_fills_framebuffer() {
         let mut r = Rasterizer::new();
         r.disp3dcnt = 1;
@@ -1619,11 +1659,7 @@ mod tests {
             v.depth_z = 2048;
         }
         let point = colored_poly_with_id(
-            vec![
-                sv(30, 15, 0x001F),
-                sv(30, 15, 0x03E0),
-                sv(30, 15, 0x7C00),
-            ],
+            vec![sv(30, 15, 0x001F), sv(30, 15, 0x03E0), sv(30, 15, 0x7C00)],
             16,
             2,
         );
@@ -1642,11 +1678,7 @@ mod tests {
         r.disp3dcnt = 1 << 2;
         r.alpha_test_ref = 16;
         let point = colored_poly_with_id(
-            vec![
-                sv(30, 15, 0x001F),
-                sv(30, 15, 0x03E0),
-                sv(30, 15, 0x7C00),
-            ],
+            vec![sv(30, 15, 0x001F), sv(30, 15, 0x03E0), sv(30, 15, 0x7C00)],
             16,
             2,
         );
