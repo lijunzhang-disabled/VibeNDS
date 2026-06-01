@@ -767,12 +767,13 @@ impl Cpu {
 
         match op {
             0b00 => {
-                // SMLA<x><y>: Rd = (Rm.half * Rs.half) + Rn (saturating accumulate)
+                // SMLA<x><y>: Rd = (Rm.half * Rs.half) + Rn. Overflow sets
+                // Q, but the destination receives the wrapped 32-bit result.
                 let prod = (half(self.reg(rm), x) as i64) * (half(self.reg(rs), y) as i64);
                 let acc = self.reg(rn) as i32;
-                let (sum, sat) = signed_sat_add(prod as i32, acc);
+                let (sum, overflow) = (prod as i32).overflowing_add(acc);
                 self.regs[rd as usize] = sum as u32;
-                if sat {
+                if overflow {
                     self.cpsr.set_q(true);
                 }
             }
@@ -1244,6 +1245,22 @@ mod tests {
         let op = 0xE162_0180;
         cpu.execute_arm(&mut bus, op);
         assert_eq!(cpu.regs[2], 15);
+    }
+
+    #[test]
+    fn test_smlaxy_overflow_wraps_result_and_sets_q() {
+        let (mut cpu, mut bus) = arm9_with(0x100);
+        cpu.regs[0] = 0x0000_7000; // Rm low half = 0x7000
+        cpu.regs[1] = 0x0000_7000; // Rs low half = 0x7000
+        cpu.regs[3] = 0x7000_0000; // Rn accumulator
+        cpu.cpsr.set_q(false);
+
+        // SMLABB R2, R0, R1, R3
+        let op = 0xE102_3180;
+        cpu.execute_arm(&mut bus, op);
+
+        assert_eq!(cpu.regs[2], 0xA100_0000);
+        assert!(cpu.cpsr.q());
     }
 
     #[test]

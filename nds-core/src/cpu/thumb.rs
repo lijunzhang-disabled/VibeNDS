@@ -318,7 +318,7 @@ impl Cpu {
             0b100 => {
                 let val = bus.read32(addr & !3);
                 let rotation = (addr & 3) * 8;
-                self.regs[rd as usize] = if self.is_arm9 { val } else { val.rotate_right(rotation) };
+                self.regs[rd as usize] = val.rotate_right(rotation);
             }
             0b101 => {
                 let val = bus.read16(addr & !1) as u32;
@@ -357,7 +357,7 @@ impl Cpu {
             } else {
                 let val = bus.read32(addr & !3);
                 let rotation = (addr & 3) * 8;
-                self.regs[rd as usize] = if self.is_arm9 { val } else { val.rotate_right(rotation) };
+                self.regs[rd as usize] = val.rotate_right(rotation);
             }
         } else if b {
             bus.write8(addr, self.reg(rd) as u8);
@@ -397,7 +397,7 @@ impl Cpu {
         if l {
             let val = bus.read32(addr & !3);
             let rotation = (addr & 3) * 8;
-            self.regs[rd as usize] = if self.is_arm9 { val } else { val.rotate_right(rotation) };
+            self.regs[rd as usize] = val.rotate_right(rotation);
         } else {
             bus.write32(addr & !3, self.reg(rd));
         }
@@ -686,5 +686,28 @@ mod tests {
         cpu.execute_thumb(&mut bus, 0xBD00);
         assert_eq!(cpu.regs[15], 0x40);
         assert!(cpu.cpsr.thumb()); // ARM7 stays in THUMB
+    }
+
+    #[test]
+    fn test_thumb_arm9_unaligned_ldr_rotates_aligned_word() {
+        let (mut cpu, mut bus) = arm9_thumb(0x100);
+        bus.mem[0x40..0x44].copy_from_slice(&0xFF00_8F00u32.to_le_bytes());
+        cpu.regs[0] = 0x42;
+
+        cpu.execute_thumb(&mut bus, 0x6801); // LDR R1, [R0, #0]
+
+        assert_eq!(cpu.regs[1], 0x8F00_FF00);
+    }
+
+    #[test]
+    fn test_thumb_arm9_unaligned_register_ldr_rotates_aligned_word() {
+        let (mut cpu, mut bus) = arm9_thumb(0x100);
+        bus.mem[0x40..0x44].copy_from_slice(&0xFF00_8F00u32.to_le_bytes());
+        cpu.regs[0] = 0x40;
+        cpu.regs[2] = 2;
+
+        cpu.execute_thumb(&mut bus, 0x5881); // LDR R1, [R0, R2]
+
+        assert_eq!(cpu.regs[1], 0x8F00_FF00);
     }
 }
