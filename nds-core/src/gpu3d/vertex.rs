@@ -165,6 +165,26 @@ impl VertexState {
         self.vertex_buffer.clear();
     }
 
+    /// True when the active list contains vertices that have not completed a
+    /// polygon. SWAP_BUFFERS during that state locks real NDS 3D hardware.
+    pub fn has_incomplete_polygon_list(&self) -> bool {
+        if !self.list_active {
+            return false;
+        }
+        match self.primitive {
+            Some(PrimitiveType::Triangles) => self.vertex_buffer.len() % 3 != 0,
+            Some(PrimitiveType::Quads) => self.vertex_buffer.len() % 4 != 0,
+            Some(PrimitiveType::TriangleStrip) => {
+                !self.vertex_buffer.is_empty() && self.vertex_buffer.len() < 3
+            }
+            Some(PrimitiveType::QuadStrip) => {
+                let len = self.vertex_buffer.len();
+                (len > 0 && len < 4) || (len >= 4 && len % 2 != 0)
+            }
+            None => false,
+        }
+    }
+
     /// `COLOR` — pack BGR555 from the parameter word's low 15 bits.
     pub fn set_color(&mut self, param: u32) {
         self.current_color = (param & 0x7FFF) as u16;

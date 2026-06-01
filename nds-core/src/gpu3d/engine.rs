@@ -53,6 +53,10 @@ pub struct Engine3d {
     /// Latched SWAP_BUFFERS parameter to apply to the next empty geometry
     /// buffer after the pending VBlank swap.
     pub pending_swap_attrs: u32,
+    /// Sticky geometry-engine lock-up caused by SWAP_BUFFERS with an
+    /// incomplete polygon list. Real hardware keeps GXSTAT.27 busy forever.
+    #[serde(default)]
+    pub geometry_locked: bool,
 
     /// Results for POS_TEST (`0x04000620..=0x0400062F`).
     pub pos_test_result: [i32; 4],
@@ -84,6 +88,7 @@ impl Engine3d {
             swap_pending: false,
             geometry_swap_attrs: 0,
             pending_swap_attrs: 0,
+            geometry_locked: false,
             pos_test_result: [0; 4],
             vec_test_result: [0; 3],
             box_test_visible: false,
@@ -96,13 +101,13 @@ impl Engine3d {
     /// Drain every command currently `ready` in the FIFO. Called by the
     /// bus dispatcher after each write that might have completed a command.
     pub fn drain_fifo(&mut self) {
-        while !self.swap_pending {
+        while !self.swap_pending && !self.geometry_locked {
             let Some(op) = self.fifo.pop_op() else {
                 break;
             };
             self.dispatch(op);
         }
-        if !self.swap_pending {
+        if !self.swap_pending && !self.geometry_locked {
             self.fifo.reconcile_after_drain();
         }
     }
@@ -227,6 +232,10 @@ impl Engine3d {
             GxCmd::BeginVtxs => self.vertex.begin(PrimitiveType::from_bits(p0)),
             GxCmd::EndVtxs => self.vertex.end(),
             GxCmd::SwapBuffers => {
+                if self.vertex.has_incomplete_polygon_list() {
+                    self.geometry_locked = true;
+                    return;
+                }
                 self.swap_pending = true;
                 self.pending_swap_attrs = p0;
                 self.vertex.force_end();
@@ -370,7 +379,7 @@ impl Engine3d {
     /// tests); textures render as transparent in that case but per-vertex
     /// color + post-effects still work.
     pub fn swap_buffers(&mut self, vram: Option<&crate::vram::VramRouter>) {
-        if !self.swap_pending {
+        if self.geometry_locked || !self.swap_pending {
             return;
         }
         self.raster_polygons = std::mem::take(&mut self.geometry_polygons);
@@ -463,7 +472,10 @@ impl Engine3d {
     }
 
     fn geometry_busy(&self) -> bool {
-        self.swap_pending || !self.fifo.is_empty() || !self.vertex.polygon_buffer.is_empty()
+        self.geometry_locked
+            || self.swap_pending
+            || !self.fifo.is_empty()
+            || !self.vertex.polygon_buffer.is_empty()
     }
 
     fn geometry_vertex_count(&self) -> usize {
@@ -805,6 +817,45 @@ mod tests {
         assert_eq!(e.raster_polygons.len(), 1);
         assert_eq!(e.geometry_polygons.len(), 1);
         assert!(e.fifo.ready.is_empty());
+    }
+
+    #[test]
+    fn test_swap_buffers_with_incomplete_polygon_list_locks_geometry() {
+        let mut e = Engine3d::new();
+        e.dispatch(GxOp {
+            cmd: GxCmd::BeginVtxs as u8,
+            params: vec![0],
+        });
+        for _ in 0..2 {
+            e.dispatch(GxOp {
+                cmd: GxCmd::Vtx16 as u8,
+                params: vec![0, (ONE / 2) as u32 & 0xFFFF],
+            });
+        }
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::SwapBuffers as u8,
+            params: vec![0],
+        });
+
+        assert!(e.geometry_locked);
+        assert!(!e.swap_pending);
+        assert_eq!(e.gxstat() & (1 << 27), 1 << 27);
+    }
+
+    #[test]
+    fn test_locked_geometry_engine_stops_draining_fifo() {
+        let mut e = Engine3d::new();
+        e.geometry_locked = true;
+        e.fifo.ready.push_back(GxOp {
+            cmd: GxCmd::MtxMode as u8,
+            params: vec![1],
+        });
+
+        e.drain_fifo();
+
+        assert_eq!(e.fifo.ready.len(), 1);
+        assert!(matches!(e.stacks.mode, MtxMode::Projection));
     }
 
     #[test]
