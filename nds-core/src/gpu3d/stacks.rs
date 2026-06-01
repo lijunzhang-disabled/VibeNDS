@@ -251,7 +251,6 @@ impl MatrixStacks {
                 let idx = (slot & 0x1F) as usize;
                 if idx == 31 {
                     self.overflow = true;
-                    return;
                 }
                 self.position_stack[idx] = self.position;
                 self.vector_stack[idx] = self.vector;
@@ -276,7 +275,6 @@ impl MatrixStacks {
                 let idx = (slot & 0x1F) as usize;
                 if idx == 31 {
                     self.overflow = true;
-                    return;
                 }
                 self.position = self.position_stack[idx];
                 self.vector = self.vector_stack[idx];
@@ -501,23 +499,22 @@ mod tests {
     }
 
     #[test]
-    fn test_store_restore_slot_31_sets_overflow_without_accessing_entry() {
+    fn test_store_restore_slot_31_sets_overflow_and_accesses_entry() {
         let mut s = MatrixStacks::new();
         s.set_mode(MtxMode::Position);
         let target = Matrix::identity().mul_translate(31 * ONE, 0, 0);
-        let original_slot_31 = s.position_stack[31];
         s.load(target);
 
         s.store(31);
         assert!(s.overflow);
-        assert_eq!(s.position_stack[31], original_slot_31);
+        assert_eq!(s.position_stack[31], target);
         s.identity();
         s.overflow = false;
         s.restore(31);
 
         assert!(s.overflow);
         let r = s.position.mul_vec4([0, 0, 0, ONE]);
-        assert_eq!(r[0], 0);
+        assert_eq!(r[0], 31 * ONE);
     }
 
     #[test]
