@@ -13,7 +13,7 @@ use super::clip::clip_polygon;
 use super::command::GxCmd;
 use super::fifo::{GxFifo, GxOp};
 use super::lighting::{compute_vertex_color, LightingState};
-use super::matrix::{Matrix, ONE};
+use super::matrix::Matrix;
 use super::raster::Rasterizer;
 use super::stacks::{MatrixStacks, MtxMode};
 use super::vertex::{
@@ -569,27 +569,7 @@ fn box_intersects_view_volume(origin: [i32; 3], size: [i32; 3], clip: &Matrix) -
     faces.iter().any(|face| {
         let polygon = face.iter().map(|&idx| corners[idx]).collect::<Vec<_>>();
         clip_homogeneous_polygon_to_view_volume(polygon)
-    }) || cuboid_clip_bounds_contain_view_origin(&corners)
-}
-
-fn cuboid_clip_bounds_contain_view_origin(corners: &[[i64; 4]; 8]) -> bool {
-    let min_x = corners.iter().map(|v| v[0]).min().unwrap_or(0);
-    let max_x = corners.iter().map(|v| v[0]).max().unwrap_or(0);
-    let min_y = corners.iter().map(|v| v[1]).min().unwrap_or(0);
-    let max_y = corners.iter().map(|v| v[1]).max().unwrap_or(0);
-    let min_z = corners.iter().map(|v| v[2]).min().unwrap_or(0);
-    let max_z = corners.iter().map(|v| v[2]).max().unwrap_or(0);
-    let min_w = corners.iter().map(|v| v[3]).min().unwrap_or(0);
-    let max_w = corners.iter().map(|v| v[3]).max().unwrap_or(0);
-
-    min_x <= 0
-        && max_x >= 0
-        && min_y <= 0
-        && max_y >= 0
-        && min_z <= 0
-        && max_z >= 0
-        && min_w <= ONE as i64
-        && max_w >= ONE as i64
+    })
 }
 
 fn clip_homogeneous_polygon_to_view_volume(mut polygon: Vec<[i64; 4]>) -> bool {
@@ -1067,12 +1047,12 @@ mod tests {
     }
 
     #[test]
-    fn test_box_test_accepts_box_enclosing_view_volume() {
+    fn test_box_test_rejects_box_enclosing_view_volume() {
         let clip = Matrix::identity();
-        let origin = [-2 * ONE, -2 * ONE, -ONE];
-        let size = [4 * ONE, 4 * ONE, 3 * ONE];
+        let origin = [-2 * ONE, -2 * ONE, -2 * ONE];
+        let size = [4 * ONE, 4 * ONE, 4 * ONE];
 
-        assert!(box_intersects_view_volume(origin, size, &clip));
+        assert!(!box_intersects_view_volume(origin, size, &clip));
     }
 
     #[test]
