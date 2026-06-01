@@ -96,10 +96,15 @@ impl Engine3d {
     /// Drain every command currently `ready` in the FIFO. Called by the
     /// bus dispatcher after each write that might have completed a command.
     pub fn drain_fifo(&mut self) {
-        while let Some(op) = self.fifo.pop_op() {
+        while !self.swap_pending {
+            let Some(op) = self.fifo.pop_op() else {
+                break;
+            };
             self.dispatch(op);
         }
-        self.fifo.reconcile_after_drain();
+        if !self.swap_pending {
+            self.fifo.reconcile_after_drain();
+        }
     }
 
     fn dispatch(&mut self, op: GxOp) {
@@ -373,6 +378,7 @@ impl Engine3d {
         self.rasterizer.set_swap_attrs(self.geometry_swap_attrs);
         self.rasterizer.render_frame(&self.raster_polygons, vram);
         self.geometry_swap_attrs = self.pending_swap_attrs;
+        self.drain_fifo();
     }
 
     /// Read a pixel from the 3D framebuffer. Engine A's BG0 path calls
@@ -457,7 +463,7 @@ impl Engine3d {
     }
 
     fn geometry_busy(&self) -> bool {
-        !self.fifo.is_empty() || !self.vertex.polygon_buffer.is_empty()
+        self.swap_pending || !self.fifo.is_empty() || !self.vertex.polygon_buffer.is_empty()
     }
 
     fn geometry_vertex_count(&self) -> usize {
@@ -751,6 +757,57 @@ mod tests {
     }
 
     #[test]
+    fn test_swap_buffers_stalls_following_geometry_until_vblank_swap() {
+        let mut e = Engine3d::new();
+        let attr = (1 << 13) | (0x1F << 16) | (1 << 6) | (1 << 7);
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::PolygonAttr as u8,
+            params: vec![attr],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::BeginVtxs as u8,
+            params: vec![0],
+        });
+        for _ in 0..3 {
+            e.dispatch(GxOp {
+                cmd: GxCmd::Vtx16 as u8,
+                params: vec![0, (ONE / 2) as u32 & 0xFFFF],
+            });
+        }
+        assert_eq!(e.geometry_polygons.len(), 1);
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::SwapBuffers as u8,
+            params: vec![0],
+        });
+        e.fifo.ready.push_back(GxOp {
+            cmd: GxCmd::PolygonAttr as u8,
+            params: vec![attr],
+        });
+        e.fifo.ready.push_back(GxOp {
+            cmd: GxCmd::BeginVtxs as u8,
+            params: vec![0],
+        });
+        for _ in 0..3 {
+            e.fifo.ready.push_back(GxOp {
+                cmd: GxCmd::Vtx16 as u8,
+                params: vec![0, (ONE / 2) as u32 & 0xFFFF],
+            });
+        }
+
+        e.drain_fifo();
+        assert_eq!(e.geometry_polygons.len(), 1);
+        assert_eq!(e.fifo.ready.len(), 5);
+
+        e.swap_buffers(None);
+
+        assert_eq!(e.raster_polygons.len(), 1);
+        assert_eq!(e.geometry_polygons.len(), 1);
+        assert!(e.fifo.ready.is_empty());
+    }
+
+    #[test]
     fn test_end_vtxs_command_does_not_disturb_vertex_list() {
         let mut e = Engine3d::new();
         e.dispatch(GxOp {
@@ -784,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gxstat_busy_ignores_stored_geometry_and_pending_swap() {
+    fn test_gxstat_busy_ignores_stored_geometry_but_reports_pending_swap() {
         let mut e = Engine3d::new();
         e.dispatch(GxOp {
             cmd: GxCmd::PolygonAttr as u8,
@@ -809,7 +866,7 @@ mod tests {
             params: vec![0],
         });
         assert!(e.swap_pending);
-        assert_eq!(e.gxstat() & (1 << 27), 0);
+        assert_eq!(e.gxstat() & (1 << 27), 1 << 27);
     }
 
     #[test]
