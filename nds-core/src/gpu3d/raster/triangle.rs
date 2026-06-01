@@ -310,13 +310,42 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
         return;
     }
 
+    let mode = ((attr >> 4) & 0x3) as u8;
+    let poly_alpha = ((attr >> 16) & 0x1F) as u8;
+    let effective_alpha = final_alpha(mode, 31, poly_alpha);
+    if effective_alpha == 0 {
+        return;
+    }
+    if rast.disp3dcnt & (1 << 2) != 0 && effective_alpha <= rast.alpha_test_ref {
+        return;
+    }
+
     let depth_24 = depth_to_buffer(v.depth_z, v.w, rast.w_buffering);
     let idx = y as usize * FB_WIDTH + x as usize;
     if depth_test_passes(attr, depth_24, rast.depth_buffer[idx]) {
-        rast.framebuffer[idx] = (v.color & 0x7FFF) | (1 << 15);
-        rast.depth_buffer[idx] = depth_24;
+        if !is_shadow_mode(attr)
+            && translucent_same_id_rejects(rast, idx, poly_id, effective_alpha)
+        {
+            return;
+        }
+
+        let color = (v.color & 0x7FFF) | (1 << 15);
+        if effective_alpha < 31 {
+            let prev = rast.framebuffer[idx];
+            if rast.disp3dcnt & (1 << 3) != 0 && prev & (1 << 15) != 0 {
+                rast.framebuffer[idx] = alpha_blend(color, prev, effective_alpha) | (1 << 15);
+            } else {
+                rast.framebuffer[idx] = color;
+            }
+            if translucent_updates_depth(attr) {
+                rast.depth_buffer[idx] = depth_24;
+            }
+        } else {
+            rast.framebuffer[idx] = color;
+            rast.depth_buffer[idx] = depth_24;
+        }
         rast.id_buffer[idx] = poly_id;
-        rast.edge_enable_buffer[idx] = 1;
+        rast.edge_enable_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
         rast.fog_enable_buffer[idx] = if attr & (1 << 15) != 0 { 1 } else { 0 };
     }
 }
@@ -1575,6 +1604,57 @@ mod tests {
         let idx = (10 * FB_WIDTH) + 10;
         assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x001F);
         assert_eq!(r.framebuffer[idx] & (1 << 15), 1 << 15);
+    }
+
+    #[test]
+    fn test_zero_dot_polygon_uses_translucent_alpha() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 3;
+        let mut base = colored_poly_with_id(
+            vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 30, 0x7C00)],
+            31,
+            1,
+        );
+        for v in &mut base.vertices {
+            v.depth_z = 2048;
+        }
+        let point = colored_poly_with_id(
+            vec![
+                sv(30, 15, 0x001F),
+                sv(30, 15, 0x03E0),
+                sv(30, 15, 0x7C00),
+            ],
+            16,
+            2,
+        );
+
+        r.render_frame(&[base, point], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        let expected = alpha_blend(0x001F | (1 << 15), 0x7C00 | (1 << 15), 16);
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, expected);
+        assert_eq!(r.edge_enable_buffer[idx], 0);
+    }
+
+    #[test]
+    fn test_zero_dot_polygon_respects_alpha_test() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 2;
+        r.alpha_test_ref = 16;
+        let point = colored_poly_with_id(
+            vec![
+                sv(30, 15, 0x001F),
+                sv(30, 15, 0x03E0),
+                sv(30, 15, 0x7C00),
+            ],
+            16,
+            2,
+        );
+
+        r.render_frame(&[point], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
     }
 
     #[test]
