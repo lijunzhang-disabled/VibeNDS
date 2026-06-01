@@ -244,8 +244,8 @@ mod tests {
         // behind-near-plane vertex is blue. The new interpolated vertex on the
         // straddling edge should have a color between them.
         let tri = vec![
-            vtx(0, 0, ONE, ONE, 0x001F),   // red, inside
-            vtx(0, ONE, ONE, ONE, 0x001F), // red, inside
+            vtx(0, 0, ONE, ONE, 0x001F),      // red, inside
+            vtx(0, ONE, ONE, ONE, 0x001F),    // red, inside
             vtx(0, 0, -2 * ONE, ONE, 0x7C00), // blue, outside
         ];
         let out = clip_polygon(&tri).expect("clipped");

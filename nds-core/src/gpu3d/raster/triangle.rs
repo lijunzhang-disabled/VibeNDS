@@ -203,6 +203,12 @@ fn draw_wire_line(
             let depth_24 = depth_to_buffer(depth, w, rast.w_buffering);
             let idx = y0 as usize * FB_WIDTH + x0 as usize;
             if depth_test_passes(attr, depth_24, rast.depth_buffer[idx]) {
+                let preserve_edge = should_preserve_existing_edge_mark(
+                    rast,
+                    x0 as usize,
+                    y0 as usize,
+                    effective_alpha,
+                );
                 if is_shadow_mode(attr) {
                     // Shadow mode handles polygon-ID/stencil rejection below.
                 } else if translucent_same_id_rejects(rast, idx, poly_id, effective_alpha) {
@@ -229,7 +235,8 @@ fn draw_wire_line(
                     rast.depth_buffer[idx] = depth_24;
                 }
                 rast.id_buffer[idx] = poly_id;
-                rast.edge_enable_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
+                update_translucent_id(rast, idx, poly_id, effective_alpha);
+                update_edge_flag(rast, idx, effective_alpha, preserve_edge);
                 update_fog_flag(rast, idx, attr, effective_alpha);
             }
         }
@@ -323,6 +330,8 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
     let depth_24 = depth_to_buffer(v.depth_z, v.w, rast.w_buffering);
     let idx = y as usize * FB_WIDTH + x as usize;
     if depth_test_passes(attr, depth_24, rast.depth_buffer[idx]) {
+        let preserve_edge =
+            should_preserve_existing_edge_mark(rast, x as usize, y as usize, effective_alpha);
         if !is_shadow_mode(attr) && translucent_same_id_rejects(rast, idx, poly_id, effective_alpha)
         {
             return;
@@ -344,7 +353,8 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
             rast.depth_buffer[idx] = depth_24;
         }
         rast.id_buffer[idx] = poly_id;
-        rast.edge_enable_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
+        update_translucent_id(rast, idx, poly_id, effective_alpha);
+        update_edge_flag(rast, idx, effective_alpha, preserve_edge);
         update_fog_flag(rast, idx, attr, effective_alpha);
     }
 }
@@ -634,6 +644,8 @@ fn rasterize_scanline(
         };
         let idx = row_base + x as usize;
         if depth_test_passes(a.attr, depth_24, rast.depth_buffer[idx]) {
+            let preserve_edge =
+                should_preserve_existing_edge_mark(rast, x as usize, y as usize, effective_alpha);
             if is_shadow_mode(a.attr) {
                 if a.poly_id == 0 {
                     // Shadow mask pass: no color-buffer write. The follow-up
@@ -668,7 +680,8 @@ fn rasterize_scanline(
                 rast.depth_buffer[idx] = depth_24;
             }
             rast.id_buffer[idx] = a.poly_id;
-            rast.edge_enable_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
+            update_translucent_id(rast, idx, a.poly_id, effective_alpha);
+            update_edge_flag(rast, idx, effective_alpha, preserve_edge);
             update_fog_flag(rast, idx, a.attr, effective_alpha);
         }
     }
@@ -686,8 +699,7 @@ fn translucent_same_id_rejects(
 ) -> bool {
     incoming_alpha < 31
         && rast.framebuffer[idx] & (1 << 15) != 0
-        && rast.edge_enable_buffer[idx] == 0
-        && rast.id_buffer[idx] == incoming_poly_id
+        && rast.translucent_id_buffer[idx] == incoming_poly_id
 }
 
 fn combine_toon_highlight(
@@ -794,6 +806,44 @@ fn update_fog_flag(rast: &mut Rasterizer, idx: usize, attr: u32, effective_alpha
     } else {
         polygon_fog
     };
+}
+
+fn update_edge_flag(
+    rast: &mut Rasterizer,
+    idx: usize,
+    effective_alpha: u8,
+    preserve_existing_edge: bool,
+) {
+    if effective_alpha == 31 {
+        rast.edge_enable_buffer[idx] = 1;
+    } else if !preserve_existing_edge {
+        rast.edge_enable_buffer[idx] = 0;
+    }
+}
+
+fn update_translucent_id(rast: &mut Rasterizer, idx: usize, poly_id: u8, effective_alpha: u8) {
+    if effective_alpha < 31 {
+        rast.translucent_id_buffer[idx] = poly_id;
+    }
+}
+
+fn should_preserve_existing_edge_mark(
+    rast: &Rasterizer,
+    x: usize,
+    y: usize,
+    effective_alpha: u8,
+) -> bool {
+    effective_alpha < 31 && rast.edge_enable_buffer[y * FB_WIDTH + x] != 0 && {
+        let id = rast.id_buffer[y * FB_WIDTH + x];
+        x == 0
+            || y == 0
+            || x + 1 == FB_WIDTH
+            || y + 1 == FB_HEIGHT
+            || rast.id_buffer[y * FB_WIDTH + (x - 1)] != id
+            || rast.id_buffer[y * FB_WIDTH + (x + 1)] != id
+            || rast.id_buffer[(y - 1) * FB_WIDTH + x] != id
+            || rast.id_buffer[(y + 1) * FB_WIDTH + x] != id
+    }
 }
 
 #[cfg(test)]
@@ -1347,6 +1397,43 @@ mod tests {
         let idx = (15 * FB_WIDTH) + 30;
         assert_ne!(r.framebuffer[idx] & (1 << 15), 0);
         assert_eq!(r.edge_enable_buffer[idx], 0);
+    }
+
+    #[test]
+    fn test_translucent_overlay_preserves_opaque_edge_mark_flag() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = (1 << 3) | (1 << 5); // alpha blend + edge marking.
+        r.edge_color[0] = 0x03E0;
+
+        let opaque = colored_poly_with_id(
+            vec![
+                sv(50, 50, 0x7C00),
+                sv(200, 50, 0x7C00),
+                sv(125, 150, 0x7C00),
+            ],
+            31,
+            0,
+        );
+        let translucent = colored_poly_with_id(
+            vec![
+                sv(50, 50, 0x001F),
+                sv(200, 50, 0x001F),
+                sv(125, 150, 0x001F),
+            ],
+            16,
+            0,
+        );
+
+        r.render_frame(&[opaque, translucent], None);
+
+        for x in 0..FB_WIDTH {
+            let idx = 100 * FB_WIDTH + x;
+            if r.framebuffer[idx] & (1 << 15) != 0 {
+                assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x03E0);
+                return;
+            }
+        }
+        panic!("expected an edge-marked scanline pixel");
     }
 
     #[test]

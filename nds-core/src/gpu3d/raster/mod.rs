@@ -49,6 +49,11 @@ pub struct Rasterizer {
     /// wireframes participate in the edge-marking post-pass.
     #[serde(with = "crate::bus::shared::serde_bytes_vec")]
     pub edge_enable_buffer: Vec<u8>,
+    /// 256×192 last translucent polygon ID. Hardware rejects a second
+    /// translucent write with the same polygon ID at a pixel, while still
+    /// allowing translucent pixels over opaque pixels of the same ID.
+    #[serde(with = "crate::bus::shared::serde_bytes_vec")]
+    pub translucent_id_buffer: Vec<u8>,
     /// 256×192 per-pixel fog enable flag, latched from POLYGON_ATTR bit 15.
     #[serde(with = "crate::bus::shared::serde_bytes_vec")]
     pub fog_enable_buffer: Vec<u8>,
@@ -107,6 +112,7 @@ impl Rasterizer {
             depth_buffer: vec![DEPTH_MAX; FB_PIXELS],
             id_buffer: vec![0u8; FB_PIXELS],
             edge_enable_buffer: vec![0u8; FB_PIXELS],
+            translucent_id_buffer: vec![0xFFu8; FB_PIXELS],
             fog_enable_buffer: vec![0u8; FB_PIXELS],
             shadow_stencil: vec![0u8; FB_PIXELS],
             clear_color: 0,
@@ -166,6 +172,9 @@ impl Rasterizer {
         for e in self.edge_enable_buffer.iter_mut() {
             *e = 0;
         }
+        for t in self.translucent_id_buffer.iter_mut() {
+            *t = 0xFF;
+        }
         let clear_fog = if self.clear_color & (1 << 15) != 0 {
             1
         } else {
@@ -198,6 +207,7 @@ impl Rasterizer {
                 self.depth_buffer[idx] = expand_clear_depth(depth);
                 self.id_buffer[idx] = clear_poly_id;
                 self.edge_enable_buffer[idx] = 0;
+                self.translucent_id_buffer[idx] = 0xFF;
                 self.fog_enable_buffer[idx] = if depth & (1 << 15) != 0 { 1 } else { 0 };
                 self.shadow_stencil[idx] = 0;
             }
