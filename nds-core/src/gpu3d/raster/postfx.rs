@@ -220,16 +220,7 @@ fn fog_density_for_depth(depth: i32, fog_offset: u16, shift: u32, table: &[u8; 3
 }
 
 fn fog_depth_units(depth: i32) -> i32 {
-    let depth = depth.max(0);
-    if depth <= 0x2000 {
-        // Current Z-buffer path stores NDC z in 0..0x2000. Hardware fog
-        // compares against the 15-bit Z/W depth domain.
-        ((depth as i64 * 0x7FFF + 0x1000) / 0x2000) as i32
-    } else if depth <= 0x7FFF {
-        depth
-    } else {
-        (depth >> 9).min(0x7FFF)
-    }
+    (depth.max(0) >> 9).min(0x7FFF)
 }
 
 fn alpha_blend_bgr555(top: u16, bottom: u16, alpha: u8) -> u16 {
@@ -554,10 +545,10 @@ mod tests {
         table[1] = 64;
         table[31] = 127;
 
-        assert_eq!(fog_density_for_depth(0x50FF, 0x5000, 2, &table), 8);
-        assert_eq!(fog_density_for_depth(0x5100, 0x5000, 2, &table), 8);
-        assert_eq!(fog_density_for_depth(0x5200, 0x5000, 2, &table), 64);
-        assert_eq!(fog_density_for_depth(0x7000, 0x5000, 2, &table), 128);
+        assert_eq!(fog_density_for_depth(0x50FF << 9, 0x5000, 2, &table), 8);
+        assert_eq!(fog_density_for_depth(0x5100 << 9, 0x5000, 2, &table), 8);
+        assert_eq!(fog_density_for_depth(0x5200 << 9, 0x5000, 2, &table), 64);
+        assert_eq!(fog_density_for_depth(0x7000 << 9, 0x5000, 2, &table), 128);
     }
 
     #[test]
@@ -566,7 +557,7 @@ mod tests {
         table[0] = 0;
         table[1] = 127;
 
-        assert_eq!(fog_density_for_depth(0x3600, 0x3000, 0, &table), 64);
+        assert_eq!(fog_density_for_depth(0x3600 << 9, 0x3000, 0, &table), 64);
     }
 
     #[test]
@@ -575,15 +566,16 @@ mod tests {
         table[0] = 16;
         table[31] = 127;
 
-        assert_eq!(fog_density_for_depth(0x3000, 0x3000, 11, &table), 16);
-        assert_eq!(fog_density_for_depth(0x3001, 0x3000, 11, &table), 128);
+        assert_eq!(fog_density_for_depth(0x3000 << 9, 0x3000, 11, &table), 16);
+        assert_eq!(fog_density_for_depth(0x3001 << 9, 0x3000, 11, &table), 128);
     }
 
     #[test]
-    fn test_fog_depth_scales_current_z_buffer_units() {
+    fn test_fog_depth_uses_expanded_depth_buffer_units() {
         assert_eq!(fog_depth_units(0), 0);
-        assert!((fog_depth_units(0x1000) - 0x4000).abs() <= 1);
-        assert_eq!(fog_depth_units(0x2000), 0x7FFF);
+        assert_eq!(fog_depth_units(0x3FFF << 9), 0x3FFF);
+        assert_eq!(fog_depth_units(0x7FFF << 9), 0x7FFF);
+        assert_eq!(fog_depth_units(0x8FFF << 9), 0x7FFF);
     }
 
     #[test]

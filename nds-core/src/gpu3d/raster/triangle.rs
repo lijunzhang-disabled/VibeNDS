@@ -728,7 +728,8 @@ fn depth_test_passes(attr: u32, incoming: i32, current: i32) -> bool {
 
 fn depth_to_buffer(z: i32, w: i32, w_buffering: bool) -> i32 {
     if w_buffering {
-        return w.max(0).min(DEPTH_MAX);
+        let w15 = ((w.max(0) as i64) >> 9).clamp(0, 0x7FFF) as u16;
+        return super::expand_clear_depth(w15);
     }
 
     let z = z.clamp(-super::super::matrix::ONE, super::super::matrix::ONE) as i64;
@@ -967,7 +968,8 @@ mod tests {
             depth_to_buffer(crate::gpu3d::matrix::ONE * 2, 0, false),
             0x7FFF << 9
         );
-        assert_eq!(depth_to_buffer(0, 1234, true), 1234);
+        assert_eq!(depth_to_buffer(0, 0, true), 0);
+        assert_eq!(depth_to_buffer(0, 4096, true), 8 << 9);
         assert_eq!(depth_to_buffer(0, DEPTH_MAX + 1, true), DEPTH_MAX);
     }
 
