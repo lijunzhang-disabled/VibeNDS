@@ -1,7 +1,7 @@
 //! Vertex pipeline + polygon assembly.
 //!
 //! Vertices stream in via `VTX_*` commands. Each vertex's position is
-//! transformed by `clip = projection × position`, optionally lit, and
+//! transformed by `clip = position × projection`, optionally lit, and
 //! tagged with the current texture coordinates / polygon attributes.
 //! The active `BEGIN_VTXS` primitive type decides when to assemble a
 //! polygon from the accumulated vertices.
