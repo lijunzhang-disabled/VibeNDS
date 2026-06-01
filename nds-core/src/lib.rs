@@ -1673,6 +1673,35 @@ mod tests {
     }
 
     #[test]
+    fn test_gxfifo_dma_trigger_continues_while_fifo_below_half() {
+        let mut nds = Nds::new(None, None);
+        for i in 0..120u32 {
+            let off = (i * 4) as usize;
+            nds.shared.main_ram[off..off + 4].copy_from_slice(&0x0000_0011u32.to_le_bytes());
+        }
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_00D4, 0x0200_0000);
+        bus.write32(0x0400_00D8, 0x0400_0400);
+        bus.write32(
+            0x0400_00DC,
+            (1 << 31) | (7 << 27) | (1 << 26) | (2 << 21) | 120,
+        );
+
+        bus.write32(0x0400_0400, 0x0000_0011);
+
+        assert!(!bus.shared.dma9.channels[3].active);
+        assert_eq!(bus.shared.dma9.channels[3].control & (1 << 31), 0);
+        assert_eq!(bus.shared.dma9.channels[3].internal_count, 0);
+        assert_eq!(bus.shared.dma9.channels[3].internal_sad, 0x0200_01E0);
+    }
+
+    #[test]
     fn test_gxstat_low_reflects_idle_geometry_at_boot() {
         let mut nds = Nds::new(None, None);
         let mut bus = Bus9::new(

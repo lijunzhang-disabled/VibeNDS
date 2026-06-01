@@ -8,6 +8,7 @@ use super::shared::SharedState;
 use crate::cpu::bus::CpuBus;
 use crate::cpu::cp15::TcmRegion;
 use crate::dma::{AddrControl, DmaTiming};
+use crate::gpu3d::fifo::FIFO_HALF;
 use serde::{Deserialize, Serialize};
 
 pub const ITCM_SIZE: usize = 32 * 1024;
@@ -233,6 +234,35 @@ impl<'a> Bus9<'a> {
 
         let completed = self.shared.dma9.finish_transfer_chunk(id, transfer_count);
         completed && irq_on_complete
+    }
+
+    fn run_gxfifo_dmas(&mut self) {
+        let channels = self.shared.dma9.channels_for_timing(DmaTiming::GxFifo);
+        for ch in channels {
+            while self.shared.dma9.channels[ch].active
+                && self.shared.dma9.timing(ch) == DmaTiming::GxFifo
+                && self.shared.gpu3d.fifo.len() < FIFO_HALF
+            {
+                let before = self.shared.dma9.channels[ch].internal_count;
+                let irq = self.run_dma(ch);
+                if irq {
+                    use crate::interrupt::Irq;
+                    let irq_bit = match ch {
+                        0 => Irq::Dma0,
+                        1 => Irq::Dma1,
+                        2 => Irq::Dma2,
+                        _ => Irq::Dma3,
+                    };
+                    self.shared.irq9.request(irq_bit);
+                }
+                if !self.shared.dma9.channels[ch].active {
+                    break;
+                }
+                if self.shared.dma9.channels[ch].internal_count >= before {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -550,25 +580,7 @@ impl<'a> CpuBus for Bus9<'a> {
                         }
                     }
                     super::io_arm9::Write32Effect::FireGxFifoDma => {
-                        // Fire any ARM9 DMA channel armed for the GxFifo
-                        // start mode. The carry-over from Phase 4.
-                        let channels = self
-                            .shared
-                            .dma9
-                            .channels_for_timing(crate::dma::DmaTiming::GxFifo);
-                        for ch in channels {
-                            let irq = self.run_dma(ch);
-                            if irq {
-                                use crate::interrupt::Irq;
-                                let irq_bit = match ch {
-                                    0 => Irq::Dma0,
-                                    1 => Irq::Dma1,
-                                    2 => Irq::Dma2,
-                                    _ => Irq::Dma3,
-                                };
-                                self.shared.irq9.request(irq_bit);
-                            }
-                        }
+                        self.run_gxfifo_dmas();
                     }
                     super::io_arm9::Write32Effect::None => {}
                 }
