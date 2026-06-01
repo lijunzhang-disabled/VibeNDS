@@ -21,7 +21,7 @@
 //! | 2 | 4-color | 0.25 | 2 bits per texel; palette has 4 colors |
 //! | 3 | 16-color | 0.5 | 4 bits per texel; palette has 16 colors |
 //! | 4 | 256-color | 1 | 8 bits per texel; palette has 256 colors |
-//! | 5 | 4×4 block | 0.25 (avg) | Block compression — Phase 9, stubbed here |
+//! | 5 | 4×4 block | 0.25 (avg) | Block compression |
 //! | 6 | A5I3 | 1 | top 5 bits = alpha, low 3 bits = 3-bit palette idx |
 //! | 7 | Direct color | 2 | BGR555 + alpha bit, no palette |
 //!

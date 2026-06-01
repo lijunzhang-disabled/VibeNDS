@@ -89,7 +89,7 @@ pub struct Rasterizer {
     pub fog_table: [u8; 32],
     /// 32-entry `TOON_TABLE` of BGR555 values.
     pub toon_table: [u16; 32],
-    /// `ALPHA_TEST_REF` — pixels with alpha < this are discarded when
+    /// `ALPHA_TEST_REF` — pixels with alpha <= this are discarded when
     /// alpha-test is enabled (DISP3DCNT bit 2).
     pub alpha_test_ref: u8,
 

@@ -203,6 +203,15 @@ fn draw_wire_line(
             let depth_24 = depth_to_buffer(depth, w, rast.w_buffering);
             let idx = y0 as usize * FB_WIDTH + x0 as usize;
             if depth_test_passes(attr, depth_24, rast.depth_buffer[idx]) {
+                if is_shadow_mode(attr) {
+                    // Shadow mode handles polygon-ID/stencil rejection below.
+                } else if translucent_same_id_rejects(rast, idx, poly_id, effective_alpha) {
+                    if advance_line_cursor(&mut x0, &mut y0, x1, y1, sx, sy, dx, dy, &mut err) {
+                        break;
+                    }
+                    step += 1;
+                    continue;
+                }
                 let color = color_no_alpha_bit | (1 << 15);
                 if effective_alpha < 31 {
                     let prev = rast.framebuffer[idx];
@@ -611,6 +620,8 @@ fn rasterize_scanline(
                 if rast.id_buffer[idx] == a.poly_id {
                     continue;
                 }
+            } else if translucent_same_id_rejects(rast, idx, a.poly_id, effective_alpha) {
+                continue;
             }
 
             if effective_alpha < 31 {
@@ -642,6 +653,18 @@ fn rasterize_scanline(
 
 fn is_shadow_mode(attr: u32) -> bool {
     ((attr >> 4) & 0x3) == 3
+}
+
+fn translucent_same_id_rejects(
+    rast: &Rasterizer,
+    idx: usize,
+    incoming_poly_id: u8,
+    incoming_alpha: u8,
+) -> bool {
+    incoming_alpha < 31
+        && rast.framebuffer[idx] & (1 << 15) != 0
+        && rast.edge_enable_buffer[idx] == 0
+        && rast.id_buffer[idx] == incoming_poly_id
 }
 
 fn combine_toon_highlight(
@@ -799,9 +822,13 @@ mod tests {
     }
 
     fn colored_poly(verts: Vec<ScreenVertex>, alpha: u8) -> ScreenPolygon {
+        colored_poly_with_id(verts, alpha, 0)
+    }
+
+    fn colored_poly_with_id(verts: Vec<ScreenVertex>, alpha: u8, poly_id: u8) -> ScreenPolygon {
         ScreenPolygon {
             vertices: verts,
-            attr: ((alpha as u32) << 16) | (1 << 6) | (1 << 7),
+            attr: ((alpha as u32) << 16) | (1 << 6) | (1 << 7) | ((poly_id as u32) << 24),
             tex_image_param: 0,
             palette_base: 0,
             front_area_negative: true,
@@ -1173,6 +1200,66 @@ mod tests {
         let color = r.framebuffer[idx] & 0x7FFF;
         assert_eq!(color & 0x1F, 16);
         assert_eq!((color >> 10) & 0x1F, 14);
+    }
+
+    #[test]
+    fn test_same_id_translucent_overlap_does_not_blend_twice() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 3;
+        r.set_swap_attrs(1);
+
+        let mut base = colored_poly_with_id(
+            vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 30, 0x7C00)],
+            31,
+            1,
+        );
+        for v in &mut base.vertices {
+            v.depth_z = 2048;
+        }
+        let red = colored_poly_with_id(
+            vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 30, 0x001F)],
+            16,
+            7,
+        );
+
+        r.render_frame(&[base, red.clone(), red], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        let expected_once = alpha_blend(0x001F | (1 << 15), 0x7C00 | (1 << 15), 16);
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, expected_once);
+    }
+
+    #[test]
+    fn test_different_id_translucent_overlap_can_blend_twice() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 3;
+        r.set_swap_attrs(1);
+
+        let mut base = colored_poly_with_id(
+            vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 30, 0x7C00)],
+            31,
+            1,
+        );
+        for v in &mut base.vertices {
+            v.depth_z = 2048;
+        }
+        let red_7 = colored_poly_with_id(
+            vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 30, 0x001F)],
+            16,
+            7,
+        );
+        let red_8 = colored_poly_with_id(
+            vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 30, 0x001F)],
+            16,
+            8,
+        );
+
+        r.render_frame(&[base, red_7, red_8], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        let once = alpha_blend(0x001F | (1 << 15), 0x7C00 | (1 << 15), 16) | (1 << 15);
+        let expected_twice = alpha_blend(0x001F | (1 << 15), once, 16);
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, expected_twice);
     }
 
     #[test]
