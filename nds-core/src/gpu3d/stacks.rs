@@ -5,7 +5,7 @@
 //! | Mode | Stack | Depth | Notes |
 //! |---|---|---:|---|
 //! | 0 | Projection | 1 | A single "previous" slot; push/pop bookkeeping only. |
-//! | 1 | Position | 32 | Combined model×view. Mode 2 also updates this stack. |
+//! | 1 | Position | 32 | Combined model×view. Stack ops also touch Vector. |
 //! | 2 | Position + Vector | 32 | The position matrix *and* a matching "direction-only" matrix (used for normal-vector lighting); they're kept lockstep. |
 //! | 3 | Texture | 1 | Transforms per-vertex UVs. |
 //!
@@ -409,6 +409,36 @@ mod tests {
         assert_eq!(s.position_sp, 0);
         let r = s.position.mul_vec4([0, 0, 0, ONE]);
         assert_eq!(r[0], ONE, "pop should restore T(1, 0, 0)");
+    }
+
+    #[test]
+    fn test_position_mode_stack_ops_preserve_vector_matrix() {
+        let mut s = MatrixStacks::new();
+        s.vector = Matrix::identity().mul_scale(2 * ONE, 3 * ONE, 4 * ONE);
+        s.set_mode(MtxMode::Position);
+
+        s.push();
+        let saved_vector = s.vector;
+        s.vector = Matrix::identity().mul_translate(5 * ONE, 0, 0);
+
+        s.pop(1);
+
+        assert_eq!(s.vector, saved_vector);
+    }
+
+    #[test]
+    fn test_position_mode_store_restore_preserves_vector_matrix() {
+        let mut s = MatrixStacks::new();
+        s.vector = Matrix::identity().mul_scale(2 * ONE, 3 * ONE, 4 * ONE);
+        s.set_mode(MtxMode::Position);
+
+        s.store(4);
+        let saved_vector = s.vector;
+        s.vector = Matrix::identity().mul_translate(5 * ONE, 0, 0);
+
+        s.restore(4);
+
+        assert_eq!(s.vector, saved_vector);
     }
 
     #[test]
