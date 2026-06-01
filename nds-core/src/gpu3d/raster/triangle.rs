@@ -13,13 +13,12 @@
 //! Per-vertex attributes carried through the interpolators:
 //! - depth (linear in screen space for Z-buffer mode, clip W for W-buffer mode)
 //! - 1/W (for perspective-correct color/texcoord recovery)
-//! - color/W as 3 channels (R/W, G/W, B/W)
+//! - color as 3 screen-linear channels (R, G, B)
 //! - U/W, V/W (Phase 7 part 2 — texture)
 //!
-//! Color interpolation is perspective-correct here even though most
-//! references say "screen-linear is fine for color." Doing it correctly
-//! for color is the same cost (we already need the divide for textures),
-//! and the result matches real hardware more faithfully.
+//! Texture coordinates are perspective-corrected with 1/W. Vertex color is
+//! interpolated linearly in screen space, matching the DS Gouraud-style color
+//! path.
 
 use super::super::viewport::{ScreenPolygon, ScreenVertex};
 use super::texture::{self, TexParams};
@@ -29,14 +28,14 @@ use crate::vram::VramRouter;
 /// Per-vertex attributes carried through interpolation.
 #[derive(Debug, Clone, Copy)]
 struct Vert {
-    x: i32,        // 24.8 fixed-point screen x
-    y: i32,        // integer screen y after sort
-    depth: i32,    // 1.19.12 NDC-space depth
-    w: i32,        // original clip W, for W-buffer mode
-    inv_w: i64,    // 1/W scaled by (1<<42) so products stay in i64
-    r_over_w: i64, // R × inv_w
-    g_over_w: i64,
-    b_over_w: i64,
+    x: i32,     // 24.8 fixed-point screen x
+    y: i32,     // integer screen y after sort
+    depth: i32, // 1.19.12 NDC-space depth
+    w: i32,     // original clip W, for W-buffer mode
+    inv_w: i64, // 1/W scaled by (1<<42) so products stay in i64
+    r: i32,
+    g: i32,
+    b: i32,
     s_over_w: i64, // (S / 16) × inv_w  (S is 1.11.4 → divide by 16 to get pixel units)
     t_over_w: i64,
     attr: u32,
@@ -49,9 +48,9 @@ impl Vert {
         let y_pixel = v.screen_y >> 8;
         let w = v.w.max(1) as i64;
         let inv_w = (1i64 << 42) / w;
-        let r = (v.color & 0x1F) as i64;
-        let g = ((v.color >> 5) & 0x1F) as i64;
-        let b = ((v.color >> 10) & 0x1F) as i64;
+        let r = (v.color & 0x1F) as i32;
+        let g = ((v.color >> 5) & 0x1F) as i32;
+        let b = ((v.color >> 10) & 0x1F) as i32;
         let s = v.tex[0] as i64;
         let t = v.tex[1] as i64;
         Vert {
@@ -60,9 +59,9 @@ impl Vert {
             depth: v.depth_z,
             w: v.w,
             inv_w,
-            r_over_w: r * inv_w,
-            g_over_w: g * inv_w,
-            b_over_w: b * inv_w,
+            r,
+            g,
+            b,
             // S/T are 1.11.4 fixed-point pixel coords. Scale by inv_w
             // (we'll divide by inv_w per pixel to recover the true value).
             s_over_w: (s * inv_w) >> 4,
@@ -221,17 +220,21 @@ fn draw_wire_line(
                 let color = color_no_alpha_bit | (1 << 15);
                 if effective_alpha < 31 {
                     let prev = rast.framebuffer[idx];
-                    if rast.disp3dcnt & (1 << 3) != 0 && prev & (1 << 15) != 0 {
+                    let prev_alpha = rast.alpha_buffer[idx];
+                    if rast.disp3dcnt & (1 << 3) != 0 && prev_alpha != 0 {
                         rast.framebuffer[idx] =
                             alpha_blend(color, prev, effective_alpha) | (1 << 15);
+                        rast.alpha_buffer[idx] = prev_alpha.max(effective_alpha);
                     } else {
                         rast.framebuffer[idx] = color;
+                        rast.alpha_buffer[idx] = effective_alpha;
                     }
                     if translucent_updates_depth(attr) {
                         rast.depth_buffer[idx] = depth_24;
                     }
                 } else {
                     rast.framebuffer[idx] = color;
+                    rast.alpha_buffer[idx] = 31;
                     rast.depth_buffer[idx] = depth_24;
                 }
                 rast.id_buffer[idx] = poly_id;
@@ -340,16 +343,20 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
         let color = (v.color & 0x7FFF) | (1 << 15);
         if effective_alpha < 31 {
             let prev = rast.framebuffer[idx];
-            if rast.disp3dcnt & (1 << 3) != 0 && prev & (1 << 15) != 0 {
+            let prev_alpha = rast.alpha_buffer[idx];
+            if rast.disp3dcnt & (1 << 3) != 0 && prev_alpha != 0 {
                 rast.framebuffer[idx] = alpha_blend(color, prev, effective_alpha) | (1 << 15);
+                rast.alpha_buffer[idx] = prev_alpha.max(effective_alpha);
             } else {
                 rast.framebuffer[idx] = color;
+                rast.alpha_buffer[idx] = effective_alpha;
             }
             if translucent_updates_depth(attr) {
                 rast.depth_buffer[idx] = depth_24;
             }
         } else {
             rast.framebuffer[idx] = color;
+            rast.alpha_buffer[idx] = 31;
             rast.depth_buffer[idx] = depth_24;
         }
         rast.id_buffer[idx] = poly_id;
@@ -529,9 +536,9 @@ fn lerp_vert(a: &Vert, b: &Vert, t: i64) -> Vert {
         depth: lerp_i32(a.depth, b.depth, t),
         w: lerp_i32(a.w, b.w, t),
         inv_w: lerp_i64(a.inv_w, b.inv_w, t),
-        r_over_w: lerp_i64(a.r_over_w, b.r_over_w, t),
-        g_over_w: lerp_i64(a.g_over_w, b.g_over_w, t),
-        b_over_w: lerp_i64(a.b_over_w, b.b_over_w, t),
+        r: lerp_i32(a.r, b.r, t),
+        g: lerp_i32(a.g, b.g, t),
+        b: lerp_i32(a.b, b.b, t),
         s_over_w: lerp_i64(a.s_over_w, b.s_over_w, t),
         t_over_w: lerp_i64(a.t_over_w, b.t_over_w, t),
         attr: a.attr,
@@ -585,14 +592,9 @@ fn rasterize_scanline(
             lerp_i32(a.depth, b.depth, t)
         };
         let inv_w = lerp_i64(a.inv_w, b.inv_w, t).max(1);
-        let r_w = lerp_i64(a.r_over_w, b.r_over_w, t);
-        let g_w = lerp_i64(a.g_over_w, b.g_over_w, t);
-        let b_w = lerp_i64(a.b_over_w, b.b_over_w, t);
-
-        // Perspective-correct vertex color.
-        let r = (r_w / inv_w).clamp(0, 31) as u16;
-        let g = (g_w / inv_w).clamp(0, 31) as u16;
-        let bch = (b_w / inv_w).clamp(0, 31) as u16;
+        let r = lerp_i32(a.r, b.r, t).clamp(0, 31) as u16;
+        let g = lerp_i32(a.g, b.g, t).clamp(0, 31) as u16;
+        let bch = lerp_i32(a.b, b.b, t).clamp(0, 31) as u16;
         let vertex_color = r | (g << 5) | (bch << 10);
 
         // Combine with texel if textured.
@@ -666,17 +668,21 @@ fn rasterize_scanline(
 
             if effective_alpha < 31 {
                 let prev = rast.framebuffer[idx];
-                if rast.disp3dcnt & (1 << 3) != 0 && prev & (1 << 15) != 0 {
+                let prev_alpha = rast.alpha_buffer[idx];
+                if rast.disp3dcnt & (1 << 3) != 0 && prev_alpha != 0 {
                     let blended = alpha_blend(color, prev, effective_alpha);
                     rast.framebuffer[idx] = blended | (1 << 15);
+                    rast.alpha_buffer[idx] = prev_alpha.max(effective_alpha);
                 } else {
                     rast.framebuffer[idx] = color;
+                    rast.alpha_buffer[idx] = effective_alpha;
                 }
                 if translucent_updates_depth(a.attr) {
                     rast.depth_buffer[idx] = depth_24;
                 }
             } else {
                 rast.framebuffer[idx] = color;
+                rast.alpha_buffer[idx] = 31;
                 rast.depth_buffer[idx] = depth_24;
             }
             rast.id_buffer[idx] = a.poly_id;
@@ -698,7 +704,7 @@ fn translucent_same_id_rejects(
     incoming_alpha: u8,
 ) -> bool {
     incoming_alpha < 31
-        && rast.framebuffer[idx] & (1 << 15) != 0
+        && rast.alpha_buffer[idx] != 0
         && rast.translucent_id_buffer[idx] == incoming_poly_id
 }
 
@@ -949,6 +955,25 @@ mod tests {
         v
     }
 
+    fn scanline_vert(x: i32, y: i32, color: u16, w: i32) -> Vert {
+        let inv_w = (1i64 << 42) / w as i64;
+        Vert {
+            x: x << 8,
+            y,
+            depth: 0,
+            w,
+            inv_w,
+            r: (color & 0x1F) as i32,
+            g: ((color >> 5) & 0x1F) as i32,
+            b: ((color >> 10) & 0x1F) as i32,
+            s_over_w: 0,
+            t_over_w: 0,
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7),
+            poly_id: 0,
+            alpha: 31,
+        }
+    }
+
     #[test]
     fn test_solid_red_triangle_writes_red_pixels() {
         let mut r = Rasterizer::new();
@@ -970,6 +995,39 @@ mod tests {
         // A pixel outside the triangle should be unchanged (alpha 0).
         let outside = (0 * FB_WIDTH) + 0;
         assert_eq!(r.framebuffer[outside] & (1 << 15), 0);
+    }
+
+    #[test]
+    fn test_vertex_color_interpolation_ignores_w() {
+        let mut r = Rasterizer::new();
+        let left = scanline_vert(20, 20, 0x001F, 4096);
+        let right = scanline_vert(120, 20, 0x7C00, 8192);
+
+        rasterize_scanline(
+            20,
+            left,
+            right,
+            &mut r,
+            None,
+            TexParams::from_register(0),
+            0,
+            0,
+            false,
+        );
+
+        let c = r.framebuffer[20 * FB_WIDTH + 70];
+        assert_ne!(c & (1 << 15), 0, "scanline should write midpoint pixel");
+        let c = c & 0x7FFF;
+        let red = c & 0x1F;
+        let blue = (c >> 10) & 0x1F;
+        assert!(
+            (14..=16).contains(&red) && (14..=16).contains(&blue),
+            "screen-midpoint should be the channel midpoint, got red={red}, blue={blue}"
+        );
+        assert!(
+            (red as i32 - blue as i32).abs() <= 1,
+            "screen-midpoint color should be linear, got red={red}, blue={blue}"
+        );
     }
 
     #[test]
@@ -1279,6 +1337,22 @@ mod tests {
         let color = r.framebuffer[idx] & 0x7FFF;
         assert_eq!(color & 0x1F, 16);
         assert_eq!((color >> 10) & 0x1F, 14);
+        assert_eq!(r.alpha_buffer[idx], 31);
+    }
+
+    #[test]
+    fn test_translucent_alpha_buffer_records_fragment_alpha() {
+        let mut r = Rasterizer::new();
+        let red = colored_poly(
+            vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 30, 0x001F)],
+            16,
+        );
+
+        r.render_frame(&[red], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        assert_eq!(r.alpha_buffer[idx], 16);
+        assert_ne!(r.framebuffer[idx] & (1 << 15), 0);
     }
 
     #[test]

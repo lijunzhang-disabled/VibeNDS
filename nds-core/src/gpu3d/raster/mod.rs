@@ -29,12 +29,25 @@ pub const FB_PIXELS: usize = FB_WIDTH * FB_HEIGHT;
 /// far" — used to clear the depth buffer at frame start.
 pub const DEPTH_MAX: i32 = 0x00FF_FFFF;
 
+fn default_alpha_buffer() -> Vec<u8> {
+    vec![0u8; FB_PIXELS]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rasterizer {
     /// 256×192 framebuffer in BGR555. Bit 15 = "pixel was written this
     /// frame" (used as the alpha bit by the 2D compositor).
     #[serde(with = "crate::bus::shared::serde_bytes_vec_u16")]
     pub framebuffer: Vec<u16>,
+
+    /// 256×192 5-bit 3D alpha buffer. The framebuffer keeps bit 15 as a
+    /// transparent/written marker; this preserves the actual 0..31 alpha
+    /// value for 3D fog and final 2D compositing behavior.
+    #[serde(
+        default = "default_alpha_buffer",
+        with = "crate::bus::shared::serde_bytes_vec"
+    )]
+    pub alpha_buffer: Vec<u8>,
 
     /// 256×192 depth buffer (Z or W per `DISP3DCNT.depth_buffer_mode`).
     /// Lower values = closer.
@@ -109,6 +122,7 @@ impl Rasterizer {
     pub fn new() -> Self {
         Rasterizer {
             framebuffer: vec![0u16; FB_PIXELS],
+            alpha_buffer: vec![0u8; FB_PIXELS],
             depth_buffer: vec![DEPTH_MAX; FB_PIXELS],
             id_buffer: vec![0u8; FB_PIXELS],
             edge_enable_buffer: vec![0u8; FB_PIXELS],
@@ -157,6 +171,10 @@ impl Rasterizer {
         for p in self.framebuffer.iter_mut() {
             *p = color;
         }
+        let alpha_value = ((self.clear_color >> 16) & 0x1F) as u8;
+        for a in self.alpha_buffer.iter_mut() {
+            *a = alpha_value;
+        }
 
         // CLEAR_DEPTH is a 15-bit value expanded to the 24-bit hardware
         // depth range: X * 0x200 + ((X + 1) / 0x8000) * 0x1FF.
@@ -204,6 +222,7 @@ impl Rasterizer {
                 let depth = read_texture_image_u16(vram, 0x6_0000 + src);
 
                 self.framebuffer[idx] = color;
+                self.alpha_buffer[idx] = if color & (1 << 15) != 0 { 31 } else { 0 };
                 self.depth_buffer[idx] = expand_clear_depth(depth);
                 self.id_buffer[idx] = clear_poly_id;
                 self.edge_enable_buffer[idx] = 0;
@@ -294,6 +313,17 @@ mod tests {
         r.clear();
 
         assert!(r.fog_enable_buffer.iter().all(|&f| f == 1));
+    }
+
+    #[test]
+    fn test_clear_color_initializes_alpha_buffer() {
+        let mut r = Rasterizer::new();
+        r.clear_color = 0x12 << 16;
+
+        r.clear();
+
+        assert!(r.alpha_buffer.iter().all(|&a| a == 0x12));
+        assert!(r.framebuffer.iter().all(|&p| p & (1 << 15) != 0));
     }
 
     #[test]

@@ -120,11 +120,17 @@ fn apply_fog(rast: &mut Rasterizer) {
         // density is 0..127; we use 128 as the denominator.
         let blend = |p: u32, f: u32| -> u32 { (p * (128 - density) + f * density) / 128 };
 
+        let pa = rast.alpha_buffer[i] as u32;
+        let na = blend(pa, fog_alpha).min(31) as u8;
+        rast.alpha_buffer[i] = na;
+        if na == 0 {
+            rast.framebuffer[i] &= !(1 << 15);
+        } else {
+            rast.framebuffer[i] |= 1 << 15;
+        }
+
         if alpha_only {
-            // Only blend alpha (no color change). We don't model alpha bits
-            // in the framebuffer beyond "written"; treat this as a no-op
-            // unless a future game needs it.
-            let _ = (pr, pg, pb, blend, fr, fg, fb, fog_alpha);
+            let _ = (pr, pg, pb, fr, fg, fb);
         } else {
             let nr = blend(pr, fr).min(31);
             let ng = blend(pg, fg).min(31);
@@ -175,6 +181,7 @@ fn apply_antialiasing(rast: &mut Rasterizer) {
             if is_edge {
                 rast.framebuffer[idx] =
                     alpha_blend_bgr555(fb_snapshot[idx] & 0x7FFF, rear, 16) | (1 << 15);
+                rast.alpha_buffer[idx] = 16;
             }
         }
     }
@@ -528,6 +535,31 @@ mod tests {
         // GBATEK notes density 127 is handled as full density 128.
         let center = r.framebuffer[100 * FB_WIDTH + 125];
         assert_eq!(center & 0x7FFF, 0);
+    }
+
+    #[test]
+    fn test_fog_alpha_only_updates_alpha_without_color() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 | (1 << 6) | (1 << 7); // alpha-only fog + fog enable
+        r.fog_color = 0 << 16;
+        for d in r.fog_table.iter_mut() {
+            *d = 127;
+        }
+
+        let p = fog_poly(
+            vec![
+                sv(50, 50, 0x7FFF),
+                sv(200, 50, 0x7FFF),
+                sv(125, 150, 0x7FFF),
+            ],
+            true,
+        );
+        r.render_frame(&[p], None);
+
+        let idx = 100 * FB_WIDTH + 125;
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x7FFF);
+        assert_eq!(r.alpha_buffer[idx], 0);
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
     }
 
     #[test]
