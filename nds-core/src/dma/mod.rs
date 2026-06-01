@@ -213,6 +213,18 @@ impl DmaController {
             .collect()
     }
 
+    /// Apply post-transfer state for a partial trigger. Returns true when the
+    /// programmed transfer is complete.
+    pub fn finish_transfer_chunk(&mut self, id: usize, transferred: u32) -> bool {
+        let remaining = self.channels[id].internal_count.saturating_sub(transferred);
+        self.channels[id].internal_count = remaining;
+        if remaining != 0 {
+            return false;
+        }
+        self.finish_transfer(id);
+        true
+    }
+
     /// Apply post-transfer state: clear active + enable bit (one-shot) or
     /// reload count (repeat).
     pub fn finish_transfer(&mut self, id: usize) {
@@ -339,5 +351,18 @@ mod tests {
         d.finish_transfer(0);
         assert!(d.channels[0].active);
         assert_eq!(d.channels[0].internal_count, 4);
+    }
+
+    #[test]
+    fn test_partial_chunk_keeps_dma_active() {
+        let mut d = DmaController::new(true);
+        d.write_count(0, 120);
+        d.write_control(0, 1 << 31);
+
+        assert!(!d.finish_transfer_chunk(0, 112));
+
+        assert!(d.channels[0].active);
+        assert_ne!(d.channels[0].control & (1 << 31), 0);
+        assert_eq!(d.channels[0].internal_count, 8);
     }
 }

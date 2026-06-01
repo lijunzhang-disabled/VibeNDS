@@ -7,7 +7,7 @@
 use super::shared::SharedState;
 use crate::cpu::bus::CpuBus;
 use crate::cpu::cp15::TcmRegion;
-use crate::dma::AddrControl;
+use crate::dma::{AddrControl, DmaTiming};
 use serde::{Deserialize, Serialize};
 
 pub const ITCM_SIZE: usize = 32 * 1024;
@@ -184,7 +184,7 @@ impl<'a> Bus9<'a> {
     /// (one trigger). Returns `irq_request` = whether to raise the
     /// channel's IRQ on the ARM9 controller.
     pub fn run_dma(&mut self, id: usize) -> bool {
-        let (count, word_size, src_ctrl, dst_ctrl, irq_on_complete) = {
+        let (count, word_size, src_ctrl, dst_ctrl, irq_on_complete, timing) = {
             let d = &self.shared.dma9;
             (
                 d.channels[id].internal_count,
@@ -192,17 +192,29 @@ impl<'a> Bus9<'a> {
                 d.src_control(id),
                 d.dst_control(id),
                 d.irq_on_complete(id),
+                d.timing(id),
             )
         };
+        let transfer_count = if timing == DmaTiming::GxFifo {
+            // Hardware GXFIFO DMA feeds at most 112 words per half-empty
+            // trigger, then waits for the next trigger if data remains.
+            count.min(112)
+        } else {
+            count
+        };
 
-        for _ in 0..count {
+        for _ in 0..transfer_count {
             let (sad, dad) = {
                 let c = &self.shared.dma9.channels[id];
                 (c.internal_sad, c.internal_dad)
             };
             if word_size == 4 {
                 let v = self.read32(sad);
-                self.write32(dad, v);
+                if timing == DmaTiming::GxFifo && is_gxfifo_packed_addr(dad) {
+                    let _ = super::io_arm9::write_io32(self.shared, dad, v);
+                } else {
+                    self.write32(dad, v);
+                }
             } else {
                 let v = self.read16(sad);
                 self.write16(dad, v);
@@ -219,9 +231,14 @@ impl<'a> Bus9<'a> {
             );
         }
 
-        self.shared.dma9.finish_transfer(id);
-        irq_on_complete
+        let completed = self.shared.dma9.finish_transfer_chunk(id, transfer_count);
+        completed && irq_on_complete
     }
+}
+
+fn is_gxfifo_packed_addr(addr: u32) -> bool {
+    let local = addr & 0x00FF_FFFC;
+    (0x0400..0x0440).contains(&local)
 }
 
 fn advance(addr: &mut u32, ctrl: AddrControl, word: u32) {
