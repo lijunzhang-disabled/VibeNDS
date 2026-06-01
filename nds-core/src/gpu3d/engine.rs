@@ -73,6 +73,7 @@ impl Engine3d {
         while let Some(op) = self.fifo.pop_op() {
             self.dispatch(op);
         }
+        self.fifo.reconcile_after_drain();
     }
 
     fn dispatch(&mut self, op: GxOp) {

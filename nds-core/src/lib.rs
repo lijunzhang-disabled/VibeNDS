@@ -167,6 +167,7 @@ impl Nds {
             while let Some(event) = self.scheduler.pop_if_ready() {
                 self.dispatch_event(event);
             }
+            self.refresh_level_irqs();
 
             // Halt-wake: a halted CPU is skipped by the run loop above,
             // so `step()` (the usual place that clears `halted`) never
@@ -206,6 +207,12 @@ impl Nds {
                     self.cpu7.intrwait_mask = 0;
                 }
             }
+        }
+    }
+
+    fn refresh_level_irqs(&mut self) {
+        if self.shared.gpu3d.fifo.irq_condition() {
+            self.shared.irq9.request(Irq::GxFifo);
         }
     }
 
@@ -1565,6 +1572,39 @@ mod tests {
     }
 
     #[test]
+    fn test_gxstat_high_exposes_real_fifo_status_bits() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        let stat = bus.read32(0x0400_0600);
+
+        assert_ne!(stat & (1 << 25), 0, "FIFO less-than-half bit");
+        assert_ne!(stat & (1 << 26), 0, "FIFO empty bit");
+    }
+
+    #[test]
+    fn test_gxstat_less_than_half_irq_requests_gxfifo_irq() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_0600, 1 << 30);
+
+        assert_eq!(bus.read32(0x0400_0600) & (3 << 30), 1 << 30);
+        drop(bus);
+        assert_ne!(nds.shared.irq9.read_if() & interrupt::Irq::GxFifo.bit(), 0);
+    }
+
+    #[test]
     fn test_set_touch_drives_tsc_and_extkeyin() {
         let mut nds = Nds::new(None, None);
         // Pen down at (128, 96).
@@ -1732,6 +1772,109 @@ mod tests {
 
         assert_eq!(bus.read32(0x0410_0010), 0x0706_0504);
         assert_eq!(bus.read32(0x0410_0010), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn test_arm9_slot1_data_port_repeats_for_incrementing_word_reads() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            cpu::cp15::TcmRegion::disabled(),
+            cpu::cp15::TcmRegion::disabled(),
+        );
+
+        bus.write8(0x0400_01A8, 0x00);
+        bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+
+        assert_eq!(bus.read32(0x0410_0010), 0x0302_0100);
+        assert_eq!(bus.read32(0x0410_0014), 0x0706_0504);
+        assert_eq!(bus.read32(0x0410_0018), 0x0B0A_0908);
+        assert_eq!(bus.read32(0x0410_001C), 0x0F0E_0D0C);
+    }
+
+    #[test]
+    fn test_arm9_slot1_status_polling_completes_unread_transfer() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1FF).map(|v| v as u8).collect();
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            cpu::cp15::TcmRegion::disabled(),
+            cpu::cp15::TcmRegion::disabled(),
+        );
+
+        bus.write8(0x0400_01A8, 0x00);
+        bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+        assert_eq!(bus.read32(0x0410_0010), 0x0302_0100);
+
+        let mut status = 0;
+        for _ in 0..8 {
+            status = bus.read32(0x0400_01A4);
+        }
+
+        assert_eq!(status & ((1 << 31) | (1 << 23)), 0);
+        assert_eq!(bus.read32(0x0410_0010), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn test_arm9_slot1_read_with_irq_enable_requests_slot1_data_irq() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            cpu::cp15::TcmRegion::disabled(),
+            cpu::cp15::TcmRegion::disabled(),
+        );
+
+        bus.write8(0x0400_01A8, 0x00);
+        bus.write32(0x0400_01A4, (1 << 31) | (7 << 24) | (1 << 14));
+
+        assert_ne!(nds.shared.irq9.read_if() & interrupt::Irq::Slot1Data.bit(), 0);
+    }
+
+    #[test]
+    fn test_arm9_slot1_transfer_fires_slot1_dma() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            cpu::cp15::TcmRegion::disabled(),
+            cpu::cp15::TcmRegion::disabled(),
+        );
+
+        bus.write8(0x0400_01A8, 0x00);
+        bus.write32(0x0400_00B0, 0x0410_0010);
+        bus.write32(0x0400_00B4, 0x0200_1000);
+        bus.write32(0x0400_00B8, (1u32 << 31) | (1 << 26) | (2 << 23) | (5 << 27) | 2);
+        bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+
+        assert_eq!(&nds.shared.main_ram[0x1000..0x1008], &[0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_arm9_slot1_dma_fires_when_armed_after_card_data_ready() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            cpu::cp15::TcmRegion::disabled(),
+            cpu::cp15::TcmRegion::disabled(),
+        );
+
+        bus.write8(0x0400_01A8, 0x00);
+        bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+        bus.write32(0x0400_00BC, 0x0410_0010);
+        bus.write32(0x0400_00C0, 0x0200_2000);
+        bus.write32(0x0400_00C4, (1u32 << 31) | (1 << 26) | (2 << 23) | (5 << 27) | 4);
+
+        assert_eq!(&nds.shared.main_ram[0x2000..0x2010], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(nds.shared.slot1_data.len(), 124);
+        assert_eq!(nds.shared.dma9.read_control(1) & (1 << 31), 0);
     }
 
     #[test]

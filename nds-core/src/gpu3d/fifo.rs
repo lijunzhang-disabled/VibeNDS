@@ -66,6 +66,9 @@ pub struct GxFifo {
     /// Set after each accept; the bus dispatcher reads this to decide
     /// whether to fire the GxFifo DMA trigger.
     pub fell_below_half: bool,
+
+    /// GXSTAT bits 30-31: 0=never, 1=less-than-half, 2=empty.
+    pub irq_mode: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +86,7 @@ impl GxFifo {
             ready: VecDeque::new(),
             overflow: false,
             fell_below_half: false,
+            irq_mode: 0,
         }
     }
 
@@ -232,6 +236,13 @@ impl GxFifo {
         v
     }
 
+    pub fn reconcile_after_drain(&mut self) {
+        if self.ready.is_empty() && self.pending_cmds.is_empty() && !self.words.is_empty() {
+            self.words.clear();
+            self.fell_below_half = true;
+        }
+    }
+
     /// Build the `GXSTAT` register value (low 16 bits — the high half
     /// holds command-list-size and similar fields managed elsewhere).
     pub fn stat_low(&self) -> u16 {
@@ -242,6 +253,28 @@ impl GxFifo {
         // Bit 3 = command-list-overflow (also reported via overflow flag)
         if self.overflow { v |= 1 << 15; }
         v
+    }
+
+    pub fn stat_high(&self) -> u16 {
+        let count = self.words.len().min(256) as u16;
+        let mut v = count;
+        if self.is_full() { v |= 1 << 8; }                  // GXSTAT bit 24
+        if self.words.len() < FIFO_HALF { v |= 1 << 9; }    // GXSTAT bit 25
+        if self.words.is_empty() { v |= 1 << 10; }          // GXSTAT bit 26
+        v |= (self.irq_mode as u16) << 14;                  // GXSTAT bits 30-31
+        v
+    }
+
+    pub fn set_irq_mode(&mut self, mode: u8) {
+        self.irq_mode = mode & 0x3;
+    }
+
+    pub fn irq_condition(&self) -> bool {
+        match self.irq_mode {
+            1 => self.words.len() < FIFO_HALF,
+            2 => self.words.is_empty(),
+            _ => false,
+        }
     }
 }
 

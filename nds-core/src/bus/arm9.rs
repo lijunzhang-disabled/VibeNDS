@@ -76,6 +76,25 @@ impl Arm9Memory {
         true
     }
 
+    pub(crate) fn has_nintendo_sdk_irq_dispatcher_at_zero(&self) -> bool {
+        const PREFIX: [u32; 4] = [
+            0xE92D_4000, // STMDB SP!, {LR}
+            0xE3A0_C301, // MOV R12, #0x04000000
+            0xE28C_CE21, // ADD R12, R12, #0x210
+            0xE51C_1008, // LDR R1, [R12, #-8]
+        ];
+
+        PREFIX.iter().enumerate().all(|(i, &word)| {
+            let off = i * 4;
+            u32::from_le_bytes([
+                self.itcm[off],
+                self.itcm[off + 1],
+                self.itcm[off + 2],
+                self.itcm[off + 3],
+            ]) == word
+        })
+    }
+
     fn has_calico_branch_to_compact_vectors(&self) -> bool {
         let irq_branch = u32::from_le_bytes([
             self.itcm[0x18],
@@ -117,6 +136,21 @@ fn synthetic_irq_vector_word(off: usize) -> Option<u32> {
         0x4C => Some(0xE25E_F004), // SUBS PC, LR, #4
         0x50 => Some(0x02FF_3FFC),
         0x54 => Some(0x0400_0210),
+        _ => None,
+    }
+}
+
+fn synthetic_sdk_irq_wrapper_word(off: usize) -> Option<u32> {
+    match off {
+        // The Nintendo SDK installs a callable IRQ dispatcher at ITCM[0].
+        // It expects LR to point back to the BIOS IRQ wrapper; entering it
+        // directly as the exception vector returns to game code in IRQ mode.
+        0x18 => Some(0xE92D_500F), // STMDB SP!, {R0-R3, R12, LR}
+        0x1C => Some(0xE28F_E008), // ADD LR, PC, #0x08 -> wrapper epilogue.
+        0x20 => Some(0xE59F_F010), // LDR PC, [PC, #0x10] -> ITCM[0].
+        0x2C => Some(0xE8BD_500F), // LDMIA SP!, {R0-R3, R12, LR}
+        0x30 => Some(0xE25E_F004), // SUBS PC, LR, #4
+        0x38 => Some(0x0000_0000),
         _ => None,
     }
 }
@@ -323,6 +357,11 @@ impl<'a> CpuBus for Bus9<'a> {
                 if addr & 0xFFFF_F000 == 0xFFFF_0000 {
                     let off = (addr as usize) & 0xFFC;
                     if self.mem.has_synthetic_bios() {
+                        if self.mem.has_nintendo_sdk_irq_dispatcher_at_zero() {
+                            if let Some(word) = synthetic_sdk_irq_wrapper_word(off) {
+                                return word;
+                            }
+                        }
                         if !self.mem.low_vectors_are_blank() && off < ITCM_SIZE {
                             return self.mem.read_itcm32(off);
                         }
@@ -457,6 +496,40 @@ impl<'a> CpuBus for Bus9<'a> {
                                 _ => Irq::Dma3,
                             };
                             self.shared.irq9.request(irq_bit);
+                        }
+                    }
+                    super::io_arm9::Write32Effect::FireSlot1Dma => {
+                        let channels = self
+                            .shared
+                            .dma9
+                            .channels_for_timing(crate::dma::DmaTiming::Slot1);
+                        for ch in channels {
+                            while self.shared.dma9.channels[ch].active
+                                && self.shared.dma9.timing(ch) == crate::dma::DmaTiming::Slot1
+                                && !self.shared.slot1_data.is_empty()
+                            {
+                                let before = self.shared.slot1_data.len();
+                                let irq = self.run_dma(ch);
+                                if irq {
+                                    use crate::interrupt::Irq;
+                                    let irq_bit = match ch {
+                                        0 => Irq::Dma0,
+                                        1 => Irq::Dma1,
+                                        2 => Irq::Dma2,
+                                        _ => Irq::Dma3,
+                                    };
+                                    self.shared.irq9.request(irq_bit);
+                                }
+                                if self.shared.slot1_data.len() >= before {
+                                    break;
+                                }
+                            }
+                            if self.shared.slot1_data.is_empty()
+                                && self.shared.dma9.timing(ch) == crate::dma::DmaTiming::Slot1
+                            {
+                                self.shared.dma9.channels[ch].active = false;
+                                self.shared.dma9.channels[ch].control &= !(1 << 31);
+                            }
                         }
                     }
                     super::io_arm9::Write32Effect::FireGxFifoDma => {
@@ -708,6 +781,35 @@ mod tests {
         );
 
         assert_eq!(bus.read32(0xFFFF_0018), 0xE59F_F00C);
+    }
+
+    #[test]
+    fn test_high_vector_irq_enters_nintendo_sdk_dispatcher_prologue() {
+        let (mut mem, mut shared) = fresh();
+        for (off, word) in [
+            (0x00, 0xE92D_4000u32),
+            (0x04, 0xE3A0_C301),
+            (0x08, 0xE28C_CE21),
+            (0x0C, 0xE51C_1008),
+            (0x18, 0xE89C_0006),
+        ] {
+            mem.itcm[off..off + 4].copy_from_slice(&word.to_le_bytes());
+        }
+
+        let mut bus = Bus9::new(
+            &mut mem,
+            &mut shared,
+            TcmRegion { base: 0, size_bytes: 32 * 1024 },
+            TcmRegion::disabled(),
+        );
+
+        assert_eq!(bus.read32(0x0000_0018), 0xE89C_0006);
+        assert_eq!(bus.read32(0xFFFF_0018), 0xE92D_500F);
+        assert_eq!(bus.read32(0xFFFF_001C), 0xE28F_E008);
+        assert_eq!(bus.read32(0xFFFF_0020), 0xE59F_F010);
+        assert_eq!(bus.read32(0xFFFF_002C), 0xE8BD_500F);
+        assert_eq!(bus.read32(0xFFFF_0030), 0xE25E_F004);
+        assert_eq!(bus.read32(0xFFFF_0038), 0x0000_0000);
     }
 
     #[test]

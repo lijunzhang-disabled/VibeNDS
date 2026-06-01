@@ -5,6 +5,7 @@
 //! and log a trace on write.
 
 use super::SharedState;
+use crate::cart::chip_id::chip_id_for_rom;
 use crate::gpu2d::Engine2d;
 use crate::gpu3d::{GxCmd};
 use crate::interrupt::Irq;
@@ -195,7 +196,7 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x0304 => shared.powcnt1,
         0x0060 => shared.gpu3d.rasterizer.disp3dcnt,
         0x0600 => shared.gpu3d.fifo.stat_low(),
-        0x0602 => 0, // GXSTAT high half — PE busy / polygon count
+        0x0602 => shared.gpu3d.fifo.stat_high(),
         _ => 0,
     }
 }
@@ -240,7 +241,8 @@ pub fn read_io32_mut(shared: &mut SharedState, addr: u32) -> u32 {
     let local = addr & 0x00FF_FFFC;
     match local {
         0x0010_0000 => read_fiforecv(shared),
-        0x0010_0010 => read_slot1_data(shared),
+        0x0010_0010..=0x0010_001C => read_slot1_data(shared),
+        0x01A4 => slot1_romctrl_status_mut(shared),
         _ => read_io32(shared, addr),
     }
 }
@@ -274,6 +276,12 @@ fn read_fiforecv(shared: &mut SharedState) -> u32 {
     val
 }
 
+fn update_gxfifo_irq(shared: &mut SharedState) {
+    if shared.gpu3d.fifo.irq_condition() {
+        shared.irq9.request(Irq::GxFifo);
+    }
+}
+
 fn slot1_romctrl_status(shared: &SharedState) -> u32 {
     let mut v = shared.slot1_romctrl & !((1 << 31) | (1 << 23));
     if !shared.slot1_data.is_empty() {
@@ -282,8 +290,21 @@ fn slot1_romctrl_status(shared: &SharedState) -> u32 {
     v
 }
 
+fn slot1_romctrl_status_mut(shared: &mut SharedState) -> u32 {
+    if !shared.slot1_data.is_empty() && shared.slot1_romctrl & (1 << 31) != 0 {
+        shared.slot1_busy_polls = shared.slot1_busy_polls.saturating_add(1);
+        if shared.slot1_busy_polls >= 8 {
+            shared.slot1_data.clear();
+            shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
+            shared.slot1_busy_polls = 0;
+        }
+    }
+    slot1_romctrl_status(shared)
+}
+
 fn read_slot1_data(shared: &mut SharedState) -> u32 {
     let v = shared.slot1_data.pop_front().unwrap_or(0xFFFF_FFFF);
+    shared.slot1_busy_polls = 0;
     if shared.slot1_data.is_empty() {
         shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
     }
@@ -293,6 +314,7 @@ fn read_slot1_data(shared: &mut SharedState) -> u32 {
 fn start_slot1_transfer(shared: &mut SharedState, val: u32) {
     shared.slot1_romctrl = val;
     shared.slot1_data.clear();
+    shared.slot1_busy_polls = 0;
 
     if val & (1 << 31) == 0 {
         return;
@@ -308,7 +330,7 @@ fn start_slot1_transfer(shared: &mut SharedState, val: u32) {
     match cmd {
         0x00 => queue_rom_bytes(shared, 0, bytes),      // header read
         0x9F => queue_repeat(shared, 0xFFFF_FFFF, bytes), // dummy/reset stream
-        0x90 | 0xB8 => queue_repeat(shared, 0x0000_7FC2, bytes.max(4)),
+        0x90 | 0xB8 => queue_repeat(shared, chip_id_for_rom(&shared.slot1_rom), bytes.max(4)),
         0xA0 => {}
         0xB7 => queue_rom_bytes(shared, param, bytes), // normal data read
         _ => queue_repeat(shared, 0xFFFF_FFFF, bytes),
@@ -316,6 +338,9 @@ fn start_slot1_transfer(shared: &mut SharedState, val: u32) {
 
     if !shared.slot1_data.is_empty() {
         shared.slot1_romctrl |= (1 << 31) | (1 << 23);
+        if val & (1 << 14) != 0 {
+            shared.irq9.request(Irq::Slot1Data);
+        }
     } else {
         shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
     }
@@ -456,6 +481,14 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0204 => shared.exmemcnt = val,
         0x0246 => shared.wramcnt = val as u8,
         0x0060 => shared.gpu3d.rasterizer.disp3dcnt = val,
+        0x0600 => {
+            shared.gpu3d.fifo.set_irq_mode((val >> 14) as u8);
+            update_gxfifo_irq(shared);
+        }
+        0x0602 => {
+            shared.gpu3d.fifo.set_irq_mode((val >> 14) as u8);
+            update_gxfifo_irq(shared);
+        }
         0x0304 => shared.powcnt1 = val,
         0x0330..=0x033F => {
             // EDGE_COLOR table — 8 × u16.
@@ -503,6 +536,7 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
 pub enum Write32Effect {
     None,
     RunDma9(usize),
+    FireSlot1Dma,
     /// GXFIFO crossed below half-full; caller should fire GxFifo DMA.
     FireGxFifoDma,
 }
@@ -525,6 +559,7 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
     if local == 0x0400 {
         shared.gpu3d.fifo.write_packed(val);
         shared.gpu3d.drain_fifo();
+        update_gxfifo_irq(shared);
         if shared.gpu3d.fifo.take_below_half_edge() {
             return Write32Effect::FireGxFifoDma;
         }
@@ -536,6 +571,7 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
         if let Some(cmd) = GxCmd::from_u8(cmd_byte) {
             shared.gpu3d.fifo.write_direct(cmd, val);
             shared.gpu3d.drain_fifo();
+            update_gxfifo_irq(shared);
             if shared.gpu3d.fifo.take_below_half_edge() {
                 return Write32Effect::FireGxFifoDma;
             }
@@ -545,7 +581,15 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
 
     match local {
         0x0188 => { write_fifosend(shared, val); Write32Effect::None }
-        0x01A4 => { start_slot1_transfer(shared, val); Write32Effect::None }
+        0x0600 => {
+            shared.gpu3d.fifo.set_irq_mode((val >> 30) as u8);
+            update_gxfifo_irq(shared);
+            Write32Effect::None
+        }
+        0x01A4 => {
+            start_slot1_transfer(shared, val);
+            Write32Effect::FireSlot1Dma
+        }
         0x01A8 | 0x01AC => {
             for i in 0..4 {
                 shared.slot1_command[(local - 0x01A8) as usize + i] = (val >> (i * 8)) as u8;
@@ -575,6 +619,9 @@ fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Wr
             let effect = shared.dma9.write_control(ch, val);
             match effect {
                 WriteControlEffect::RunNow => Write32Effect::RunDma9(ch),
+                WriteControlEffect::Armed(crate::dma::DmaTiming::Slot1) if !shared.slot1_data.is_empty() => {
+                    Write32Effect::FireSlot1Dma
+                }
                 _ => Write32Effect::None,
             }
         }

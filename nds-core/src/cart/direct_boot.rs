@@ -5,6 +5,7 @@
 //! Reference: GBATEK §"DS Cartridge Header" + §"DS Direct Boot".
 
 use crate::bus::{Arm7Memory, SharedState};
+use crate::cart::chip_id::chip_id_for_rom;
 use crate::cpu::{Cpu, CpuMode, Psr};
 use super::header::CartHeader;
 
@@ -48,7 +49,7 @@ pub fn apply(
     copy_binary(shared, mem7, rom, header.arm7_rom_offset, header.arm7_load, header.arm7_size, "ARM7")?;
     copy_header_into_ram(shared, rom);
     initialize_argv_header(shared);
-    write_boot_indicators(shared, header);
+    write_boot_indicators(shared, header, rom);
 
     setup_arm9(cpu9, header.arm9_entry);
     setup_arm7(cpu7, header.arm7_entry);
@@ -165,8 +166,8 @@ fn initialize_argv_header(shared: &mut SharedState) {
 
 /// Write the boot indicator words at `0x027FF800-0x027FFC00` that real DS
 /// firmware leaves behind. Only the ones games actually read are populated.
-fn write_boot_indicators(shared: &mut SharedState, header: &CartHeader) {
-    let chip_id: u32 = 0x0000_00C2;
+fn write_boot_indicators(shared: &mut SharedState, header: &CartHeader, rom: &[u8]) {
+    let chip_id = chip_id_for_rom(rom);
     let off = main_ram_offset(0x027F_F800);
     shared.main_ram[off..off + 4].copy_from_slice(&chip_id.to_le_bytes());
     // Mirror at 0x027FF804

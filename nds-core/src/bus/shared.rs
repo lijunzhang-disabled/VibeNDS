@@ -125,6 +125,7 @@ pub struct SharedState {
     pub slot1_romctrl: u32,
     pub slot1_command: [u8; 8],
     pub slot1_data: VecDeque<u32>,
+    pub slot1_busy_polls: u8,
 
     /// Emulator-backed DLDI/FAT block-device image. Empty means lazily
     /// initialize the default test volume on first DLDI access.
@@ -176,6 +177,7 @@ impl SharedState {
             slot1_romctrl: 0,
             slot1_command: [0; 8],
             slot1_data: VecDeque::new(),
+            slot1_busy_polls: 0,
             dldi_fat_image: Vec::new(),
             gpu3d: Engine3d::new(),
             math: MathUnit::new(),

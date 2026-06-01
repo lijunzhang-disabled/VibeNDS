@@ -6,6 +6,7 @@
 pub mod header;
 pub mod direct_boot;
 pub mod auxspi;
+pub mod chip_id;
 
 pub use header::{CartHeader, ParseError, HEADER_SIZE};
 pub use direct_boot::{apply as direct_boot_apply, DirectBootError};

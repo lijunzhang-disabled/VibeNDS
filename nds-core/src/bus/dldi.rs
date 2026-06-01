@@ -238,12 +238,12 @@ fn make_fat16_image() -> Vec<u8> {
         b[14..16].copy_from_slice(&(RESERVED as u16).to_le_bytes());
         b[16] = FAT_COUNT as u8;
         b[17..19].copy_from_slice(&(ROOT_ENTRIES as u16).to_le_bytes());
-        b[19..21].copy_from_slice(&0u16.to_le_bytes());
+        b[19..21].copy_from_slice(&(DLDI_SECTORS as u16).to_le_bytes());
         b[21] = 0xF8;
         b[22..24].copy_from_slice(&(SECTORS_PER_FAT as u16).to_le_bytes());
         b[24..26].copy_from_slice(&32u16.to_le_bytes());
         b[26..28].copy_from_slice(&64u16.to_le_bytes());
-        b[32..36].copy_from_slice(&(DLDI_SECTORS as u32).to_le_bytes());
+        b[32..36].copy_from_slice(&0u32.to_le_bytes());
         b[36] = 0x80;
         b[38] = 0x29;
         b[39..43].copy_from_slice(&0x564E_4453u32.to_le_bytes());
@@ -354,6 +354,10 @@ mod tests {
         assert_eq!(reply >> 6, 1);
         let off = main_ram_offset(0x0200_8000);
         assert_eq!(&shared.main_ram[off + 54..off + 62], b"FAT16   ");
+        assert_eq!(
+            u16::from_le_bytes(shared.main_ram[off + 19..off + 21].try_into().unwrap()),
+            DLDI_SECTORS as u16
+        );
         assert_eq!(&shared.main_ram[off + 510..off + 512], &[0x55, 0xAA]);
     }
 }
