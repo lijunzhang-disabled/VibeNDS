@@ -243,10 +243,13 @@ fn draw_wire_line(
                     rast.alpha_buffer[idx] = 31;
                     rast.depth_buffer[idx] = depth_24;
                 }
-                rast.id_buffer[idx] = poly_id;
+                if !preserve_edge {
+                    rast.id_buffer[idx] = poly_id;
+                }
                 update_translucent_id(rast, idx, poly_id, effective_alpha);
                 update_edge_flag(rast, idx, effective_alpha, preserve_edge);
                 update_fog_flag(rast, idx, attr, effective_alpha);
+                rast.zero_dot_buffer[idx] = 0;
             }
         }
         if advance_line_cursor(&mut x0, &mut y0, x1, y1, sx, sy, dx, dy, &mut err) {
@@ -369,10 +372,13 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
             rast.alpha_buffer[idx] = 31;
             rast.depth_buffer[idx] = depth_24;
         }
-        rast.id_buffer[idx] = poly_id;
+        if !preserve_edge {
+            rast.id_buffer[idx] = poly_id;
+        }
         update_translucent_id(rast, idx, poly_id, effective_alpha);
         update_edge_flag(rast, idx, effective_alpha, preserve_edge);
         update_fog_flag(rast, idx, attr, effective_alpha);
+        rast.zero_dot_buffer[idx] = if effective_alpha == 31 { 1 } else { 0 };
     }
 }
 
@@ -685,10 +691,13 @@ fn rasterize_scanline(
                 rast.alpha_buffer[idx] = 31;
                 rast.depth_buffer[idx] = depth_24;
             }
-            rast.id_buffer[idx] = a.poly_id;
+            if !preserve_edge {
+                rast.id_buffer[idx] = a.poly_id;
+            }
             update_translucent_id(rast, idx, a.poly_id, effective_alpha);
             update_edge_flag(rast, idx, effective_alpha, preserve_edge);
             update_fog_flag(rast, idx, a.attr, effective_alpha);
+            rast.zero_dot_buffer[idx] = 0;
         }
     }
 }
@@ -1355,6 +1364,55 @@ mod tests {
     }
 
     #[test]
+    fn test_translucent_polygon_does_not_update_depth_without_attr_bit11() {
+        let mut r = Rasterizer::new();
+        let mut base = colored_poly(
+            vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 30, 0x7C00)],
+            31,
+        );
+        for v in &mut base.vertices {
+            v.depth_z = 2048;
+        }
+        let mut translucent = colored_poly(
+            vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 30, 0x001F)],
+            16,
+        );
+        for v in &mut translucent.vertices {
+            v.depth_z = 0;
+        }
+
+        r.render_frame(&[base, translucent], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        assert_eq!(r.depth_buffer[idx], depth_to_buffer(2048, 0, false));
+    }
+
+    #[test]
+    fn test_translucent_polygon_updates_depth_with_attr_bit11() {
+        let mut r = Rasterizer::new();
+        let mut base = colored_poly(
+            vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 30, 0x7C00)],
+            31,
+        );
+        for v in &mut base.vertices {
+            v.depth_z = 2048;
+        }
+        let mut translucent = colored_poly(
+            vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 30, 0x001F)],
+            16,
+        );
+        translucent.attr |= 1 << 11;
+        for v in &mut translucent.vertices {
+            v.depth_z = 0;
+        }
+
+        r.render_frame(&[base, translucent], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        assert_eq!(r.depth_buffer[idx], depth_to_buffer(0, 0, false));
+    }
+
+    #[test]
     fn test_translucent_alpha_buffer_records_fragment_alpha() {
         let mut r = Rasterizer::new();
         let red = colored_poly(
@@ -1492,6 +1550,7 @@ mod tests {
         let mut r = Rasterizer::new();
         r.disp3dcnt = (1 << 3) | (1 << 5); // alpha blend + edge marking.
         r.edge_color[0] = 0x03E0;
+        r.edge_color[1] = 0x001F;
 
         let opaque = colored_poly_with_id(
             vec![
@@ -1509,7 +1568,7 @@ mod tests {
                 sv(125, 150, 0x001F),
             ],
             16,
-            0,
+            8,
         );
 
         r.render_frame(&[opaque, translucent], None);
@@ -1518,6 +1577,7 @@ mod tests {
             let idx = 100 * FB_WIDTH + x;
             if r.framebuffer[idx] & (1 << 15) != 0 {
                 assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x03E0);
+                assert_eq!(r.id_buffer[idx], 0);
                 return;
             }
         }
@@ -1883,6 +1943,66 @@ mod tests {
     }
 
     #[test]
+    fn test_antialiasing_hides_opaque_zero_dot_polygon() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 4;
+        let p = poly(vec![
+            sv(10, 10, 0x001F),
+            sv(10, 10, 0x03E0),
+            sv(10, 10, 0x7C00),
+        ]);
+
+        r.render_frame(&[p], None);
+
+        let idx = (10 * FB_WIDTH) + 10;
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
+        assert_eq!(r.alpha_buffer[idx], 0);
+    }
+
+    #[test]
+    fn test_edge_marking_keeps_antialiased_zero_dot_polygon_visible() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = (1 << 4) | (1 << 5);
+        r.edge_color[0] = 0x03E0;
+        let p = poly(vec![
+            sv(10, 10, 0x001F),
+            sv(10, 10, 0x001F),
+            sv(10, 10, 0x001F),
+        ]);
+
+        r.render_frame(&[p], None);
+
+        let idx = (10 * FB_WIDTH) + 10;
+        assert_ne!(r.framebuffer[idx] & (1 << 15), 0);
+        assert_ne!(r.alpha_buffer[idx], 0);
+    }
+
+    #[test]
+    fn test_antialiasing_keeps_translucent_zero_dot_polygon_visible() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = (1 << 3) | (1 << 4);
+        let mut base = colored_poly_with_id(
+            vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 30, 0x7C00)],
+            31,
+            1,
+        );
+        for v in &mut base.vertices {
+            v.depth_z = 2048;
+        }
+        let point = colored_poly_with_id(
+            vec![sv(30, 15, 0x001F), sv(30, 15, 0x001F), sv(30, 15, 0x001F)],
+            16,
+            2,
+        );
+
+        r.render_frame(&[base, point], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        assert_ne!(r.framebuffer[idx] & (1 << 15), 0);
+        assert_ne!(r.alpha_buffer[idx], 0);
+    }
+
+    #[test]
     fn test_shadow_mask_polygon_does_not_write_color() {
         let mut r = Rasterizer::new();
         let p = shadow_poly(
@@ -1913,6 +2033,22 @@ mod tests {
     }
 
     #[test]
+    fn test_shadow_mask_zero_dot_does_not_write_color() {
+        let mut r = Rasterizer::new();
+        let p = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(10, 10, 0x0000), sv(10, 10, 0x0000)],
+            0,
+        );
+
+        r.render_frame(&[p], None);
+
+        let idx = (10 * FB_WIDTH) + 10;
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
+        assert_eq!(r.shadow_stencil[idx], 1);
+        assert_eq!(r.zero_dot_buffer[idx], 0);
+    }
+
+    #[test]
     fn test_visible_shadow_line_draws_only_where_mask_is_clear() {
         let mut r = Rasterizer::new();
         let visible = shadow_poly(
@@ -1927,6 +2063,29 @@ mod tests {
 
         let mask = shadow_poly(
             vec![sv(10, 10, 0x0000), sv(20, 10, 0x0000), sv(10, 10, 0x0000)],
+            0,
+        );
+        r.render_frame(&[mask, visible], None);
+
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
+        assert_eq!(r.shadow_stencil[idx], 0);
+    }
+
+    #[test]
+    fn test_visible_shadow_zero_dot_draws_only_where_mask_is_clear() {
+        let mut r = Rasterizer::new();
+        let visible = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(10, 10, 0x0000), sv(10, 10, 0x0000)],
+            1,
+        );
+
+        r.render_frame(&[visible.clone()], None);
+
+        let idx = (10 * FB_WIDTH) + 10;
+        assert_ne!(r.framebuffer[idx] & (1 << 15), 0);
+
+        let mask = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(10, 10, 0x0000), sv(10, 10, 0x0000)],
             0,
         );
         r.render_frame(&[mask, visible], None);

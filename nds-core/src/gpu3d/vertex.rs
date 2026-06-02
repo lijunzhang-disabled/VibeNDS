@@ -684,6 +684,34 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_polygon_attr_writes_during_list_keep_only_last_pending_value() {
+        let mut v = VertexState::new();
+        let s = ident_stacks();
+
+        v.set_polygon_attr(0x1111_1111);
+        v.begin(PrimitiveType::Triangles);
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
+        assert_eq!(v.polygon_buffer[0].attr, 0x1111_1111);
+
+        v.set_polygon_attr(0x2222_2222);
+        v.set_polygon_attr(0x3333_3333);
+        v.set_polygon_attr(0x4444_4444);
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
+        assert_eq!(v.polygon_buffer[1].attr, 0x1111_1111);
+
+        v.begin(PrimitiveType::Triangles);
+        for _ in 0..3 {
+            v.submit_vertex([0, 0, 0], &s);
+        }
+
+        assert_eq!(v.polygon_buffer[2].attr, 0x4444_4444);
+    }
+
+    #[test]
     fn test_begin_vtxs_restarts_list_and_discards_partial_vertices() {
         let mut v = VertexState::new();
         let s = ident_stacks();

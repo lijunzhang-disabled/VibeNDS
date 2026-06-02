@@ -33,6 +33,10 @@ fn default_alpha_buffer() -> Vec<u8> {
     vec![0u8; FB_PIXELS]
 }
 
+fn default_zero_dot_buffer() -> Vec<u8> {
+    vec![0u8; FB_PIXELS]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rasterizer {
     /// 256×192 framebuffer in BGR555. Bit 15 = "pixel was written this
@@ -70,6 +74,13 @@ pub struct Rasterizer {
     /// 256×192 per-pixel fog enable flag, latched from POLYGON_ATTR bit 15.
     #[serde(with = "crate::bus::shared::serde_bytes_vec")]
     pub fog_enable_buffer: Vec<u8>,
+    /// 256×192 flag for pixels emitted by the zero-size polygon point path.
+    /// Anti-aliasing has a hardware quirk for opaque 1-dot polygons.
+    #[serde(
+        default = "default_zero_dot_buffer",
+        with = "crate::bus::shared::serde_bytes_vec"
+    )]
+    pub zero_dot_buffer: Vec<u8>,
     /// 256×192 shadow stencil buffer. Shadow polygon mode first writes a
     /// mask with polygon ID 0, then draws visible shadow polygons against it.
     #[serde(with = "crate::bus::shared::serde_bytes_vec")]
@@ -128,6 +139,7 @@ impl Rasterizer {
             edge_enable_buffer: vec![0u8; FB_PIXELS],
             translucent_id_buffer: vec![0xFFu8; FB_PIXELS],
             fog_enable_buffer: vec![0u8; FB_PIXELS],
+            zero_dot_buffer: vec![0u8; FB_PIXELS],
             shadow_stencil: vec![0u8; FB_PIXELS],
             clear_color: 0,
             clear_depth: 0x7FFF,
@@ -201,6 +213,9 @@ impl Rasterizer {
         for f in self.fog_enable_buffer.iter_mut() {
             *f = clear_fog;
         }
+        for z in self.zero_dot_buffer.iter_mut() {
+            *z = 0;
+        }
         for s in self.shadow_stencil.iter_mut() {
             *s = 0;
         }
@@ -228,6 +243,7 @@ impl Rasterizer {
                 self.edge_enable_buffer[idx] = 0;
                 self.translucent_id_buffer[idx] = 0xFF;
                 self.fog_enable_buffer[idx] = if depth & (1 << 15) != 0 { 1 } else { 0 };
+                self.zero_dot_buffer[idx] = 0;
                 self.shadow_stencil[idx] = 0;
             }
         }

@@ -155,12 +155,19 @@ fn apply_antialiasing(rast: &mut Rasterizer) {
     let ids = rast.id_buffer.clone();
     let depths = rast.depth_buffer.clone();
     let edge_enabled = rast.edge_enable_buffer.clone();
+    let zero_dot = rast.zero_dot_buffer.clone();
     let rear = (rast.clear_color & 0x7FFF) as u16;
+    let edge_marking = rast.disp3dcnt & (1 << 5) != 0;
 
     for y in 0..FB_HEIGHT {
         for x in 0..FB_WIDTH {
             let idx = y * FB_WIDTH + x;
             if fb_snapshot[idx] & (1 << 15) == 0 || edge_enabled[idx] == 0 {
+                continue;
+            }
+            if zero_dot[idx] != 0 && !edge_marking {
+                rast.framebuffer[idx] &= !(1 << 15);
+                rast.alpha_buffer[idx] = 0;
                 continue;
             }
             let center = ids[idx];

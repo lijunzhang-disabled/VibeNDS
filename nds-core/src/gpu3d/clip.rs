@@ -187,6 +187,8 @@ mod tests {
     use super::super::matrix::ONE;
     use super::*;
 
+    const MAX_CLIPPED_VERTICES_PER_POLYGON: usize = 10;
+
     fn vtx(x: i32, y: i32, z: i32, w: i32, color: u16) -> Vertex {
         Vertex::new([x, y, z, w], color, [0, 0])
     }
@@ -293,6 +295,35 @@ mod tests {
         for v in &out {
             assert!(v.clip[0] >= -v.clip[3]);
             assert!(v.clip[0] <= v.clip[3]);
+            assert!(v.clip[2] >= -v.clip[3]);
+            assert!(v.clip[2] <= v.clip[3]);
+        }
+    }
+
+    #[test]
+    fn test_clipped_quad_stays_within_hardware_vertex_limit() {
+        // A hardware input polygon is either a triangle or a quad. Even when
+        // a quad crosses multiple clip planes, the clipped polygon must fit
+        // the DS per-polygon storage contract.
+        let q = vec![
+            vtx(-2 * ONE, -ONE / 2, ONE / 4, ONE, 0x001F),
+            vtx(ONE / 2, -2 * ONE, ONE / 4, ONE, 0x03E0),
+            vtx(2 * ONE, ONE / 2, ONE / 4, ONE, 0x7C00),
+            vtx(-ONE / 2, 2 * ONE, ONE / 4, ONE, 0x7FFF),
+        ];
+
+        let out = clip_polygon(&q).expect("clipped quad");
+
+        assert!(
+            out.len() <= MAX_CLIPPED_VERTICES_PER_POLYGON,
+            "clipped quad produced {} vertices",
+            out.len()
+        );
+        for v in &out {
+            assert!(v.clip[0] >= -v.clip[3]);
+            assert!(v.clip[0] <= v.clip[3]);
+            assert!(v.clip[1] >= -v.clip[3]);
+            assert!(v.clip[1] <= v.clip[3]);
             assert!(v.clip[2] >= -v.clip[3]);
             assert!(v.clip[2] <= v.clip[3]);
         }
