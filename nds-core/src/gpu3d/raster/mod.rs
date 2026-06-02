@@ -279,18 +279,17 @@ impl Default for Rasterizer {
 
 fn is_translucent(p: &ScreenPolygon) -> bool {
     let alpha = (p.attr >> 16) & 0x1F;
-    if alpha == 0 {
-        return false;
-    }
-    if alpha != 0 && alpha != 31 {
+    if alpha > 0 && alpha != 31 {
         return true;
     }
 
     // A3I5 and A5I3 carry per-texel alpha. In modulation and toon/highlight
-    // modes, that alpha contributes to the final pixel alpha even when
-    // POLYGON_ATTR alpha=31, so these polygons need the late translucent pass.
+    // modes, that alpha contributes to the final pixel alpha when
+    // POLYGON_ATTR alpha=31. Alpha=0 wireframe polygons use Av=31 for their
+    // edge fragments, so the same texture-alpha rule applies to their edges.
     // Decal mode uses texture alpha only as a color-mix ratio; final alpha is
-    // Av, so an alpha=31 decal polygon remains opaque.
+    // Av, so alpha=31 decal polygons and alpha=0 decal wireframes remain
+    // opaque for render-order purposes.
     let mode = (p.attr >> 4) & 0x3;
     let tex_format = (p.tex_image_param >> 26) & 0x7;
     matches!(mode, 0 | 2) && matches!(tex_format, 1 | 6)
@@ -304,6 +303,32 @@ fn polygon_y_sort_key(p: &&ScreenPolygon) -> i32 {
 mod tests {
     use super::*;
     use crate::vram::{BankId, VramRouter};
+
+    fn sv(x: i32, y: i32, color: u16) -> super::super::viewport::ScreenVertex {
+        super::super::viewport::ScreenVertex {
+            screen_x: x << 8,
+            screen_y: y << 8,
+            depth_z: 0,
+            w: 4096,
+            color,
+            tex: [0, 0],
+        }
+    }
+
+    fn vram_with_a5i3_green_alpha(alpha: u8) -> VramRouter {
+        let mut v = VramRouter::new();
+        v.write_cnt(BankId::A, 0x80 | 3);
+        v.write_cnt(BankId::E, 0x80 | 3);
+
+        for texel in v.banks[BankId::A as usize].data.iter_mut().take(64) {
+            *texel = ((alpha & 0x1F) << 3) | 1;
+        }
+
+        let palette = &mut v.banks[BankId::E as usize].data;
+        palette[2] = 0xE0;
+        palette[3] = 0x03;
+        v
+    }
 
     #[test]
     fn test_clear_color_bit15_initializes_rear_plane_fog_flag() {
@@ -391,10 +416,82 @@ mod tests {
     }
 
     #[test]
+    fn test_wireframe_translucent_texture_formats_are_sorted_with_translucent_polygons() {
+        let p = ScreenPolygon {
+            vertices: Vec::new(),
+            attr: (1 << 6) | (1 << 7),
+            tex_image_param: 6 << 26,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+
+        assert!(is_translucent(&p));
+    }
+
+    #[test]
+    fn test_wireframe_translucent_texture_renders_after_opaque_polygons() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 | (1 << 3); // texture mapping + alpha blend.
+        let vram = vram_with_a5i3_green_alpha(15);
+
+        let mut wire = ScreenPolygon {
+            vertices: vec![sv(20, 20, 0x7FFF), sv(40, 20, 0x7FFF), sv(20, 20, 0x7FFF)],
+            attr: (1 << 6) | (1 << 7),
+            tex_image_param: 6 << 26,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+        for v in &mut wire.vertices {
+            v.depth_z = 0;
+        }
+
+        let mut opaque = ScreenPolygon {
+            vertices: vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 40, 0x001F)],
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 0,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+        for v in &mut opaque.vertices {
+            v.depth_z = 100;
+        }
+
+        r.render_frame(&[wire, opaque], Some(&vram));
+
+        let idx = 20 * FB_WIDTH + 30;
+        let color = r.framebuffer[idx] & 0x7FFF;
+        assert_ne!(
+            color, 0x001F,
+            "late translucent wireframe should blend over opaque red"
+        );
+        assert!(
+            (color & 0x1F) > 0,
+            "red contribution should remain after blend"
+        );
+        assert!(
+            ((color >> 5) & 0x1F) > 0,
+            "green wireframe should contribute after blend"
+        );
+    }
+
+    #[test]
     fn test_opaque_decal_translucent_texture_stays_in_opaque_pass() {
         let p = ScreenPolygon {
             vertices: Vec::new(),
             attr: (1 << 4) | (31 << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 6 << 26,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+
+        assert!(!is_translucent(&p));
+    }
+
+    #[test]
+    fn test_wireframe_decal_translucent_texture_stays_in_opaque_pass() {
+        let p = ScreenPolygon {
+            vertices: Vec::new(),
+            attr: (1 << 4) | (1 << 6) | (1 << 7),
             tex_image_param: 6 << 26,
             palette_base: 0,
             front_area_negative: true,

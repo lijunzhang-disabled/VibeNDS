@@ -1910,6 +1910,31 @@ mod tests {
     }
 
     #[test]
+    fn test_pos_test_seeds_inherited_vertex_position_components() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_05C4, (2u32 << 12) | ((3u32 << 12) << 16));
+        bus.write32(0x0400_05C4, 4u32 << 12);
+
+        bus.write32(0x0400_0500, 0); // BEGIN_VTXS triangles
+        bus.write32(0x0400_0494, (5u32 << 12) | ((6u32 << 12) << 16)); // VTX_XY
+
+        assert_eq!(
+            bus.shared.gpu3d.vertex.last_pos,
+            [5 << 12, 6 << 12, 4 << 12]
+        );
+        assert_eq!(bus.shared.gpu3d.vertex.vertex_buffer[0].clip[0], 5 << 12);
+        assert_eq!(bus.shared.gpu3d.vertex.vertex_buffer[0].clip[1], 6 << 12);
+        assert_eq!(bus.shared.gpu3d.vertex.vertex_buffer[0].clip[2], 4 << 12);
+    }
+
+    #[test]
     fn test_geometry_result_registers_support_halfword_reads() {
         let mut nds = Nds::new(None, None);
         nds.shared.gpu3d.stacks.vector.m[0] = 0x1234_5678;

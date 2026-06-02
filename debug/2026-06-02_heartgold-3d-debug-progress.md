@@ -1377,3 +1377,200 @@ Result:
 
 - Stack targeted release tests: `21 passed; 0 failed`.
 - `nds-core` full release suite: `493 passed; 0 failed`.
+
+## 2026-06-02 correction: zero-dot wireframe polygons keep fixed edge alpha
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+came from GBATEK's `POLYGON_ATTR` alpha description plus local raster path
+inspection.
+
+### Symptom class
+
+- `POLYGON_ATTR.alpha=0` selects wireframe rendering.
+- The normal wireframe line path already treated those edge pixels as fixed
+  alpha 31, matching the hardware rule.
+- A degenerate polygon whose vertices all collapse to the same screen pixel
+  takes the zero-dot `draw_point()` path instead of the wire-line path.
+- That point path read `POLYGON_ATTR.alpha=0` as an effective transparent
+  alpha and returned without writing the pixel.
+
+### Root cause
+
+- `draw_wire_line()` had the alpha-0 wireframe special case:
+  `attr alpha 0 -> edge alpha 31`.
+- `draw_point()` did not share that special case, even though zero-dot
+  polygons are another degenerate edge-only case in the same raster branch.
+- The result was inconsistent raster behavior:
+  - degenerate line with alpha 0 rendered as an opaque wire edge,
+  - degenerate point with alpha 0 disappeared.
+
+### Spec basis
+
+- GBATEK documents `POLYGON_ATTR` alpha as:
+  - `0 = Wire-Frame`,
+  - `1..30 = Translucent`,
+  - `31 = Solid`.
+- It also states that the interior of wireframe polygons is transparent and
+  only polygon edge lines are rendered, using fixed alpha 31.
+- A zero-dot degenerate polygon has no interior to fill, so the visible
+  edge-only fragment should use the same fixed wireframe alpha as degenerate
+  lines.
+
+### Fix
+
+- Changed `draw_point()` to translate `POLYGON_ATTR.alpha=0` to effective
+  polygon alpha 31 before calling `final_alpha()`, matching `draw_wire_line()`.
+- Left normal translucent zero-dot behavior unchanged for alpha `1..30`.
+- Left alpha-test/depth/shadow/translucent-ID behavior unchanged after the
+  corrected effective alpha is computed.
+
+Tests added:
+
+```text
+test_zero_dot_wireframe_polygon_uses_fixed_opaque_alpha
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::raster::triangle --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- Raster triangle targeted release tests: `43 passed; 0 failed`.
+- `nds-core` full release suite: `494 passed; 0 failed`.
+
+## 2026-06-02 conformance coverage: POS_TEST seeds inherited vertex coordinates
+
+Status: **Coverage added; no implementation change required**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from ndsdoc's `POS_TEST` note plus local ARM9 I/O behavior inspection.
+
+### Rule checked
+
+- `POS_TEST` multiplies `(x, y, z, 1)` by the position/projection path and
+  writes the result registers at `0x04000620..=0x0400062F`.
+- ndsdoc also notes that the command updates the coordinate state inherited by
+  partial vertex-position commands.
+- Therefore a later `VTX_XY` should use the Z coordinate supplied by the most
+  recent `POS_TEST`, even though `POS_TEST` itself does not submit a polygon
+  vertex.
+
+### Local result
+
+The current implementation already matched the documented side effect:
+
+- `handle_pos_test()` decodes the same 16-bit position format as `VTX_16`,
+- stores the decoded position in `vertex.last_pos`,
+- writes only the test-result registers and does not submit a vertex.
+
+I added direct ARM9 I/O coverage because this behavior is easy to remove by
+mistake when treating `POS_TEST` as a pure readback-only command.
+
+Tests added:
+
+```text
+test_pos_test_seeds_inherited_vertex_position_components
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core test_pos_test --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- POS_TEST targeted release tests: `2 passed; 0 failed`.
+- `nds-core` full release suite: `495 passed; 0 failed`.
+
+## 2026-06-02 fix: alpha=0 wireframe translucent texture render order
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from GBATEK display-control, polygon-attribute, and texture-attribute rules
+plus local raster pipeline inspection.
+
+### Symptom
+
+HeartGold's title scene was still visually unstable after the earlier geometry
+fixes. One local mismatch found during the raster audit was that wireframe
+polygons with translucent texture formats could be classified into the opaque
+render pass even though their final edge fragments can be translucent.
+
+The concrete bad case:
+
+- `POLYGON_ATTR.alpha = 0` marks a polygon as wireframe.
+- Wireframe edge fragments use fixed polygon alpha 31.
+- A3I5/A5I3 texture formats carry per-texel alpha.
+- In modulation and toon/highlight texture modes, the texture alpha contributes
+  to the final fragment alpha.
+- If such a polygon was submitted before opaque geometry, the old pass
+  classifier drew it in the opaque pass, so a later opaque polygon could
+  overwrite it instead of letting the wireframe edge draw/blend in the late
+  translucent pass.
+
+### Root cause
+
+`is_translucent()` returned `false` immediately when
+`POLYGON_ATTR.alpha == 0`. That was correct for plain wireframe edges because
+their fixed effective edge alpha is 31, but it ignored texture alpha. The
+lower-level wireframe raster path already used texture alpha for A3I5/A5I3
+edge fragments, so render-order classification and pixel shading disagreed.
+
+### Spec basis
+
+- GBATEK's polygon attribute table defines alpha 0 as wireframe and notes that
+  wireframe edge lines use fixed alpha 31.
+- GBATEK's display-control notes describe alpha testing/blending as applying
+  to final polygon pixels after texture blending.
+- GBATEK's texture-attribute table marks A3I5 and A5I3 as translucent texture
+  formats.
+
+The combination means alpha-0 wireframes are not automatically translucent,
+but alpha-0 wireframes using translucent texture alpha in modulation or
+toon/highlight mode can produce final alpha below 31 and therefore belong in
+the translucent render pass.
+
+Decal mode remains different: decal texture alpha controls color mixing while
+the final fragment alpha remains the polygon alpha. For alpha-0 wireframe
+edges, that effective polygon alpha is 31, so decal wireframes remain opaque
+for render-order purposes.
+
+### Fix
+
+- Removed the early `alpha == 0 => opaque` return from `is_translucent()`.
+- Kept `alpha 1..30` as translucent.
+- Applied the existing A3I5/A5I3 texture-alpha classification to both
+  `alpha == 31` solid polygons and `alpha == 0` wireframe polygons in
+  modulation/toon modes.
+- Kept A3I5/A5I3 decal wireframes in the opaque pass.
+
+Tests added:
+
+```text
+test_wireframe_translucent_texture_formats_are_sorted_with_translucent_polygons
+test_wireframe_translucent_texture_renders_after_opaque_polygons
+test_wireframe_decal_translucent_texture_stays_in_opaque_pass
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core wireframe_translucent_texture --release
+cargo test -p nds-core gpu3d::raster --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- Wireframe translucent texture targeted release tests: `2 passed; 0 failed`.
+- Raster module release tests: `85 passed; 0 failed`.
+- `nds-core` full release suite: `498 passed; 0 failed`.

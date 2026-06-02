@@ -327,7 +327,8 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
     }
 
     let mode = ((attr >> 4) & 0x3) as u8;
-    let poly_alpha = ((attr >> 16) & 0x1F) as u8;
+    let attr_alpha = ((attr >> 16) & 0x1F) as u8;
+    let poly_alpha = if attr_alpha == 0 { 31 } else { attr_alpha };
     let effective_alpha = final_alpha(mode, 31, poly_alpha);
     if effective_alpha == 0 {
         return;
@@ -1818,6 +1819,24 @@ mod tests {
         let idx = (10 * FB_WIDTH) + 10;
         assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x001F);
         assert_eq!(r.framebuffer[idx] & (1 << 15), 1 << 15);
+    }
+
+    #[test]
+    fn test_zero_dot_wireframe_polygon_uses_fixed_opaque_alpha() {
+        let mut r = Rasterizer::new();
+        let mut p = poly(vec![
+            sv(10, 10, 0x001F),
+            sv(10, 10, 0x03E0),
+            sv(10, 10, 0x7C00),
+        ]);
+        p.attr &= !(0x1F << 16);
+
+        r.render_frame(&[p], None);
+
+        let idx = (10 * FB_WIDTH) + 10;
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x001F);
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 1 << 15);
+        assert_eq!(r.alpha_buffer[idx], 31);
     }
 
     #[test]
