@@ -54,6 +54,10 @@ ARM9 writes to 0x04000400:
 After all 3 words are consumed, the 3D engine has executed 4 commands in declaration order: `MTX_PUSH` (zero params, fires immediately), `MTX_MODE 2`, `MTX_IDENTITY` (zero params, fires when its declaration slot is reached), `MTX_POP 5`.
 
 Padding with `0x00` is valid — null bytes in the packed-cmd word are silently skipped.
+However, if the final real command in a packed command word takes zero
+parameters, the next FIFO word is a dummy word before another command word can
+begin. This applies even when the command word used zero padding after that
+last command.
 
 ### 2b. Direct ports — `0x04000440..0x040005FF`
 
@@ -191,6 +195,11 @@ Hardware-accelerated frustum / position / vector tests; results go to `GXSTAT`. 
 | 0x70 | BOX_TEST | 3 |
 | 0x71 | POS_TEST | 2 |
 | 0x72 | VEC_TEST | 1 |
+
+`VEC_TEST` uses the directional/vector matrix and must be issued with
+`MTX_MODE = 2` selected. `POS_TEST` also updates the inherited vertex-position
+state, so a following relative vertex command will be relative to the tested
+position.
 
 That's ~50 commands. Every one falls into one of six buckets: "update a matrix," "set a vertex attribute," "submit a vertex," "set lighting/material," "bracket a primitive group," or "test." The whole 3D engine is administrative wiring around per-vertex matrix algebra.
 

@@ -567,6 +567,20 @@ mod tests {
     }
 
     #[test]
+    fn test_texcoord_transform_mode_2_uses_normal_source() {
+        let mut v = VertexState::new();
+        let mut s = ident_stacks();
+        s.set_mode(MtxMode::Texture);
+        s.load(Matrix::identity().mul_scale(8 * ONE, 4 * ONE, ONE));
+
+        v.set_tex_image_param(2 << 30);
+        v.set_texcoord((20u32 << 16) | 10, &s);
+        v.apply_normal_texcoord_transform([0x100, 0x100, 0], &s);
+
+        assert_eq!(v.current_tex, [10 + (4 << 4), 20 + (2 << 4)]);
+    }
+
+    #[test]
     fn test_texcoord_transform_mode_3_uses_vertex_source() {
         let mut v = VertexState::new();
         let mut s = ident_stacks();

@@ -765,3 +765,115 @@ Result:
 - `gxstat` targeted tests: passed.
 - `gpu3d::viewport` targeted tests: passed.
 - `nds-core` full release suite: `475 passed; 0 failed`.
+
+## 2026-06-02 correction: packed zero-param tail dummy
+
+Status: **Fixed after correcting the earlier interpretation**
+
+Direct reference-emulator implementation use for this correction: **0**. The
+trigger was re-reading the ndsdoc 3D Geometry Engine FIFO text.
+
+### What was wrong in the previous note
+
+The earlier follow-up section said the packed zero-parameter tail dummy was
+"too broad" and only required the dummy when all four command slots were
+occupied. That interpretation was too narrow.
+
+ndsdoc states that when using the FIFO directly, if the last command in a
+command word has no parameter, software must write `0` as a dummy parameter
+before the hardware accepts a new command word. The same paragraph also says
+invalid command indices behave like command index `0`, and a later note says
+zero command indices may only appear as trailing padding.
+
+The important correction is:
+
+- zero bytes still terminate/pad the command word;
+- but the "last command" means the last real non-zero command before that
+  padding;
+- if that real command has zero parameters, the next FIFO word is still a
+  dummy.
+
+### Symptom class
+
+- A command stream like `MTX_PUSH` followed immediately by `MTX_MODE` through
+  the packed FIFO was decoded as two command words.
+- Hardware expects the second word to be consumed as the dummy for
+  `MTX_PUSH`; the real `MTX_MODE` command word comes after that.
+
+### Root cause
+
+- `needs_zero_param_tail_dummy` was set only when all four packed command slots
+  were occupied and the fourth command had zero parameters.
+- That ignored the zero-padded case where the first, second, or third command
+  slot was the final real command.
+
+### Fix
+
+- Set `needs_zero_param_tail_dummy` whenever a packed command word contains at
+  least one real command and the last real command has zero parameters.
+- Keep the existing behavior that command index `0` terminates the command
+  list and later non-zero bytes in that same word are ignored.
+
+Tests updated:
+
+```text
+test_zero_padded_packed_word_ending_with_zero_param_command_requires_dummy
+test_packed_word_tail_dummy_waits_until_prior_params_consumed
+test_full_packed_word_ending_with_zero_param_command_requires_dummy_word
+```
+
+Why this matters:
+
+- Packed GXFIFO command streams are commonly DMA-fed.
+- Missing a dummy word shifts the command/parameter boundary and can turn a
+  valid stream into visible random geometry.
+
+## 2026-06-02 correction: `VEC_TEST` matrix mode
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+came from comparing the local test-command handler with ndsdoc and GBATEK.
+
+### Symptom class
+
+- `VEC_TEST` produced a result even when the active matrix mode was not
+  position+vector mode.
+- That let software read a plausible result from the vector-test registers
+  after issuing the command in a mode where hardware documentation says the
+  command is not valid.
+
+### Root cause
+
+- `handle_vec_test()` always multiplied the input vector by
+  `self.stacks.vector`.
+- The current `MTX_MODE` was ignored.
+
+### Spec basis
+
+- ndsdoc says `VEC_TEST` multiplies `(x,y,z,0)` by the directional matrix
+  stack and notes the matrix-mode-2 requirement.
+- GBATEK states the same rule more directly: `VEC_TEST`, like `NORMAL`,
+  requires Matrix Mode 2, the Position & Vector Simultaneous Set mode.
+
+### Fix
+
+- `handle_vec_test()` now returns without updating `VEC_RESULT` unless
+  `self.stacks.mode == MtxMode::PosVector`.
+- The top-level bus test now selects `MTX_MODE = 2` before issuing
+  `VEC_TEST`.
+
+Tests added/updated:
+
+```text
+test_vec_test_requires_pos_vector_matrix_mode
+test_vec_test_readback_wraps_overflowed_unit_vector
+test_vec_test_writes_direction_result_registers
+```
+
+Why this matters:
+
+- `VEC_TEST` is part of the documented geometry-test path used by software for
+  visibility and vector-space checks.
+- Letting it work in the wrong mode hides command-stream or matrix-mode bugs
+  that real hardware would expose.

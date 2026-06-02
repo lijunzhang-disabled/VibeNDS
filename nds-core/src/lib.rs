@@ -1891,6 +1891,7 @@ mod tests {
             nds.cpu9.cp15.dtcm,
         );
 
+        bus.write32(0x0400_0440, 2); // MTX_MODE position+vector
         bus.write32(0x0400_05C8, 1);
 
         assert_eq!(bus.read16(0x0400_0630), 8);

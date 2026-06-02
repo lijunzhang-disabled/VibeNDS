@@ -302,6 +302,11 @@ impl Engine3d {
     }
 
     fn handle_vec_test(&mut self, param: u32) {
+        if self.stacks.mode != MtxMode::PosVector {
+            self.test_busy = false;
+            return;
+        }
+
         let sign_ext = |b: u32| -> i32 { (((b & 0x3FF) << 22) as i32) >> 22 };
         let x = sign_ext(param) << 3;
         let y = sign_ext(param >> 10) << 3;
@@ -1065,11 +1070,29 @@ mod tests {
     #[test]
     fn test_vec_test_readback_wraps_overflowed_unit_vector() {
         let mut e = Engine3d::new();
+        e.stacks.set_mode(MtxMode::PosVector);
         e.stacks.vector = Matrix::identity().mul_scale(2 * ONE, ONE, ONE);
 
         e.handle_vec_test(0x100);
 
         assert_eq!(e.read_vec_test_halfword(0), 0xF000);
+        assert_eq!(e.read_vec_test_halfword(1), 0);
+        assert_eq!(e.read_vec_test_halfword(2), 0);
+    }
+
+    #[test]
+    fn test_vec_test_requires_pos_vector_matrix_mode() {
+        let mut e = Engine3d::new();
+        e.vec_test_result = [1, 2, 3];
+
+        e.handle_vec_test(1);
+
+        assert_eq!(e.vec_test_result, [1, 2, 3]);
+
+        e.stacks.set_mode(MtxMode::PosVector);
+        e.handle_vec_test(1);
+
+        assert_eq!(e.read_vec_test_halfword(0), 8);
         assert_eq!(e.read_vec_test_halfword(1), 0);
         assert_eq!(e.read_vec_test_halfword(2), 0);
     }

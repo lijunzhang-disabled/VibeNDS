@@ -10,7 +10,9 @@
 //! each, LSB-first: `ZZ`, `YY`, `XX`, `WW`). After the packed word, the
 //! ARM9 writes the parameters for each command in declaration order:
 //! all of cmd1's params, then all of cmd2's params, etc. Commands with
-//! zero parameters (like `MTX_PUSH`) take no follow-up words.
+//! zero parameters (like `MTX_PUSH`) do not emit normal params, but a
+//! zero-param final real command still consumes the hardware-required dummy
+//! word before the next packed command word.
 //!
 //! ## Direct format (`0x04000440..0x040005FF`)
 //!
@@ -203,7 +205,6 @@ impl GxFifo {
         // Four command IDs, LSB-first.
         let mut saw_command = false;
         let mut last_remaining = 0;
-        let mut slots_used = 0;
         for shift in [0u32, 8, 16, 24] {
             let id = ((word >> shift) & 0xFF) as u8;
             if id == 0 {
@@ -221,14 +222,13 @@ impl GxFifo {
             let needed = cmd.param_count();
             saw_command = true;
             last_remaining = needed;
-            slots_used += 1;
             self.pending_cmds.push_back(PackedCmd {
                 cmd: id,
                 remaining: needed,
                 params: Vec::with_capacity(needed as usize),
             });
         }
-        self.needs_zero_param_tail_dummy = saw_command && slots_used == 4 && last_remaining == 0;
+        self.needs_zero_param_tail_dummy = saw_command && last_remaining == 0;
     }
 
     fn consume_param(&mut self, word: u32) {
@@ -458,10 +458,11 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_padded_packed_word_ending_with_zero_param_command_needs_no_dummy() {
+    fn test_zero_padded_packed_word_ending_with_zero_param_command_requires_dummy() {
         let mut f = GxFifo::new();
         f.write_packed(0x0000_0011); // MTX_PUSH, zero params, then zero padding.
-        f.write_packed(0x0000_0010); // MTX_MODE command word.
+        f.write_packed(0x0000_0010); // Required dummy, not MTX_MODE command word.
+        f.write_packed(0x0000_0010); // Actual MTX_MODE command word.
         f.write_packed(1);
 
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
@@ -474,9 +475,11 @@ mod tests {
     #[test]
     fn test_packed_word_tail_dummy_waits_until_prior_params_consumed() {
         let mut f = GxFifo::new();
-        // MTX_MODE needs one parameter, MTX_PUSH is followed by zero padding.
+        // MTX_MODE needs one parameter, then MTX_PUSH is the final command and
+        // must consume a dummy before the next command word.
         f.write_packed(0x0000_1110);
         f.write_packed(2); // MTX_MODE parameter.
+        f.write_packed(0x0000_0012); // Required dummy, not MTX_POP.
         f.write_packed(0x0000_0012); // Actual MTX_POP command word.
         f.write_packed(1);
 
