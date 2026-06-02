@@ -606,3 +606,162 @@ Result:
 
 - `nds-core` release tests: `473 passed; 0 failed`.
 - `nds-frontend` release build: passed.
+
+## 2026-06-02 status/FIFO/viewport follow-up
+
+This batch contains three emulator behavior fixes and two doc corrections.
+Direct reference-emulator implementation use for this batch: **0**. The
+changes were driven by NDS docs / GBATEK register behavior and local regression
+tests.
+
+### 1. FIFO overflow was incorrectly exposed as `GXSTAT[15]`
+
+Symptom class:
+
+- The emulator treated the FIFO's internal overflow flag as if it were a
+  hardware-visible `GXSTAT` low-bit condition.
+- Writing `GXSTAT[15]` cleared both matrix-stack overflow and the FIFO
+  overflow flag.
+
+Root cause:
+
+- `GXSTAT[15]` is the matrix stack overflow/underflow flag.
+- It is not a FIFO overflow bit and should not reflect command FIFO state.
+
+Spec basis:
+
+- NDS 3D status docs list `GXSTAT[15]` as matrix stack overflow/underflow.
+- FIFO count and status live in the high status bits: count at
+  `GXSTAT[16..24]`, less-than-half at `GXSTAT[25]`, empty at `GXSTAT[26]`,
+  and general busy at `GXSTAT[27]`.
+
+Fix:
+
+- `Engine3d::gxstat_low()` now reports bit 15 only from the matrix stack
+  overflow flag.
+- `Engine3d::write_gxstat()` now clears only the matrix stack overflow flag
+  when software writes bit 15.
+- Removed the stale FIFO low-status helper that encoded non-hardware low bits.
+
+Tests added/updated:
+
+```text
+test_gxstat_write_clears_stack_error_and_sets_irq_mode
+test_fifo_overflow_does_not_set_gxstat_matrix_stack_error
+```
+
+Why this matters:
+
+- Games poll `GXSTAT` for synchronization and diagnostics.
+- Reporting a fake matrix-stack error from FIFO state can send SDK code down
+  the wrong recovery path or mask the real stack-error condition.
+
+### 2. Full GXFIFO writes dropped command data instead of stalling/preserving
+
+Symptom class:
+
+- When the emulated FIFO reached 256 entries, later command writes were
+  dropped and an overflow flag was set.
+- That can corrupt a valid geometry command stream.
+
+Root cause:
+
+- Real hardware stalls CPU writes to GXFIFO/geometry command ports while the
+  FIFO is full.
+- The emulator does not yet model the exact CPU stall timing, but dropping
+  command words is less accurate than preserving order.
+
+Spec basis:
+
+- GBATEK describes CPU writes to the geometry FIFO as waiting when the FIFO is
+  full.
+- The hardware-visible FIFO count is capped at 256 entries.
+
+Fix:
+
+- Packed and direct FIFO writes now preserve over-capacity command data in
+  order.
+- `GXSTAT` count reporting remains capped to the 256-entry hardware-visible
+  maximum.
+- The internal overflow flag is no longer used to model full-FIFO writes.
+
+Tests updated:
+
+```text
+test_packed_command_word_past_capacity_preserves_commands
+test_direct_port_write_past_full_preserves_command_stream
+```
+
+Why this matters:
+
+- A single dropped command or parameter can shift the stream and turn later
+  vertex data into unrelated commands.
+- That failure mode matches random polygon flashes much more closely than a
+  clean, deterministic transform error.
+
+### 3. VIEWPORT used exclusive span instead of inclusive hardware size
+
+Symptom class:
+
+- Full-screen viewport center mapped to `(127.5, 95.5)` instead of
+  `(128, 96)`.
+- Right/bottom NDC edges mapped to `X2/Y1` rather than the one-pixel-beyond
+  hardware mathematical edge.
+
+Root cause:
+
+- The transform scaled by `x2 - x1` and `y2 - y1`.
+- NDS viewport math uses the inclusive size:
+
+  ```text
+  width  = x2 - x1 + 1
+  height = y2 - y1 + 1
+  ```
+
+Spec basis:
+
+- The NDS viewport docs note that polygons can render one pixel beyond
+  `(X2, Y1)`.
+- The viewport Y coordinates are lower-left-origin values, while the emulator
+  framebuffer is top-left-origin.
+
+Fix:
+
+- Screen X now uses `x1 + (ndc_x + 1) * width / 2`.
+- Screen Y now converts from lower-left viewport coordinates with
+  `top_y = 191 - y2`, then applies `(1 - ndc_y) * height / 2`.
+- Full-screen right/bottom mathematical edges can land at `256/192`, with the
+  raster output still clipped by the physical framebuffer.
+
+Tests updated/added:
+
+```text
+test_perspective_divide_centers_at_screen_center
+test_perspective_divide_right_edge
+test_viewport_edges_extend_one_pixel_beyond_x2_y1
+test_partial_viewport_y_uses_lower_left_origin
+```
+
+Why this matters:
+
+- Viewport scale is applied to every transformed 3D vertex.
+- A half-pixel/full-pixel mismatch can affect edge placement, tiny polygons,
+  and title-scene composition even when matrices are otherwise correct.
+
+## Verification for status/FIFO/viewport follow-up
+
+Commands run:
+
+```sh
+cargo test -p nds-core gpu3d::fifo --release
+cargo test -p nds-core gxstat --release
+cargo test -p nds-core gpu3d::viewport --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- `gpu3d::fifo` targeted tests: passed.
+- `gxstat` targeted tests: passed.
+- `gpu3d::viewport` targeted tests: passed.
+- `nds-core` full release suite: `475 passed; 0 failed`.

@@ -18,9 +18,11 @@
 //! there is the (first) parameter; multi-parameter commands continue at
 //! the same address with subsequent writes.
 //!
-//! The FIFO itself is bounded to 256 entries; writes past full drop and
-//! set `GXSTAT.list_overflow`. Reading the FIFO is unusual on real
-//! hardware (it's primarily write-only from software's view); we don't
+//! The hardware FIFO itself is bounded to 256 entries, but CPU writes stall
+//! when it is full instead of dropping command data. This emulator does not
+//! model the stall timing yet, so it preserves over-capacity writes in order
+//! rather than corrupting the command stream. Reading the FIFO is unusual on
+//! real hardware (it's primarily write-only from software's view); we don't
 //! expose reads.
 //!
 //! Output: a queue of `GxOp { cmd, params }`. The engine pops from this
@@ -70,7 +72,9 @@ pub struct GxFifo {
     /// Decoded ops ready for the dispatcher to consume.
     pub ready: VecDeque<GxOp>,
 
-    /// Sticky overflow flag (`GXSTAT.list_overflow`).
+    /// Sticky internal overflow flag used by geometry-buffer limit tests.
+    /// `GXSTAT` bit 15 is the matrix stack overflow/underflow flag, not a
+    /// FIFO overflow flag.
     pub overflow: bool,
 
     /// Set after each accept; the bus dispatcher reads this to decide
@@ -121,10 +125,6 @@ impl GxFifo {
     /// Write to the packed-format port at `0x04000400`. Pushes one word
     /// into the FIFO and decodes commands as parameter words accumulate.
     pub fn write_packed(&mut self, word: u32) {
-        if self.words.len() >= FIFO_CAPACITY {
-            self.overflow = true;
-            return;
-        }
         let prev_len = self.entries;
         self.words.push_back(word);
 
@@ -153,10 +153,6 @@ impl GxFifo {
     /// First write supplies parameter 1; subsequent writes to the same
     /// command continue the parameter sequence until satisfied.
     pub fn write_direct(&mut self, cmd: GxCmd, word: u32) {
-        if self.entries >= FIFO_CAPACITY {
-            self.overflow = true;
-            return;
-        }
         self.words.push_back(word);
 
         let cmd_byte = cmd as u8;
@@ -208,7 +204,6 @@ impl GxFifo {
         let mut saw_command = false;
         let mut last_remaining = 0;
         let mut slots_used = 0;
-        let mut planned_entries = self.entries;
         for shift in [0u32, 8, 16, 24] {
             let id = ((word >> shift) & 0xFF) as u8;
             if id == 0 {
@@ -224,11 +219,6 @@ impl GxFifo {
                 break;
             };
             let needed = cmd.param_count();
-            planned_entries += needed.max(1) as usize;
-            if planned_entries > FIFO_CAPACITY {
-                self.overflow = true;
-                break;
-            }
             saw_command = true;
             last_remaining = needed;
             slots_used += 1;
@@ -242,10 +232,6 @@ impl GxFifo {
     }
 
     fn consume_param(&mut self, word: u32) {
-        if self.entries >= FIFO_CAPACITY {
-            self.overflow = true;
-            return;
-        }
         if let Some(front) = self.pending_cmds.front_mut() {
             self.entries += 1;
             front.params.push(word);
@@ -318,26 +304,6 @@ impl GxFifo {
             self.entries = 0;
             self.fell_below_half = true;
         }
-    }
-
-    /// Build the `GXSTAT` register value (low 16 bits — the high half
-    /// holds command-list-size and similar fields managed elsewhere).
-    pub fn stat_low(&self) -> u16 {
-        let mut v = 0u16;
-        if self.entries == 0 {
-            v |= 1 << 0;
-        } // FIFO empty
-        if self.is_full() {
-            v |= 1 << 1;
-        } // FIFO full
-        if self.entries < FIFO_HALF {
-            v |= 1 << 2;
-        } // less than half full
-          // Bit 3 = command-list-overflow (also reported via overflow flag)
-        if self.overflow {
-            v |= 1 << 15;
-        }
-        v
     }
 
     pub fn stat_high(&self) -> u16 {
@@ -452,15 +418,18 @@ mod tests {
     }
 
     #[test]
-    fn test_packed_command_word_cannot_overfill_fifo_entries() {
+    fn test_packed_command_word_past_capacity_preserves_commands() {
         let mut f = GxFifo::new();
         f.entries = FIFO_CAPACITY - 1;
 
         f.write_packed(0x1515_1515);
 
-        assert!(f.overflow);
-        assert_eq!(f.len(), FIFO_CAPACITY);
-        assert_eq!(f.ready.len(), 1);
+        assert!(!f.overflow);
+        assert_eq!(f.len(), FIFO_CAPACITY + 3);
+        assert_eq!(f.gxstat_high_bits(false) & 0x01FF, 256);
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 4);
+        assert!(ops.iter().all(|op| op.cmd == GxCmd::MtxIdentity as u8));
     }
 
     #[test]
@@ -601,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn test_full_then_overflow() {
+    fn test_direct_port_write_past_full_preserves_command_stream() {
         let mut f = GxFifo::new();
         for _ in 0..FIFO_CAPACITY {
             f.write_direct(GxCmd::MtxPush, 0);
@@ -609,7 +578,10 @@ mod tests {
         assert!(f.is_full());
         assert!(!f.overflow);
         f.write_direct(GxCmd::MtxPush, 0);
-        assert!(f.overflow);
+        assert!(!f.overflow);
+        assert_eq!(f.len(), FIFO_CAPACITY + 1);
+        assert_eq!(f.ready.len(), FIFO_CAPACITY + 1);
+        assert_eq!(f.gxstat_high_bits(false) & 0x01FF, 256);
     }
 
     #[test]

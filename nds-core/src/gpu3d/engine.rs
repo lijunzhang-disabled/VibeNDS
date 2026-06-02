@@ -409,7 +409,7 @@ impl Engine3d {
         if self.stacks.projection_sp != 0 {
             v |= 1 << 13;
         }
-        if self.stacks.overflow || self.fifo.overflow {
+        if self.stacks.overflow {
             v |= 1 << 15;
         }
         v
@@ -427,7 +427,6 @@ impl Engine3d {
         self.fifo.set_irq_mode((value >> 30) as u8);
         if value & (1 << 15) != 0 {
             self.stacks.clear_overflow_error();
-            self.fifo.overflow = false;
         }
     }
 
@@ -1098,13 +1097,26 @@ mod tests {
         e.stacks.projection_sp = 1;
         e.fifo.overflow = true;
 
+        assert_eq!(e.gxstat_low() & (1 << 15), 1 << 15);
         e.write_gxstat((2 << 30) | (1 << 15));
 
         assert!(!e.stacks.overflow);
         assert_eq!(e.stacks.projection_sp, 0);
-        assert!(!e.fifo.overflow);
+        assert!(
+            e.fifo.overflow,
+            "GXSTAT bit 15 clears matrix stack overflow, not FIFO overflow"
+        );
         assert_eq!(e.fifo.irq_mode, 2);
         assert_eq!(e.gxstat_low() & (1 << 15), 0);
+    }
+
+    #[test]
+    fn test_fifo_overflow_does_not_set_gxstat_matrix_stack_error() {
+        let mut e = Engine3d::new();
+        e.fifo.overflow = true;
+
+        assert_eq!(e.gxstat_low() & (1 << 15), 0);
+        assert_eq!(e.gxstat() & (1 << 15), 0);
     }
 
     #[test]

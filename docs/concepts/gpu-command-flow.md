@@ -74,11 +74,19 @@ VTX_16 now has all its params; the 3D engine executes it.
 
 The 256-entry × 32-bit FIFO sits between ARM9's writes and the 3D engine's consumer. Three "fill levels" matter:
 
-- **Empty** (`GXSTAT[0] = 1`) — nothing pending; engine is idle.
-- **Less-than-half** (`GXSTAT[2] = 1`) — fewer than 128 entries; **this is the DMA replenishment trigger**.
-- **Full** (`GXSTAT[1] = 1`) — 256 entries; further writes set the overflow flag and are dropped.
+- **Entry count** (`GXSTAT[16..24]`) — number of 40-bit command FIFO entries.
+- **Less-than-half** (`GXSTAT[25] = 1`) — fewer than 128 entries; **this is the DMA replenishment trigger**.
+- **Empty** (`GXSTAT[26] = 1`) — no FIFO entries pending.
+- **General busy** (`GXSTAT[27] = 1`) — geometry work is still pending or executing.
 
-Software's job is to keep the FIFO between ~32 and ~200 entries: enough work pending that the engine never starves, not so much that overflow happens. Real games do this via DMA — see §6.
+Software's job is to keep the FIFO between ~32 and ~200 entries: enough work
+pending that the engine never starves, not so much that ARM9 spends time
+waiting on a full FIFO. Real games do this via DMA — see §6.
+
+On hardware, CPU writes to GXFIFO or command ports wait while the FIFO is full;
+the command stream is not dropped. The emulator does not model the exact CPU
+stall yet, so it preserves over-capacity writes in FIFO order and caps the
+reported `GXSTAT` count at the hardware-visible maximum.
 
 ## 3. The consumer side
 

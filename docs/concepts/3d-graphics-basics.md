@@ -223,11 +223,15 @@ It's also where the fixed-function pipeline becomes inherently non-linear: every
 Convert NDC to screen pixels:
 
 ```
-screen_x = (x_ndc + 1) * (viewport_w / 2) + viewport_x
-screen_y = (1 - y_ndc) * (viewport_h / 2) + viewport_y  # flip Y because screen Y goes down
+viewport_w = x2 - x1 + 1
+viewport_h = y2 - y1 + 1
+screen_x = x1 + (x_ndc + 1) * (viewport_w / 2)
+screen_y = (191 - y2) + (1 - y_ndc) * (viewport_h / 2)
 ```
 
-On the NDS, `viewport_w = 256`, `viewport_h = 192`. The `VIEWPORT` GX command sets the rectangle.
+On the NDS, `Y1` is the bottom edge and `Y2` is the top edge. The hardware
+uses the inclusive viewport size, so polygons can reach one pixel beyond
+`X2` and `Y1`; the physical framebuffer still clips to 256x192.
 
 Output: screen-space `(x, y, z, w, s, t, r, g, b, a)` per vertex, ready for rasterization.
 
@@ -238,7 +242,9 @@ A list of **polygons** (triangles or quads), each pointing to **vertices** with 
 - **2048 polygons** per frame
 - **6144 vertices** per frame
 
-If a frame's geometry exceeds either, the rest are dropped (and `GXSTAT.list_overflow` is set).
+If a frame's geometry exceeds either, the rest are dropped. `GXSTAT[15]` is
+the matrix stack overflow/underflow flag; it is not a polygon-list overflow
+bit.
 
 The polygon list is **double-buffered**: while frame N rasterizes, frame N+1's geometry is being built. The `SWAP_BUFFERS` command (GX cmd `0x50`) atomically swaps the two buffers at the next frame boundary.
 
