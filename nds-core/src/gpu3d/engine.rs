@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn test_end_vtxs_command_does_not_disturb_vertex_list() {
+    fn test_end_vtxs_command_closes_vertex_list() {
         let mut e = Engine3d::new();
         e.dispatch(GxOp {
             cmd: GxCmd::PolygonAttr as u8,
@@ -866,9 +866,9 @@ mod tests {
             params: vec![0, (ONE / 2) as u32 & 0xFFFF],
         });
 
-        assert_eq!(e.geometry_polygons.len(), 1);
-        assert!(e.vertex.list_active);
-        assert_eq!(e.vertex.primitive, Some(PrimitiveType::Triangles));
+        assert!(e.geometry_polygons.is_empty());
+        assert!(!e.vertex.list_active);
+        assert_eq!(e.vertex.primitive, None);
     }
 
     #[test]

@@ -32,6 +32,8 @@ struct PixelCandidate {
     layer: u8,
     /// Semi-transparent OBJ marker — forces alpha blend regardless of BLDCNT.
     semi_transparent: bool,
+    /// Per-pixel alpha supplied by the 3D renderer when it is mapped as BG0.
+    alpha_3d: Option<u8>,
 }
 
 /// Compose one scanline into `framebuffer[line*256..line*256+256]`.
@@ -74,6 +76,7 @@ pub fn compose_scanline(
                         priority: p.priority,
                         layer: p.bg_index,
                         semi_transparent: false,
+                        alpha_3d: p.alpha_3d,
                     });
                     len += 1;
                 }
@@ -86,6 +89,7 @@ pub fn compose_scanline(
                     priority: o.priority,
                     layer: LAYER_OBJ,
                     semi_transparent: o.gfx_mode == 1,
+                    alpha_3d: None,
                 });
                 len += 1;
             }
@@ -105,6 +109,7 @@ pub fn compose_scanline(
             priority: 4,
             layer: LAYER_BACKDROP,
             semi_transparent: false,
+            alpha_3d: None,
         };
         let (top, second) = match len {
             0 => (backdrop_cand, backdrop_cand),
@@ -264,12 +269,28 @@ fn apply_blend(engine: &Engine2d, top: PixelCandidate, second: PixelCandidate) -
     }
     match mode {
         1 if is_second_target(engine, second.layer) => {
+            if let Some(alpha) = top.alpha_3d {
+                return alpha_blend_3d(top.color, second.color, alpha);
+            }
             alpha_blend(top.color, second.color, engine.bldalpha)
         }
         2 => brightness_increase(top.color, engine.bldy),
         3 => brightness_decrease(top.color, engine.bldy),
         _ => top.color,
     }
+}
+
+fn alpha_blend_3d(top: u16, bot: u16, alpha: u8) -> u16 {
+    let eva = alpha.min(31) as u32 + 1;
+    let evb = 32 - eva;
+    let blend_chan = |t: u32, b: u32| -> u16 { ((t * eva + b * evb) / 32).min(31) as u16 };
+    let tr = (top & 0x1F) as u32;
+    let tg = ((top >> 5) & 0x1F) as u32;
+    let tb = ((top >> 10) & 0x1F) as u32;
+    let br = (bot & 0x1F) as u32;
+    let bg = ((bot >> 5) & 0x1F) as u32;
+    let bb = ((bot >> 10) & 0x1F) as u32;
+    blend_chan(tr, br) | (blend_chan(tg, bg) << 5) | (blend_chan(tb, bb) << 10)
 }
 
 fn alpha_blend(top: u16, bot: u16, bldalpha: u16) -> u16 {
@@ -283,6 +304,42 @@ fn alpha_blend(top: u16, bot: u16, bldalpha: u16) -> u16 {
     let bg = ((bot >> 5) & 0x1F) as u32;
     let bb = ((bot >> 10) & 0x1F) as u32;
     blend_chan(tr, br) | (blend_chan(tg, bg) << 5) | (blend_chan(tb, bb) << 10)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bg_pixel(color: u16, priority: u8, bg_index: u8, alpha_3d: Option<u8>) -> BgPixel {
+        BgPixel {
+            color,
+            priority,
+            bg_index,
+            alpha_3d,
+        }
+    }
+
+    #[test]
+    fn test_3d_bg0_first_target_uses_3d_alpha_not_bldalpha() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.bldcnt = (1 << LAYER_BG0) | (1 << (LAYER_BG1 + 8)) | (1 << 6);
+        engine.bldalpha = 16;
+
+        let mut bg0 = [None; SCREEN_WIDTH];
+        let mut bg1 = [None; SCREEN_WIDTH];
+        bg0[0] = Some(bg_pixel(0x001F, 0, LAYER_BG0, Some(7)));
+        bg1[0] = Some(bg_pixel(0x7C00, 1, LAYER_BG1, None));
+        let layers = [Some(bg0), Some(bg1), None, None];
+        let obj_line = ObjLine::default();
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        let color = framebuffer[0];
+        assert_eq!(color & 0x1F, 7);
+        assert_eq!((color >> 10) & 0x1F, 23);
+    }
 }
 
 fn brightness_increase(color: u16, bldy: u16) -> u16 {

@@ -13,6 +13,9 @@ pub struct BgPixel {
     pub color: u16,
     pub priority: u8,
     pub bg_index: u8,
+    /// Per-pixel 3D alpha when Engine A maps the 3D renderer as BG0.
+    /// Plain 2D BG pixels do not carry alpha into the compositor.
+    pub alpha_3d: Option<u8>,
 }
 
 const SCREEN_WIDTH: usize = 256;
@@ -116,6 +119,7 @@ pub fn render_text_bg(
             color,
             priority,
             bg_index: n as u8,
+            alpha_3d: None,
         });
     }
 }
@@ -194,6 +198,7 @@ pub fn render_affine_bg(
                 color,
                 priority,
                 bg_index: n as u8,
+                alpha_3d: None,
             });
         }
 
@@ -272,6 +277,7 @@ pub fn render_bitmap_bg(
                     color: color & 0x7FFF,
                     priority,
                     bg_index: n as u8,
+                    alpha_3d: None,
                 });
             }
         } else {
@@ -283,6 +289,7 @@ pub fn render_bitmap_bg(
                     color,
                     priority,
                     bg_index: n as u8,
+                    alpha_3d: None,
                 });
             }
         }

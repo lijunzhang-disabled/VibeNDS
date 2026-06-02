@@ -485,6 +485,7 @@ impl Nds {
                         let palette = &self.shared.palette[0..0x400];
                         let oam = &self.shared.oam[0..0x400];
                         let fb_3d: &[u16] = &self.shared.gpu3d.rasterizer.framebuffer;
+                        let alpha_3d: &[u8] = &self.shared.gpu3d.rasterizer.alpha_buffer;
                         let fb = if top_engine_a {
                             &mut self.framebuffer_top
                         } else {
@@ -498,6 +499,7 @@ impl Nds {
                             &self.shared.vram,
                             fb,
                             Some(fb_3d),
+                            Some(alpha_3d),
                         );
                     }
                     // Engine B → bottom by default. Engine B has no 3D source.
@@ -516,6 +518,7 @@ impl Nds {
                             oam,
                             &self.shared.vram,
                             fb,
+                            None,
                             None,
                         );
                     }

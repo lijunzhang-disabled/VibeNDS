@@ -153,9 +153,11 @@ impl VertexState {
         self.strip_palette_base = self.palette_base;
     }
 
-    /// `END_VTXS` — real hardware treats this as an optional compatibility
-    /// marker. It does not disturb the active vertex list.
-    pub fn end(&mut self) {}
+    /// `END_VTXS` — close the active vertex list. New VTX commands are
+    /// ignored until the next `BEGIN_VTXS`.
+    pub fn end(&mut self) {
+        self.force_end();
+    }
 
     /// Internal list termination used for events that really do close the
     /// active list, such as buffer swaps.
@@ -697,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn test_end_vtxs_does_not_disturb_active_list() {
+    fn test_end_vtxs_closes_active_list() {
         let mut v = VertexState::new();
         let s = ident_stacks();
 
@@ -707,9 +709,9 @@ mod tests {
         v.submit_vertex([ONE, 0, 0], &s);
         v.submit_vertex([0, ONE, 0], &s);
 
-        assert_eq!(v.polygon_buffer.len(), 1);
-        assert!(v.list_active);
-        assert_eq!(v.primitive, Some(PrimitiveType::Triangles));
+        assert!(v.polygon_buffer.is_empty());
+        assert!(!v.list_active);
+        assert_eq!(v.primitive, None);
         assert!(v.vertex_buffer.is_empty());
     }
 

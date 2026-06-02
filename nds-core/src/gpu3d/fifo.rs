@@ -62,6 +62,11 @@ pub struct GxFifo {
     /// it gets emitted as a `GxOp`.
     pending_cmds: VecDeque<PackedCmd>,
 
+    /// Decoder state for direct-port writes. Multi-parameter direct commands
+    /// accumulate only with following writes to the same direct command port;
+    /// they must not consume pending packed-command parameters.
+    direct_pending: Option<PackedCmd>,
+
     /// Decoded ops ready for the dispatcher to consume.
     pub ready: VecDeque<GxOp>,
 
@@ -94,6 +99,7 @@ impl GxFifo {
             words: VecDeque::with_capacity(FIFO_CAPACITY),
             entries: 0,
             pending_cmds: VecDeque::new(),
+            direct_pending: None,
             ready: VecDeque::new(),
             overflow: false,
             fell_below_half: false,
@@ -153,9 +159,6 @@ impl GxFifo {
         }
         self.words.push_back(word);
 
-        // Direct-port writes are a 1-command equivalent. If the same
-        // command appeared in `pending_cmds`, append; otherwise push a
-        // fresh entry.
         let cmd_byte = cmd as u8;
         let needed = cmd.param_count();
 
@@ -168,12 +171,12 @@ impl GxFifo {
             return;
         }
 
-        if let Some(front) = self.pending_cmds.back_mut() {
+        if let Some(front) = self.direct_pending.as_mut() {
             if front.cmd == cmd_byte && (front.params.len() as u8) < front.remaining {
                 self.entries += 1;
                 front.params.push(word);
                 if front.params.len() as u8 == front.remaining {
-                    let done = self.pending_cmds.pop_back().unwrap();
+                    let done = self.direct_pending.take().unwrap();
                     self.ready.push_back(GxOp {
                         cmd: done.cmd,
                         params: done.params,
@@ -192,7 +195,7 @@ impl GxFifo {
             });
         } else {
             self.entries += 1;
-            self.pending_cmds.push_back(PackedCmd {
+            self.direct_pending = Some(PackedCmd {
                 cmd: cmd_byte,
                 remaining: needed,
                 params: vec![word],
@@ -204,6 +207,7 @@ impl GxFifo {
         // Four command IDs, LSB-first.
         let mut saw_command = false;
         let mut last_remaining = 0;
+        let mut slots_used = 0;
         let mut planned_entries = self.entries;
         for shift in [0u32, 8, 16, 24] {
             let id = ((word >> shift) & 0xFF) as u8;
@@ -227,13 +231,14 @@ impl GxFifo {
             }
             saw_command = true;
             last_remaining = needed;
+            slots_used += 1;
             self.pending_cmds.push_back(PackedCmd {
                 cmd: id,
                 remaining: needed,
                 params: Vec::with_capacity(needed as usize),
             });
         }
-        self.needs_zero_param_tail_dummy = saw_command && last_remaining == 0;
+        self.needs_zero_param_tail_dummy = saw_command && slots_used == 4 && last_remaining == 0;
     }
 
     fn consume_param(&mut self, word: u32) {
@@ -304,7 +309,11 @@ impl GxFifo {
     }
 
     pub fn reconcile_after_drain(&mut self) {
-        if self.ready.is_empty() && self.pending_cmds.is_empty() && !self.words.is_empty() {
+        if self.ready.is_empty()
+            && self.pending_cmds.is_empty()
+            && self.direct_pending.is_none()
+            && !self.words.is_empty()
+        {
             self.words.clear();
             self.entries = 0;
             self.fell_below_half = true;
@@ -480,11 +489,10 @@ mod tests {
     }
 
     #[test]
-    fn test_packed_word_ending_with_zero_param_command_requires_dummy_word() {
+    fn test_zero_padded_packed_word_ending_with_zero_param_command_needs_no_dummy() {
         let mut f = GxFifo::new();
-        f.write_packed(0x0000_0011); // MTX_PUSH, zero params, tail command.
-        f.write_packed(0x0000_0010); // Required dummy, not MTX_MODE command word.
-        f.write_packed(0x0000_0010); // Actual MTX_MODE command word.
+        f.write_packed(0x0000_0011); // MTX_PUSH, zero params, then zero padding.
+        f.write_packed(0x0000_0010); // MTX_MODE command word.
         f.write_packed(1);
 
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
@@ -497,10 +505,9 @@ mod tests {
     #[test]
     fn test_packed_word_tail_dummy_waits_until_prior_params_consumed() {
         let mut f = GxFifo::new();
-        // MTX_MODE needs one parameter, MTX_PUSH is the zero-param tail.
+        // MTX_MODE needs one parameter, MTX_PUSH is followed by zero padding.
         f.write_packed(0x0000_1110);
         f.write_packed(2); // MTX_MODE parameter.
-        f.write_packed(0x0000_0012); // Required dummy, not MTX_POP command word.
         f.write_packed(0x0000_0012); // Actual MTX_POP command word.
         f.write_packed(1);
 
@@ -511,6 +518,23 @@ mod tests {
         assert_eq!(ops[1].cmd, 0x11);
         assert_eq!(ops[2].cmd, 0x12);
         assert_eq!(ops[2].params, vec![1]);
+    }
+
+    #[test]
+    fn test_full_packed_word_ending_with_zero_param_command_requires_dummy_word() {
+        let mut f = GxFifo::new();
+        f.write_packed(0x1111_1111); // Four MTX_PUSH commands, no zero padding.
+        f.write_packed(0x0000_0010); // Required dummy, not MTX_MODE command word.
+        f.write_packed(0x0000_0010); // Actual MTX_MODE command word.
+        f.write_packed(1);
+
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 5);
+        assert!(ops[..4]
+            .iter()
+            .all(|op| op.cmd == 0x11 && op.params.is_empty()));
+        assert_eq!(ops[4].cmd, 0x10);
+        assert_eq!(ops[4].params, vec![1]);
     }
 
     #[test]
@@ -526,6 +550,33 @@ mod tests {
         let op = f.pop_op().expect("op");
         assert_eq!(op.cmd, 0x23);
         assert_eq!(op.params, vec![0xAAAA_AAAA, 0xBBBB_BBBB]);
+        assert_eq!(f.len(), 0);
+    }
+
+    #[test]
+    fn test_direct_port_does_not_satisfy_pending_packed_params() {
+        let mut f = GxFifo::new();
+
+        f.write_packed(0x0000_0023); // Packed VTX_16, still needs two params.
+        f.write_direct(GxCmd::Vtx16, 0x1111_1111); // Separate direct VTX_16 start.
+
+        assert!(
+            f.ready.is_empty(),
+            "direct VTX_16 param must not complete the packed VTX_16"
+        );
+
+        f.write_packed(0xAAAA_AAAA);
+        assert!(f.ready.is_empty());
+        f.write_packed(0xBBBB_BBBB);
+
+        let packed = f.pop_op().expect("packed op");
+        assert_eq!(packed.cmd, GxCmd::Vtx16 as u8);
+        assert_eq!(packed.params, vec![0xAAAA_AAAA, 0xBBBB_BBBB]);
+
+        f.write_direct(GxCmd::Vtx16, 0x2222_2222);
+        let direct = f.pop_op().expect("direct op");
+        assert_eq!(direct.cmd, GxCmd::Vtx16 as u8);
+        assert_eq!(direct.params, vec![0x1111_1111, 0x2222_2222]);
         assert_eq!(f.len(), 0);
     }
 

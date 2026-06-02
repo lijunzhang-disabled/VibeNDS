@@ -412,3 +412,197 @@ changes:
 For HeartGold specifically, capture short frame sequences rather than single
 screenshots. A single good frame proves progress; it does not prove the random
 polygon flashing is gone.
+
+## 2026-06-02 follow-up fixes before commit
+
+This follow-up batch is intentionally small and test-backed. It contains four
+bug groups. Direct reference-emulator implementation use for these four fixes:
+**0**. The rules below came from NDS docs / GBATEK plus local behavior tests.
+
+I did previously use melonDS as a sanity check while investigating polygon
+ordering behavior, as noted above. That was one investigation thread, not a
+source-to-source translation path for this batch.
+
+### 1. `END_VTXS` incorrectly left the vertex list open
+
+Symptom class:
+
+- Geometry commands after `END_VTXS` could continue appending to the previous
+  list.
+- That makes command streams with explicit begin/end boundaries behave as if
+  the end marker was only decorative.
+
+Root cause:
+
+- `VertexState::end()` was a no-op.
+- The existing local test even asserted that the active primitive should remain
+  active after `END_VTXS`.
+
+Spec basis:
+
+- The NDS vertex command docs describe `BEGIN_VTXS` as starting a vertex list
+  and `END_VTXS` as ending that list.
+- They also say a new list or swap can implicitly end the current list, but
+  that does not make explicit `END_VTXS` a no-op.
+
+Fix:
+
+- `END_VTXS` now calls the same list-closing path used by implicit termination.
+- The tests were inverted to prove the list becomes inactive and no unfinished
+  polygon remains live after the command.
+
+Why this matters:
+
+- Commercial SDK code may use explicit list boundaries.
+- Keeping stale primitive state alive can make later vertices produce unrelated
+  triangles or strips, which is one credible source of random polygon flashes.
+
+### 2. Direct GXFIFO writes could satisfy pending packed-command parameters
+
+Symptom class:
+
+- A direct-port geometry write could accidentally complete a packed command
+  already waiting for parameters if the opcode matched.
+- That mixes two hardware input paths that should be decoded independently.
+
+Root cause:
+
+- The FIFO decoder stored pending direct-port parameters in the same pending
+  command queue used by packed command words.
+- When a direct `VTX_16` arrived while a packed `VTX_16` was waiting for two
+  parameters, the direct parameter could be consumed as if it belonged to the
+  packed command.
+
+Spec basis:
+
+- GBATEK describes packed commands as command bytes followed by parameter
+  words in the packed FIFO stream.
+- Direct command ports are separate command-specific writes: a command with
+  `N` parameters is issued by `N` writes to that command port.
+
+Fix:
+
+- Added separate `direct_pending` state for direct-port multi-parameter
+  commands.
+- Packed pending commands now only consume packed parameter words.
+- Direct pending commands now only consume later direct writes to the same
+  direct command port.
+
+Test added:
+
+```text
+test_direct_port_does_not_satisfy_pending_packed_params
+```
+
+Why this matters:
+
+- Once a packed geometry stream is misdecoded, the remaining command stream can
+  shift out of phase.
+- That kind of bug can make otherwise valid vertex/texture/matrix data appear
+  as unrelated command parameters.
+
+### 3. Packed zero-param tail dummy was too broad
+
+Symptom class:
+
+- A packed command word ending in zero padding after a no-parameter command
+  incorrectly consumed the next word as a dummy.
+- That delayed or dropped the next real command word.
+
+Root cause:
+
+- The decoder treated any packed word whose last decoded command had zero
+  parameters as needing a dummy word.
+- It did not distinguish a fully occupied four-command packed word from a word
+  where the remaining high command bytes were zero padding.
+
+Spec basis:
+
+- GBATEK's packed command examples describe zero bytes as padding / command
+  zero.
+- The no-parameter "overkill" dummy case applies when a real zero-parameter
+  command occupies the final command slot of a full packed word, not when the
+  rest of the word is zero padding.
+
+Fix:
+
+- Track how many non-zero command slots were used in the packed word.
+- Require the tail dummy only when all four slots were occupied and the fourth
+  command had zero parameters.
+
+Tests updated/added:
+
+```text
+test_zero_padded_packed_word_ending_with_zero_param_command_needs_no_dummy
+test_full_packed_word_ending_with_zero_param_command_requires_dummy_word
+test_packed_word_tail_dummy_waits_until_prior_params_consumed
+```
+
+Why this matters:
+
+- Incorrect dummy consumption desynchronizes the GXFIFO stream.
+- For real game command streams, one consumed command word can corrupt many
+  following polygons.
+
+### 4. 3D-as-BG0 compositing ignored hardware-facing details
+
+Symptom class:
+
+- When the 3D renderer is mapped into Engine A BG0, the compositor treated it
+  too much like an ordinary opaque 2D BG layer.
+- Per-pixel 3D alpha was not carried into 2D blending.
+- BG0 horizontal scroll did not affect the 3D BG0 source.
+
+Root cause:
+
+- `BgPixel` had no place to carry 3D alpha.
+- The compositor always used `BLDALPHA` for alpha blending instead of the 3D
+  pixel alpha when the top target was 3D BG0.
+- The 3D framebuffer synthesis path sampled `x` directly and ignored BG0
+  horizontal offset.
+
+Spec basis:
+
+- The NDS display path exposes 3D output through Engine A BG0.
+- 3D pixels carry their own alpha, while 2D alpha blending uses the 2D blend
+  control path.
+- BG0 scroll registers still participate in the Engine A BG source path, so
+  the 3D source must be sampled through that BG0 coordinate path.
+
+Fix:
+
+- Added optional per-pixel `alpha_3d` to BG pixels.
+- Threaded the 3D rasterizer alpha buffer into Engine A scanline rendering.
+- Used 3D alpha for 3D BG0 first-target blending when a valid second target is
+  present.
+- Applied BG0 horizontal scroll to the synthesized 3D BG0 layer, with the
+  256..511 half treated as transparent.
+
+Tests added:
+
+```text
+test_3d_bg0_first_target_uses_3d_alpha_not_bldalpha
+test_3d_bg0_horizontal_scroll_exposes_transparent_half
+```
+
+Why this matters:
+
+- HeartGold uses 2D and 3D together on the title scene.
+- If 3D alpha or BG0 source coordinates are wrong, the game can boot and still
+  have wrong layering, effects, or displaced title elements.
+
+## Verification for this follow-up batch
+
+Commands run:
+
+```sh
+cargo fmt
+cargo test -p nds-core gpu3d::fifo --release
+cargo test -p nds-core --release
+cargo build --release -p nds-frontend
+```
+
+Result:
+
+- `nds-core` release tests: `473 passed; 0 failed`.
+- `nds-frontend` release build: passed.

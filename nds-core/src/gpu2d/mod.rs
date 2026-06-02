@@ -140,9 +140,9 @@ pub struct ResolvedPixel {
 /// Render one scanline. `palette` and `oam` are this engine's 1 KB halves;
 /// `vram` is the global router (the engine reads via its target views).
 /// `framebuffer` is 256 × 192 u16, indexed by `line * 256 + x`.
-/// `framebuffer_3d` is the 3D rasterizer's output, consulted when
-/// `DISPCNT` bit 3 selects "BG0 source is 3D" — Engine A only. Pass `None`
-/// for Engine B or when 3D isn't being composited.
+/// `framebuffer_3d` and `alpha_3d` are the 3D rasterizer's output, consulted
+/// when `DISPCNT` bit 3 selects "BG0 source is 3D" — Engine A only. Pass
+/// `None` for Engine B or when 3D isn't being composited.
 pub fn render_scanline(
     engine: &mut Engine2d,
     line: u16,
@@ -151,6 +151,7 @@ pub fn render_scanline(
     vram: &crate::vram::VramRouter,
     framebuffer: &mut [u16],
     framebuffer_3d: Option<&[u16]>,
+    alpha_3d: Option<&[u8]>,
 ) {
     let mode = engine.dispcnt & 0x07;
 
@@ -205,16 +206,24 @@ pub fn render_scanline(
         if n == 0 && bg0_is_3d {
             // Synthesize BG0 from the 3D framebuffer.
             let fb3d = framebuffer_3d.unwrap();
+            let alpha3d = alpha_3d.unwrap_or(&[]);
             let line_off = line as usize * 256;
             let priority = (engine.bgcnt[0] & 0x3) as u8;
+            let hofs = (engine.bg_hofs[0] as usize) & 0x1FF;
             let mut layer = [None; 256];
             for x in 0..256 {
-                let pixel = fb3d[line_off + x];
+                let src_x = (x + hofs) & 0x1FF;
+                if src_x >= 256 {
+                    continue;
+                }
+                let idx = line_off + src_x;
+                let pixel = fb3d[idx];
                 if pixel & (1 << 15) != 0 {
                     layer[x] = Some(bg::BgPixel {
                         color: pixel & 0x7FFF,
                         priority,
                         bg_index: 0,
+                        alpha_3d: alpha3d.get(idx).copied(),
                     });
                 }
             }
@@ -247,5 +256,37 @@ pub fn render_scanline(
 
     if (1..=5).contains(&mode) {
         engine.advance_affine_refs();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vram::VramRouter;
+
+    #[test]
+    fn test_3d_bg0_horizontal_scroll_exposes_transparent_half() {
+        let mut engine = Engine2d::new(Which::A);
+        engine.dispcnt = (1 << 16) | (1 << 8) | (1 << 3);
+        engine.bg_hofs[0] = 255;
+
+        let mut fb3d = vec![0u16; 256 * 192];
+        let alpha3d = vec![31u8; 256 * 192];
+        fb3d[255] = 0x8000 | 0x001F;
+
+        let mut framebuffer = vec![0u16; 256 * 192];
+        render_scanline(
+            &mut engine,
+            0,
+            &[0; 0x400],
+            &[0; 0x400],
+            &VramRouter::new(),
+            &mut framebuffer,
+            Some(&fb3d),
+            Some(&alpha3d),
+        );
+
+        assert_eq!(framebuffer[0] & 0x7FFF, 0x001F);
+        assert_eq!(framebuffer[1] & 0x7FFF, 0);
     }
 }
