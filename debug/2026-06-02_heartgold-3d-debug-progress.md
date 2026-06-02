@@ -952,3 +952,161 @@ Why this matters:
   decorative end marker.
 - Keeping incomplete-list state visible to `SWAP_BUFFERS` preserves the
   documented lock-up behavior instead of hiding malformed command streams.
+
+## 2026-06-02 conformance coverage: texture-coordinate transform bottom row
+
+Status: **Coverage added; no implementation change required**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's texture-coordinate transform formulas.
+
+### Rule checked
+
+In texture coordinate transform modes 2 and 3, the texture matrix still exists
+as a 4x4 matrix, but the bottom row used by the formula is replaced by the most
+recent `TEXCOORD` command's `S` and `T` values:
+
+- Mode 2 (`Normal source`) evaluates on `NORMAL`.
+- Mode 3 (`Vertex source`) evaluates on each `VTX_*` command.
+- `m[12]` and `m[13]` from the texture matrix must not add an extra
+  translation in those modes.
+
+### Local result
+
+The current implementation already matched that rule: modes 2 and 3 add the
+raw `TEXCOORD` base values and ignore the texture matrix bottom-row
+translation. I added regression tests to lock this down because texture
+coordinate transforms are a plausible source of title-scene texture corruption.
+
+Tests added:
+
+```text
+test_texcoord_transform_mode_2_replaces_matrix_bottom_row_with_texcoord
+test_texcoord_transform_mode_3_replaces_matrix_bottom_row_with_texcoord
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::vertex --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- `gpu3d::vertex` release tests: `24 passed; 0 failed`.
+- `nds-core` full release suite: `483 passed; 0 failed`.
+
+## 2026-06-02 correction: fog alpha first-boundary hardware glitch
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+came from GBATEK's fog post-effect notes.
+
+### Symptom class
+
+- Fog alpha was blended with `FOG_COLOR` alpha for every fogged pixel.
+- On real hardware, the fog alpha value is treated as `31` in the region up to
+  the first fog depth boundary.
+- With nonzero `FOG_TABLE[0]` and a low fog alpha, local output could make
+  near fogged pixels incorrectly translucent or fully transparent.
+
+### Root cause
+
+- `apply_fog()` used `FOG_COLOR[20:16]` directly for alpha blending
+  regardless of depth region.
+- The density logic already understood the first boundary, but the alpha path
+  did not account for the documented hardware quirk.
+
+### Spec basis
+
+- GBATEK notes that fog alpha appears to be ignored, effectively treated as
+  `31`, up to the first density boundary.
+- The note also explains why this is often invisible in games: density 0 is
+  commonly zero, so multiplying by that region's density hides the quirk.
+
+### Fix
+
+- Added `fog_alpha_glitch_uses_full_alpha()` to detect the first-boundary
+  region in the same depth units used by fog density.
+- `apply_fog()` now substitutes fog alpha `31` only for that region and keeps
+  normal `FOG_COLOR` alpha elsewhere.
+
+Tests added:
+
+```text
+test_fog_alpha_uses_full_alpha_before_first_boundary
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::raster::postfx --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- `gpu3d::raster::postfx` release tests: `17 passed; 0 failed`.
+- `nds-core` full release suite: `484 passed; 0 failed`.
+
+## 2026-06-02 correction: shadow mode on degenerate line/point paths
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+came from GBATEK's shadow polygon behavior plus local raster-path inspection.
+
+### Symptom class
+
+- Normal filled shadow polygons used the shadow stencil rules.
+- Degenerate polygons that rasterized as line segments or points bypassed
+  those rules and could write color directly.
+- That made shadow mask lines behave like visible translucent geometry instead
+  of stencil-only mask geometry.
+
+### Root cause
+
+- `rasterize_scanline()` had explicit shadow handling for normal triangle
+  pixels.
+- `draw_wire_line()` and `draw_point()` had their own fragment write paths and
+  only skipped same-ID translucent rejection for shadow mode; they did not
+  apply the shadow mask / visible-shadow stencil rules.
+
+### Spec basis
+
+- GBATEK describes shadow mode as a two-step stencil process:
+  - Polygon ID `0` writes the shadow mask and does not write the color buffer.
+  - Polygon ID `1..3Fh` draws only where the stencil is clear and where the
+    destination polygon ID differs; if a stencil bit is set, it is cleared and
+    the visible shadow pixel is skipped.
+- The polygon definition docs also say line segments are represented by
+  degenerate triangles, so shadow-mode degenerate triangles should not escape
+  shadow-mode semantics.
+
+### Fix
+
+- Added `shadow_fragment_is_hidden_or_masked()` as the shared shadow fragment
+  decision.
+- Routed normal triangles, degenerate line segments, and zero-dot point
+  fragments through that helper before color/depth/fog/id writes.
+
+Tests added:
+
+```text
+test_shadow_mask_line_does_not_write_color
+test_visible_shadow_line_draws_only_where_mask_is_clear
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core shadow --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- Shadow-targeted release tests: `5 passed; 0 failed`.
+- `nds-core` full release suite: `486 passed; 0 failed`.

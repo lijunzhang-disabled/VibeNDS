@@ -111,6 +111,11 @@ fn apply_fog(rast: &mut Rasterizer) {
 
         let depth = rast.depth_buffer[i].max(0);
         let density = fog_density_for_depth(depth, fog_offset, shift, &fog_table);
+        let effective_fog_alpha = if fog_alpha_glitch_uses_full_alpha(depth, fog_offset, shift) {
+            31
+        } else {
+            fog_alpha
+        };
 
         let pixel = rast.framebuffer[i];
         let pr = (pixel & 0x1F) as u32;
@@ -121,7 +126,7 @@ fn apply_fog(rast: &mut Rasterizer) {
         let blend = |p: u32, f: u32| -> u32 { (p * (128 - density) + f * density) / 128 };
 
         let pa = rast.alpha_buffer[i] as u32;
-        let na = blend(pa, fog_alpha).min(31) as u8;
+        let na = blend(pa, effective_fog_alpha).min(31) as u8;
         rast.alpha_buffer[i] = na;
         if na == 0 {
             rast.framebuffer[i] &= !(1 << 15);
@@ -228,6 +233,14 @@ fn fog_density_for_depth(depth: i32, fog_offset: u16, shift: u32, table: &[u8; 3
 
 fn fog_depth_units(depth: i32) -> i32 {
     (depth.max(0) >> 9).min(0x7FFF)
+}
+
+fn fog_alpha_glitch_uses_full_alpha(depth: i32, fog_offset: u16, shift: u32) -> bool {
+    let depth = fog_depth_units(depth);
+    let offset = (fog_offset & 0x7FFF) as i32;
+    let step = if shift <= 10 { 0x400 >> shift } else { 0 };
+    let first_boundary = offset + step;
+    depth <= first_boundary
 }
 
 fn alpha_blend_bgr555(top: u16, bottom: u16, alpha: u8) -> u16 {
@@ -560,6 +573,25 @@ mod tests {
         assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x7FFF);
         assert_eq!(r.alpha_buffer[idx], 0);
         assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
+    }
+
+    #[test]
+    fn test_fog_alpha_uses_full_alpha_before_first_boundary() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = (1 << 6) | (1 << 7); // alpha-only fog + fog enable
+        r.fog_color = 0 << 16; // fog alpha would normally fade to transparent
+        r.fog_table[0] = 64;
+
+        let idx = 20 * FB_WIDTH + 20;
+        r.framebuffer[idx] = 0x7FFF | (1 << 15);
+        r.alpha_buffer[idx] = 31;
+        r.depth_buffer[idx] = 0; // before first fog boundary
+        r.fog_enable_buffer[idx] = 1;
+
+        apply(&mut r);
+
+        assert_eq!(r.alpha_buffer[idx], 31);
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 1 << 15);
     }
 
     #[test]

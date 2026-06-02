@@ -157,8 +157,7 @@ impl VertexState {
 
     /// `END_VTXS` — real NDS hardware treats this as a no-op. Vertex lists
     /// are implicitly ended by the next `BEGIN_VTXS` or by `SWAP_BUFFERS`.
-    pub fn end(&mut self) {
-    }
+    pub fn end(&mut self) {}
 
     /// Internal list termination used for events that really do close the
     /// active list, such as buffer swaps.
@@ -582,6 +581,25 @@ mod tests {
     }
 
     #[test]
+    fn test_texcoord_transform_mode_2_replaces_matrix_bottom_row_with_texcoord() {
+        let mut v = VertexState::new();
+        let mut s = ident_stacks();
+        let mut m = Matrix::identity().mul_scale(8 * ONE, 4 * ONE, ONE);
+        // GBATEK: in mode 2 the bottom row is replaced by the most recent
+        // TEXCOORD S/T values, so m[12]/m[13] must not contribute.
+        m.m[12] = 100 * ONE;
+        m.m[13] = -100 * ONE;
+        s.set_mode(MtxMode::Texture);
+        s.load(m);
+
+        v.set_tex_image_param(2 << 30);
+        v.set_texcoord((20u32 << 16) | 10, &s);
+        v.apply_normal_texcoord_transform([0x100, 0x100, 0], &s);
+
+        assert_eq!(v.current_tex, [10 + (4 << 4), 20 + (2 << 4)]);
+    }
+
+    #[test]
     fn test_texcoord_transform_mode_3_uses_vertex_source() {
         let mut v = VertexState::new();
         let mut s = ident_stacks();
@@ -596,6 +614,31 @@ mod tests {
         }
 
         assert_eq!(v.polygon_buffer[0].vertices[0].tex, [4 << 4, 12 << 4]);
+    }
+
+    #[test]
+    fn test_texcoord_transform_mode_3_replaces_matrix_bottom_row_with_texcoord() {
+        let mut v = VertexState::new();
+        let mut s = ident_stacks();
+        let mut m = Matrix::identity().mul_scale(2 * ONE, 3 * ONE, ONE);
+        // GBATEK: in mode 3 the bottom row is replaced by the most recent
+        // TEXCOORD S/T values when each VTX command executes.
+        m.m[12] = 100 * ONE;
+        m.m[13] = -100 * ONE;
+        s.set_mode(MtxMode::Texture);
+        s.load(m);
+
+        v.set_tex_image_param(3 << 30);
+        v.set_texcoord((8u32 << 16) | 4, &s);
+        v.begin(PrimitiveType::Triangles);
+        for _ in 0..3 {
+            v.submit_vertex([2 * ONE, 4 * ONE, 0], &s);
+        }
+
+        assert_eq!(
+            v.polygon_buffer[0].vertices[0].tex,
+            [4 + (4 << 4), 8 + (12 << 4)]
+        );
     }
 
     #[test]

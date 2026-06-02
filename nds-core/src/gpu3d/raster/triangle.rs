@@ -209,7 +209,13 @@ fn draw_wire_line(
                     effective_alpha,
                 );
                 if is_shadow_mode(attr) {
-                    // Shadow mode handles polygon-ID/stencil rejection below.
+                    if shadow_fragment_is_hidden_or_masked(rast, idx, poly_id) {
+                        if advance_line_cursor(&mut x0, &mut y0, x1, y1, sx, sy, dx, dy, &mut err) {
+                            break;
+                        }
+                        step += 1;
+                        continue;
+                    }
                 } else if translucent_same_id_rejects(rast, idx, poly_id, effective_alpha) {
                     if advance_line_cursor(&mut x0, &mut y0, x1, y1, sx, sy, dx, dy, &mut err) {
                         break;
@@ -335,8 +341,11 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
     if depth_test_passes(attr, depth_24, rast.depth_buffer[idx]) {
         let preserve_edge =
             should_preserve_existing_edge_mark(rast, x as usize, y as usize, effective_alpha);
-        if !is_shadow_mode(attr) && translucent_same_id_rejects(rast, idx, poly_id, effective_alpha)
-        {
+        if is_shadow_mode(attr) {
+            if shadow_fragment_is_hidden_or_masked(rast, idx, poly_id) {
+                return;
+            }
+        } else if translucent_same_id_rejects(rast, idx, poly_id, effective_alpha) {
             return;
         }
 
@@ -649,17 +658,7 @@ fn rasterize_scanline(
             let preserve_edge =
                 should_preserve_existing_edge_mark(rast, x as usize, y as usize, effective_alpha);
             if is_shadow_mode(a.attr) {
-                if a.poly_id == 0 {
-                    // Shadow mask pass: no color-buffer write. The follow-up
-                    // visible shadow pass uses a non-zero polygon ID.
-                    rast.shadow_stencil[idx] = 1;
-                    continue;
-                }
-                if rast.shadow_stencil[idx] != 0 {
-                    rast.shadow_stencil[idx] = 0;
-                    continue;
-                }
-                if rast.id_buffer[idx] == a.poly_id {
+                if shadow_fragment_is_hidden_or_masked(rast, idx, a.poly_id) {
                     continue;
                 }
             } else if translucent_same_id_rejects(rast, idx, a.poly_id, effective_alpha) {
@@ -695,6 +694,20 @@ fn rasterize_scanline(
 
 fn is_shadow_mode(attr: u32) -> bool {
     ((attr >> 4) & 0x3) == 3
+}
+
+fn shadow_fragment_is_hidden_or_masked(rast: &mut Rasterizer, idx: usize, poly_id: u8) -> bool {
+    if poly_id == 0 {
+        // Shadow mask pass: no color-buffer write. The follow-up visible
+        // shadow pass uses a non-zero polygon ID.
+        rast.shadow_stencil[idx] = 1;
+        return true;
+    }
+    if rast.shadow_stencil[idx] != 0 {
+        rast.shadow_stencil[idx] = 0;
+        return true;
+    }
+    rast.id_buffer[idx] == poly_id
 }
 
 fn translucent_same_id_rejects(
@@ -1863,6 +1876,44 @@ mod tests {
         let idx = (15 * FB_WIDTH) + 30;
         assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
         assert_eq!(r.shadow_stencil[idx], 1);
+    }
+
+    #[test]
+    fn test_shadow_mask_line_does_not_write_color() {
+        let mut r = Rasterizer::new();
+        let p = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(20, 10, 0x0000), sv(10, 10, 0x0000)],
+            0,
+        );
+
+        r.render_frame(&[p], None);
+
+        let idx = (10 * FB_WIDTH) + 15;
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
+        assert_eq!(r.shadow_stencil[idx], 1);
+    }
+
+    #[test]
+    fn test_visible_shadow_line_draws_only_where_mask_is_clear() {
+        let mut r = Rasterizer::new();
+        let visible = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(20, 10, 0x0000), sv(10, 10, 0x0000)],
+            1,
+        );
+
+        r.render_frame(&[visible.clone()], None);
+
+        let idx = (10 * FB_WIDTH) + 15;
+        assert_ne!(r.framebuffer[idx] & (1 << 15), 0);
+
+        let mask = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(20, 10, 0x0000), sv(10, 10, 0x0000)],
+            0,
+        );
+        r.render_frame(&[mask, visible], None);
+
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 0);
+        assert_eq!(r.shadow_stencil[idx], 0);
     }
 
     #[test]
