@@ -1594,6 +1594,59 @@ mod tests {
     }
 
     #[test]
+    fn test_end_vtxs_direct_port_is_noop_via_arm9_io() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_04A4, (1 << 13) | (0x1F << 16) | (1 << 6) | (1 << 7));
+        bus.write32(0x0400_0500, 0); // BEGIN_VTXS triangles
+        bus.write32(0x0400_048C, 0); // first VTX_16
+        bus.write32(0x0400_048C, 0x800);
+
+        bus.write32(0x0400_0504, 0); // END_VTXS is a hardware no-op.
+
+        for _ in 0..2 {
+            bus.write32(0x0400_048C, 0);
+            bus.write32(0x0400_048C, 0x800);
+        }
+
+        assert_eq!(bus.shared.gpu3d.geometry_polygons.len(), 1);
+        assert!(bus.shared.gpu3d.vertex.list_active);
+    }
+
+    #[test]
+    fn test_begin_vtxs_direct_port_restarts_partial_list_via_arm9_io() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_04A4, (1 << 13) | (0x1F << 16) | (1 << 6) | (1 << 7));
+        bus.write32(0x0400_0500, 0); // BEGIN_VTXS triangles
+        for _ in 0..2 {
+            bus.write32(0x0400_048C, 0);
+            bus.write32(0x0400_048C, 0x800);
+        }
+
+        bus.write32(0x0400_0500, 0); // New BEGIN_VTXS discards the partial list.
+        for _ in 0..3 {
+            bus.write32(0x0400_048C, 0);
+            bus.write32(0x0400_048C, 0x800);
+        }
+
+        assert_eq!(bus.shared.gpu3d.geometry_polygons.len(), 1);
+        assert!(bus.shared.gpu3d.vertex.vertex_buffer.is_empty());
+    }
+
+    #[test]
     fn test_out_of_list_vtx_does_not_seed_inherited_position_via_io() {
         let mut nds = Nds::new(None, None);
         let mut bus = Bus9::new(

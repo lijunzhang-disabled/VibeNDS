@@ -290,7 +290,8 @@ When we sit down to implement Phase 6, every command in the GX command table map
 - "Update a matrix" (load / mult / push / pop)
 - "Receive a vertex" (transform it through the current matrices)
 - "Receive vertex metadata" (color, normal, texcoord — they apply to the *next* `VTX_*`)
-- "Start / end a primitive" (`BEGIN_VTXS` / `END_VTXS`)
+- "Start a primitive" (`BEGIN_VTXS`; `END_VTXS` is effectively a no-op on
+  real hardware)
 - "Swap buffers" (`SWAP_BUFFERS`)
 - "Set a viewport / fog / light / material parameter"
 

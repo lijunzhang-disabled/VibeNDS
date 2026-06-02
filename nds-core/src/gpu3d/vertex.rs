@@ -76,7 +76,9 @@ pub struct Polygon {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VertexState {
     pub primitive: Option<PrimitiveType>,
-    /// True while a vertex list is open between BEGIN_VTXS and END_VTXS.
+    /// True while a vertex list is open. Real hardware only terminates this
+    /// state when a new BEGIN_VTXS starts or SWAP_BUFFERS force-ends it;
+    /// END_VTXS itself is effectively a no-op.
     pub list_active: bool,
     /// Last submitted vertex position (the "current" pos for `VTX_DIFF`).
     pub last_pos: [i32; 3],
@@ -153,10 +155,9 @@ impl VertexState {
         self.strip_palette_base = self.palette_base;
     }
 
-    /// `END_VTXS` — close the active vertex list. New VTX commands are
-    /// ignored until the next `BEGIN_VTXS`.
+    /// `END_VTXS` — real NDS hardware treats this as a no-op. Vertex lists
+    /// are implicitly ended by the next `BEGIN_VTXS` or by `SWAP_BUFFERS`.
     pub fn end(&mut self) {
-        self.force_end();
     }
 
     /// Internal list termination used for events that really do close the
@@ -640,6 +641,26 @@ mod tests {
     }
 
     #[test]
+    fn test_begin_vtxs_restarts_list_and_discards_partial_vertices() {
+        let mut v = VertexState::new();
+        let s = ident_stacks();
+
+        v.begin(PrimitiveType::Triangles);
+        v.submit_vertex([0, 0, 0], &s);
+        v.submit_vertex([ONE, 0, 0], &s);
+
+        v.begin(PrimitiveType::Triangles);
+        v.submit_vertex([0, 0, 0], &s);
+        v.submit_vertex([ONE, 0, 0], &s);
+        v.submit_vertex([0, ONE, 0], &s);
+
+        assert_eq!(v.polygon_buffer.len(), 1);
+        assert_eq!(v.polygon_buffer[0].vertices[0].clip[0], 0);
+        assert_eq!(v.polygon_buffer[0].vertices[1].clip[0], ONE);
+        assert_eq!(v.polygon_buffer[0].vertices[2].clip[1], ONE);
+    }
+
+    #[test]
     fn test_separate_triangles_snapshot_texture_per_polygon() {
         let mut v = VertexState::new();
         let s = ident_stacks();
@@ -713,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn test_end_vtxs_closes_active_list() {
+    fn test_end_vtxs_is_noop_inside_active_list() {
         let mut v = VertexState::new();
         let s = ident_stacks();
 
@@ -723,9 +744,9 @@ mod tests {
         v.submit_vertex([ONE, 0, 0], &s);
         v.submit_vertex([0, ONE, 0], &s);
 
-        assert!(v.polygon_buffer.is_empty());
-        assert!(!v.list_active);
-        assert_eq!(v.primitive, None);
+        assert_eq!(v.polygon_buffer.len(), 1);
+        assert!(v.list_active);
+        assert_eq!(v.primitive, Some(PrimitiveType::Triangles));
         assert!(v.vertex_buffer.is_empty());
     }
 

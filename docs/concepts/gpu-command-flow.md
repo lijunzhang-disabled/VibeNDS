@@ -186,6 +186,10 @@ Bracket primitives + frame-level events.
 | 0x50 | SWAP_BUFFERS | 1 |
 | 0x60 | VIEWPORT | 1 |
 
+`BEGIN_VTXS` starts or restarts the active vertex list. `END_VTXS` exists in
+the command table but behaves as a no-op on real hardware; lists are really
+terminated by the next `BEGIN_VTXS` or by `SWAP_BUFFERS`.
+
 ### 4e. Test commands (`0x70..0x72`, 3 commands)
 
 Hardware-accelerated frustum / position / vector tests; results go to `GXSTAT`. Used for ARM9-side culling.

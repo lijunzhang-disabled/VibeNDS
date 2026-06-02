@@ -40,6 +40,17 @@ For this repo, fixes should be justified by:
 The debug notes below are written around root cause and evidence rather than
 source-to-source translation.
 
+Direct reference-implementation audit for today's committed fixes:
+
+- Bugs fixed by directly translating or copying a reference implementation:
+  **0**.
+- Bugs where a reference emulator was used only as a sanity check during
+  investigation: **1 area**, polygon ordering.
+- Bugs fixed from NDS docs / GBATEK plus local regression tests: the FIFO
+  command-stream fixes, GXSTAT/status fixes, viewport handling, `VEC_TEST`
+  matrix-mode behavior, `END_VTXS` no-op behavior, and `BEGIN_VTXS` restart
+  coverage.
+
 ## Symptom progression
 
 ### Initial HeartGold run
@@ -423,33 +434,41 @@ I did previously use melonDS as a sanity check while investigating polygon
 ordering behavior, as noted above. That was one investigation thread, not a
 source-to-source translation path for this batch.
 
-### 1. `END_VTXS` incorrectly left the vertex list open
+### 1. Superseded: `END_VTXS` vertex-list handling
 
-Symptom class:
+Status: **Superseded by the later `END_VTXS` no-op correction below.**
+
+The analysis in this subsection preserved an early interpretation that treated
+`END_VTXS` as an explicit list terminator. That matched a plain reading of
+the command name, but it did not match the later hardware check against
+GBATEK/no$gba behavior.
+
+Earlier assumed symptom class:
 
 - Geometry commands after `END_VTXS` could continue appending to the previous
   list.
 - That makes command streams with explicit begin/end boundaries behave as if
   the end marker was only decorative.
 
-Root cause:
+Why that was wrong:
 
-- `VertexState::end()` was a no-op.
-- The existing local test even asserted that the active primitive should remain
-  active after `END_VTXS`.
+- Real hardware treats `END_VTXS` as decorative; the local no-op behavior was
+  directionally correct.
+- The actual bug was the later change that made `END_VTXS` clear active
+  primitive state.
 
-Spec basis:
+Misread spec basis:
 
 - The NDS vertex command docs describe `BEGIN_VTXS` as starting a vertex list
   and `END_VTXS` as ending that list.
 - They also say a new list or swap can implicitly end the current list, but
-  that does not make explicit `END_VTXS` a no-op.
+  this was not enough evidence to override GBATEK's explicit no-op note.
 
-Fix:
+Superseded attempted fix:
 
-- `END_VTXS` now calls the same list-closing path used by implicit termination.
-- The tests were inverted to prove the list becomes inactive and no unfinished
-  polygon remains live after the command.
+- `END_VTXS` was temporarily changed to call the same list-closing path used
+  by implicit termination.
+- That behavior has now been reversed by the later no-op correction.
 
 Why this matters:
 
@@ -877,3 +896,59 @@ Why this matters:
   visibility and vector-space checks.
 - Letting it work in the wrong mode hides command-stream or matrix-mode bugs
   that real hardware would expose.
+
+## 2026-06-02 correction: `END_VTXS` is a hardware no-op
+
+Status: **Fixed after reversing the earlier local interpretation**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+came from comparing the local vertex-list state machine with ndsdoc's
+"optional" end-command framing and GBATEK's explicit note that `END_VTXS` has
+no effect on real NDS/no$gba.
+
+### Symptom class
+
+- `END_VTXS` cleared the active primitive and vertex buffer.
+- A command stream that emitted `BEGIN_VTXS`, one or two vertices,
+  `END_VTXS`, then more vertices would lose the later vertices locally.
+- An incomplete list followed by `END_VTXS` and `SWAP_BUFFERS` could avoid the
+  geometry lock-up path, even though hardware still considers the list state
+  live.
+
+### Root cause
+
+- `VertexState::end()` called `force_end()`.
+- That made the explicit `END_VTXS` command behave like the implicit
+  termination performed by `BEGIN_VTXS` and `SWAP_BUFFERS`.
+
+### Spec basis
+
+- ndsdoc says `END_VTXS` is optional because vertex lists are automatically
+  ended when a new one begins or when buffers are swapped.
+- GBATEK is more direct: `END_VTXS` has no effect on real hardware and may be
+  issued multiple times inside a vertex list.
+
+### Fix
+
+- `VertexState::end()` is now a no-op.
+- `force_end()` remains the internal path for events that really terminate a
+  list: `BEGIN_VTXS` clears and restarts state, and `SWAP_BUFFERS` force-ends
+  after accepting a complete list.
+
+Tests added/updated:
+
+```text
+test_end_vtxs_is_noop_inside_active_list
+test_end_vtxs_command_is_noop_for_vertex_submission
+test_end_vtxs_does_not_hide_incomplete_list_from_swap_lock
+test_end_vtxs_direct_port_is_noop_via_arm9_io
+test_begin_vtxs_restarts_list_and_discards_partial_vertices
+test_begin_vtxs_direct_port_restarts_partial_list_via_arm9_io
+```
+
+Why this matters:
+
+- The emulator should not discard vertices simply because software emits the
+  decorative end marker.
+- Keeping incomplete-list state visible to `SWAP_BUFFERS` preserves the
+  documented lock-up behavior instead of hiding malformed command streams.

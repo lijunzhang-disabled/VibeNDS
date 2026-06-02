@@ -843,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn test_end_vtxs_command_closes_vertex_list() {
+    fn test_end_vtxs_command_is_noop_for_vertex_submission() {
         let mut e = Engine3d::new();
         e.dispatch(GxOp {
             cmd: GxCmd::PolygonAttr as u8,
@@ -870,9 +870,36 @@ mod tests {
             params: vec![0, (ONE / 2) as u32 & 0xFFFF],
         });
 
-        assert!(e.geometry_polygons.is_empty());
-        assert!(!e.vertex.list_active);
-        assert_eq!(e.vertex.primitive, None);
+        assert_eq!(e.geometry_polygons.len(), 1);
+        assert!(e.vertex.list_active);
+        assert_eq!(e.vertex.primitive, Some(PrimitiveType::Triangles));
+    }
+
+    #[test]
+    fn test_end_vtxs_does_not_hide_incomplete_list_from_swap_lock() {
+        let mut e = Engine3d::new();
+        e.dispatch(GxOp {
+            cmd: GxCmd::BeginVtxs as u8,
+            params: vec![0],
+        });
+        for _ in 0..2 {
+            e.dispatch(GxOp {
+                cmd: GxCmd::Vtx16 as u8,
+                params: vec![0, (ONE / 2) as u32 & 0xFFFF],
+            });
+        }
+        e.dispatch(GxOp {
+            cmd: GxCmd::EndVtxs as u8,
+            params: vec![],
+        });
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::SwapBuffers as u8,
+            params: vec![0],
+        });
+
+        assert!(e.geometry_locked);
+        assert!(!e.swap_pending);
     }
 
     #[test]
