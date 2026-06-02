@@ -996,6 +996,47 @@ mod tests {
     }
 
     #[test]
+    fn test_disp3dcnt_reports_and_acknowledges_polygon_vertex_ram_overflow() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.shared.gpu3d.fifo.overflow = true;
+
+        assert_eq!(bus.read16(0x0400_0060) & (1 << 13), 1 << 13);
+
+        bus.write16(0x0400_0060, 1 << 13);
+
+        assert!(!bus.shared.gpu3d.fifo.overflow);
+        assert_eq!(bus.read16(0x0400_0060) & (1 << 13), 0);
+        assert_eq!(bus.shared.gpu3d.rasterizer.disp3dcnt & (1 << 13), 0);
+    }
+
+    #[test]
+    fn test_disp3dcnt_word_access_acknowledges_polygon_vertex_ram_overflow() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.shared.gpu3d.fifo.overflow = true;
+
+        assert_eq!(bus.read32(0x0400_0060) & (1 << 13), 1 << 13);
+
+        bus.write32(0x0400_0060, 1 << 13);
+
+        assert!(!bus.shared.gpu3d.fifo.overflow);
+        assert_eq!(bus.read32(0x0400_0060) & (1 << 13), 0);
+    }
+
+    #[test]
     fn test_io_register_per_cpu_isolation() {
         let mut nds = Nds::new(None, None);
         // Write IE on ARM9 — should not be visible from ARM7's IE.
@@ -1803,6 +1844,26 @@ mod tests {
         assert_eq!(bus.read32(0x0400_0600) & (3 << 30), 1 << 30);
         drop(bus);
         assert_ne!(nds.shared.irq9.read_if() & interrupt::Irq::GxFifo.bit(), 0);
+    }
+
+    #[test]
+    fn test_gxstat_low_halfword_write_does_not_clear_fifo_irq_mode() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write16(0x0400_0602, 2 << 14);
+        bus.shared.gpu3d.stacks.overflow = true;
+
+        bus.write16(0x0400_0600, 1 << 15);
+
+        assert_eq!(bus.shared.gpu3d.fifo.irq_mode, 2);
+        assert!(!bus.shared.gpu3d.stacks.overflow);
+        assert_eq!(bus.read32(0x0400_0600) & (3 << 30), 2 << 30);
     }
 
     #[test]

@@ -63,9 +63,10 @@ pub struct MatrixStacks {
     /// five bits; entries 32..63 mirror 0..31 and set the overflow flag.
     pub position_sp: u8,
 
-    /// Saved snapshot for texture (1-deep).
+    /// Saved snapshot for texture (1-deep) and its hidden 1-bit stack pointer.
+    /// GXSTAT does not expose the texture stack pointer.
     pub texture_saved: Matrix,
-    pub texture_saved_valid: bool,
+    pub texture_sp: u8,
 
     /// Sticky overflow flag (`GXSTAT` bit 15). Set on push past the end of
     /// the 32-deep position stack, or pop on an empty stack, or any depth
@@ -87,7 +88,7 @@ impl MatrixStacks {
             vector_stack: vec![Matrix::identity(); 32],
             position_sp: 0,
             texture_saved: Matrix::identity(),
-            texture_saved_valid: false,
+            texture_sp: 0,
             overflow: false,
         }
     }
@@ -177,11 +178,11 @@ impl MatrixStacks {
                 self.projection_sp = self.projection_sp.wrapping_add(1) & 1;
             }
             MtxMode::Texture => {
-                if self.texture_saved_valid {
-                    self.overflow = true; // already-saved -> overwrite-with-overflow
+                if self.texture_sp != 0 {
+                    self.overflow = true;
                 }
                 self.texture_saved = self.texture;
-                self.texture_saved_valid = true;
+                self.texture_sp = self.texture_sp.wrapping_add(1) & 1;
             }
             MtxMode::Position | MtxMode::PosVector => {
                 let idx = (self.position_sp & 0x1F) as usize;
@@ -212,12 +213,11 @@ impl MatrixStacks {
                 self.projection = self.projection_saved;
             }
             MtxMode::Texture => {
-                if !self.texture_saved_valid {
+                if self.texture_sp == 0 {
                     self.overflow = true;
-                    return;
                 }
+                self.texture_sp = self.texture_sp.wrapping_sub(1) & 1;
                 self.texture = self.texture_saved;
-                self.texture_saved_valid = false;
             }
             MtxMode::Position | MtxMode::PosVector => {
                 if signed_count < -30 {
@@ -245,7 +245,6 @@ impl MatrixStacks {
             }
             MtxMode::Texture => {
                 self.texture_saved = self.texture;
-                self.texture_saved_valid = true;
             }
             MtxMode::Position | MtxMode::PosVector => {
                 let idx = (slot & 0x1F) as usize;
@@ -265,11 +264,7 @@ impl MatrixStacks {
                 self.projection = self.projection_saved;
             }
             MtxMode::Texture => {
-                if self.texture_saved_valid {
-                    self.texture = self.texture_saved;
-                } else {
-                    self.overflow = true;
-                }
+                self.texture = self.texture_saved;
             }
             MtxMode::Position | MtxMode::PosVector => {
                 let idx = (slot & 0x1F) as usize;
@@ -298,12 +293,13 @@ impl MatrixStacks {
         self.position.mul_matrix(&self.projection)
     }
 
-    /// GXSTAT bit 15 is write-one-to-clear. Hardware also resets the
-    /// projection stack pointer when acknowledging the matrix-stack error.
+    /// GXSTAT bit 15 is write-one-to-clear. GBATEK notes that acknowledging
+    /// it also resets the projection stack pointer, and probably the texture
+    /// stack pointer.
     pub fn clear_overflow_error(&mut self) {
         self.overflow = false;
         self.projection_sp = 0;
-        self.texture_saved_valid = false;
+        self.texture_sp = 0;
     }
 }
 
@@ -331,12 +327,21 @@ mod tests {
     }
 
     #[test]
-    fn test_pos_vector_mode_keeps_lockstep() {
+    fn test_pos_vector_mode_mult_updates_full_vector_matrix() {
         let mut s = MatrixStacks::new();
         s.set_mode(MtxMode::PosVector);
-        s.mult(Matrix::identity().mul_translate(7 * ONE, 0, 0));
-        // Both position and vector got the multiply applied.
+        let m = Matrix::identity()
+            .mul_scale(2 * ONE, 3 * ONE, 4 * ONE)
+            .mul_translate(7 * ONE, 0, 0);
+        s.mult(m);
+
+        assert_eq!(s.position.at(0, 0), 2 * ONE);
+        assert_eq!(s.position.at(1, 1), 3 * ONE);
+        assert_eq!(s.position.at(2, 2), 4 * ONE);
         assert_eq!(s.position.at(3, 0), 7 * ONE);
+        assert_eq!(s.vector.at(0, 0), 2 * ONE);
+        assert_eq!(s.vector.at(1, 1), 3 * ONE);
+        assert_eq!(s.vector.at(2, 2), 4 * ONE);
         assert_eq!(s.vector.at(3, 0), 7 * ONE);
     }
 
@@ -380,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pos_vector_translate_preserves_separate_matrices() {
+    fn test_pos_vector_translate_updates_position_and_vector_matrices() {
         let mut s = MatrixStacks::new();
         s.position = Matrix::identity().mul_scale(2 * ONE, 2 * ONE, 2 * ONE);
         s.vector = Matrix::identity().mul_scale(3 * ONE, 3 * ONE, 3 * ONE);
@@ -552,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_overflow_resets_projection_stack_level() {
+    fn test_clear_overflow_resets_projection_and_texture_stack_levels() {
         let mut s = MatrixStacks::new();
         s.set_mode(MtxMode::Projection);
         s.push();
@@ -564,7 +569,54 @@ mod tests {
 
         assert!(!s.overflow);
         assert_eq!(s.projection_sp, 0);
-        assert!(!s.texture_saved_valid);
+        assert_eq!(s.texture_sp, 0);
+    }
+
+    #[test]
+    fn test_texture_restore_uses_single_initialized_stack_slot() {
+        let mut s = MatrixStacks::new();
+        s.set_mode(MtxMode::Texture);
+        let current = Matrix::identity().mul_translate(7 * ONE, 0, 0);
+        s.load(current);
+
+        s.restore(31);
+
+        assert!(!s.overflow);
+        assert_eq!(s.texture, Matrix::identity());
+        assert_eq!(s.texture_sp, 0);
+    }
+
+    #[test]
+    fn test_texture_store_restore_do_not_change_stack_pointer() {
+        let mut s = MatrixStacks::new();
+        s.set_mode(MtxMode::Texture);
+        let stored = Matrix::identity().mul_scale(2 * ONE, 3 * ONE, 4 * ONE);
+        s.load(stored);
+
+        s.store(31);
+        s.identity();
+        s.restore(31);
+
+        assert!(!s.overflow);
+        assert_eq!(s.texture, stored);
+        assert_eq!(s.texture_sp, 0);
+    }
+
+    #[test]
+    fn test_texture_push_pop_uses_hidden_one_bit_stack_pointer() {
+        let mut s = MatrixStacks::new();
+        s.set_mode(MtxMode::Texture);
+        let saved = Matrix::identity().mul_translate(ONE, 0, 0);
+        s.load(saved);
+
+        s.push();
+        assert_eq!(s.texture_sp, 1);
+        s.identity();
+        s.pop(31);
+
+        assert!(!s.overflow);
+        assert_eq!(s.texture, saved);
+        assert_eq!(s.texture_sp, 0);
     }
 
     #[test]

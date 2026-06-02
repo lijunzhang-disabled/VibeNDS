@@ -10,9 +10,7 @@
 //! each, LSB-first: `ZZ`, `YY`, `XX`, `WW`). After the packed word, the
 //! ARM9 writes the parameters for each command in declaration order:
 //! all of cmd1's params, then all of cmd2's params, etc. Commands with
-//! zero parameters (like `MTX_PUSH`) do not emit normal params, but a
-//! zero-param final real command still consumes the hardware-required dummy
-//! word before the next packed command word.
+//! zero parameters (like `MTX_PUSH`) do not emit normal params.
 //!
 //! ## Direct format (`0x04000440..0x040005FF`)
 //!
@@ -86,10 +84,6 @@ pub struct GxFifo {
     /// GXSTAT bits 30-31: 0=never, 1=less-than-half, 2=empty.
     pub irq_mode: u8,
 
-    /// Packed FIFO rule: if the command word's final command takes no
-    /// parameters, the next word is a dummy parameter before another command
-    /// word may be accepted.
-    needs_zero_param_tail_dummy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +104,6 @@ impl GxFifo {
             overflow: false,
             fell_below_half: false,
             irq_mode: 0,
-            needs_zero_param_tail_dummy: false,
         }
     }
 
@@ -137,8 +130,6 @@ impl GxFifo {
         if !self.pending_cmds.is_empty() {
             // Otherwise this word is a parameter for the front pending cmd.
             self.consume_param(word);
-        } else if self.needs_zero_param_tail_dummy {
-            self.needs_zero_param_tail_dummy = false;
         } else {
             // If no commands are currently waiting on parameters, this word
             // is itself a packed-command word: extract 4 command IDs.
@@ -207,8 +198,6 @@ impl GxFifo {
 
     fn unpack_packed_word(&mut self, word: u32) {
         // Four command IDs, LSB-first.
-        let mut saw_command = false;
-        let mut last_remaining = 0;
         for shift in [0u32, 8, 16, 24] {
             let id = ((word >> shift) & 0xFF) as u8;
             if id == 0 {
@@ -224,15 +213,12 @@ impl GxFifo {
                 break;
             };
             let needed = cmd.param_count();
-            saw_command = true;
-            last_remaining = needed;
             self.pending_cmds.push_back(PackedCmd {
                 cmd: id,
                 remaining: needed,
                 params: Vec::with_capacity(needed as usize),
             });
         }
-        self.needs_zero_param_tail_dummy = saw_command && last_remaining == 0;
     }
 
     fn consume_param(&mut self, word: u32) {
@@ -477,11 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_padded_packed_word_ending_with_zero_param_command_requires_dummy() {
+    fn test_zero_padded_packed_word_ending_with_zero_param_command_allows_next_command_word() {
         let mut f = GxFifo::new();
         f.write_packed(0x0000_0011); // MTX_PUSH, zero params, then zero padding.
-        f.write_packed(0x0000_0010); // Required dummy, not MTX_MODE command word.
-        f.write_packed(0x0000_0010); // Actual MTX_MODE command word.
+        f.write_packed(0x0000_0010); // Next command word: MTX_MODE.
         f.write_packed(1);
 
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
@@ -492,14 +477,14 @@ mod tests {
     }
 
     #[test]
-    fn test_packed_word_tail_dummy_waits_until_prior_params_consumed() {
+    fn test_zero_param_tail_after_prior_params_allows_next_command_word() {
         let mut f = GxFifo::new();
-        // MTX_MODE needs one parameter, then MTX_PUSH is the final command and
-        // must consume a dummy before the next command word.
+        // MTX_MODE needs one parameter, then MTX_PUSH is the final command.
+        // Once MTX_MODE's parameter is supplied, the next word is another
+        // packed command word rather than a dummy.
         f.write_packed(0x0000_1110);
         f.write_packed(2); // MTX_MODE parameter.
-        f.write_packed(0x0000_0012); // Required dummy, not MTX_POP.
-        f.write_packed(0x0000_0012); // Actual MTX_POP command word.
+        f.write_packed(0x0000_0012); // MTX_POP command word.
         f.write_packed(1);
 
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
@@ -512,11 +497,10 @@ mod tests {
     }
 
     #[test]
-    fn test_full_packed_word_ending_with_zero_param_command_requires_dummy_word() {
+    fn test_full_packed_word_ending_with_zero_param_command_allows_next_command_word() {
         let mut f = GxFifo::new();
         f.write_packed(0x1111_1111); // Four MTX_PUSH commands, no zero padding.
-        f.write_packed(0x0000_0010); // Required dummy, not MTX_MODE command word.
-        f.write_packed(0x0000_0010); // Actual MTX_MODE command word.
+        f.write_packed(0x0000_0010); // Next command word: MTX_MODE.
         f.write_packed(1);
 
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
@@ -526,6 +510,21 @@ mod tests {
             .all(|op| op.cmd == 0x11 && op.params.is_empty()));
         assert_eq!(ops[4].cmd, 0x10);
         assert_eq!(ops[4].params, vec![1]);
+    }
+
+    #[test]
+    fn test_repeated_packed_identity_words_do_not_need_dummy_words() {
+        let mut f = GxFifo::new();
+        // GBATEK's DMA overkill note uses Packed(00151515h) as an example:
+        // each word decompresses to three MTX_IDENTITY commands.
+        for _ in 0..4 {
+            f.write_packed(0x0015_1515);
+        }
+
+        assert_eq!(f.len(), 12);
+        let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
+        assert_eq!(ops.len(), 12);
+        assert!(ops.iter().all(|op| op.cmd == GxCmd::MtxIdentity as u8));
     }
 
     #[test]
@@ -641,7 +640,6 @@ mod tests {
 
         for _ in 0..32 {
             f.write_packed(0x1515_1515);
-            f.write_packed(0);
         }
 
         assert_eq!(f.len(), FIFO_HALF);

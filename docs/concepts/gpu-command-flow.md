@@ -28,7 +28,7 @@ ARM9's job is "build a list of commands describing this frame." The 3D engine's 
 
 This is structurally different from the 2D engines. Engine A composites BG0-3 + OBJ from registers that ARM9 wrote ahead of time — no commands, no FIFO, just memory-mapped state sampled per-pixel during the scanline render. The 3D engine has *no* equivalent state-only path: every change to its internal state goes through a command.
 
-Why this difference? The 3D pipeline is *stateful in a sequence-dependent way*. The matrix stack at the moment a `VTX_16` command arrives depends on every `MTX_*` command that came before. The current polygon attributes are whatever the last `POLYGON_ATTR` set. Sequencing commands through a FIFO makes that sequencing explicit; trying to express the same thing via memory-mapped registers would require either CPU stalls (write a vertex, wait for processing, write the next) or duplicating the FIFO logic in software.
+Why this difference? The 3D pipeline is *stateful in a sequence-dependent way*. The matrix stack at the moment a `VTX_16` command arrives depends on every `MTX_*` command that came before. Polygon attributes are latched at `BEGIN_VTXS`; writes before or during an active list are staged until the next list begins. Sequencing commands through a FIFO makes that sequencing explicit; trying to express the same thing via memory-mapped registers would require either CPU stalls (write a vertex, wait for processing, write the next) or duplicating the FIFO logic in software.
 
 ## 2. The producer side
 
@@ -54,10 +54,10 @@ ARM9 writes to 0x04000400:
 After all 3 words are consumed, the 3D engine has executed 4 commands in declaration order: `MTX_PUSH` (zero params, fires immediately), `MTX_MODE 2`, `MTX_IDENTITY` (zero params, fires when its declaration slot is reached), `MTX_POP 5`.
 
 Padding with `0x00` is valid — null bytes in the packed-cmd word are silently skipped.
-However, if the final real command in a packed command word takes zero
-parameters, the next FIFO word is a dummy word before another command word can
-begin. This applies even when the command word used zero padding after that
-last command.
+Zero-parameter commands still occupy FIFO entries, but they do not consume
+parameter words. A following FIFO word can therefore be the next packed command
+word. GBATEK's DMA-overkill note explicitly calls out repeated
+`Packed(00151515h)` words as producing many `MTX_IDENTITY` commands.
 
 ### 2b. Direct ports — `0x04000440..0x040005FF`
 
@@ -159,9 +159,9 @@ Either submit a vertex position (which triggers transformation + assembly) or se
 | 0x24 | VTX_10 | 1 | submit vertex (10-bit packed) |
 | 0x25-27 | VTX_XY/XZ/YZ | 1 | submit vertex (2 components, third kept) |
 | 0x28 | VTX_DIFF | 1 | submit vertex (delta from previous) |
-| 0x29 | POLYGON_ATTR | 1 | flags for the next polygon (alpha, mode, ID...) |
-| 0x2A | TEXIMAGE_PARAM | 1 | texture format + VRAM offset for next polygon |
-| 0x2B | PLTT_BASE | 1 | texture palette base for next polygon |
+| 0x29 | POLYGON_ATTR | 1 | polygon flags latched by the next `BEGIN_VTXS` |
+| 0x2A | TEXIMAGE_PARAM | 1 | texture format + VRAM offset for upcoming vertices |
+| 0x2B | PLTT_BASE | 1 | texture palette base for upcoming vertices |
 
 ### 4c. Lighting / material (`0x30..0x34`, 5 commands)
 

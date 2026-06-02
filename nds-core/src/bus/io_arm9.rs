@@ -230,7 +230,7 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
                 | ((shared.vram.read_cnt(BankId::I) as u16) << 8)
         }
         0x0304 => shared.powcnt1,
-        0x0060 => shared.gpu3d.rasterizer.disp3dcnt,
+        0x0060 => shared.gpu3d.read_disp3dcnt(),
         0x0600 => shared.gpu3d.gxstat_low(),
         0x0602 => shared.gpu3d.gxstat_high(),
         0x0604 => shared.gpu3d.ram_count() as u16,
@@ -564,13 +564,13 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0184 => write_fifocnt(shared, val),
         0x0204 => shared.exmemcnt = val,
         0x0246 => shared.wramcnt = val as u8,
-        0x0060 => shared.gpu3d.rasterizer.disp3dcnt = val & 0x4FFF,
+        0x0060 => shared.gpu3d.write_disp3dcnt(val),
         0x0600 => {
-            shared.gpu3d.write_gxstat(val as u32);
+            shared.gpu3d.write_gxstat_low(val);
             update_gxfifo_irq(shared);
         }
         0x0602 => {
-            shared.gpu3d.write_gxstat((val as u32) << 16);
+            shared.gpu3d.write_gxstat_high(val);
             update_gxfifo_irq(shared);
         }
         0x0610 => shared.gpu3d.disp_1dot_depth = val & 0x7FFF,

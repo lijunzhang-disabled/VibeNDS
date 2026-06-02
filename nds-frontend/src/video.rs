@@ -11,9 +11,9 @@ use sdl2::video::{Window, WindowContext};
 /// Default vertical gap between the two screens, measured in NDS pixels.
 ///
 /// A physical DS-style gap is roughly 90 native pixels, but that is bulky on a
-/// desktop monitor at 2x/3x scale. Keep the default compact and let callers
-/// opt into a larger bezel with `--screen-gap`.
-pub const DEFAULT_SCREEN_GAP: u32 = 24;
+/// desktop monitor at 2x/3x scale. Keep the default tight and let callers opt
+/// into a larger bezel with `--screen-gap`.
+pub const DEFAULT_SCREEN_GAP: u32 = 8;
 
 pub struct DualScreen {
     canvas: Canvas<Window>,

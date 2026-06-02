@@ -155,10 +155,10 @@ For each vertex the game submits:
 ### 5a. Multiply by the current matrix
 
 ```
-clip_pos = projection × position × vertex_pos
+clip_pos = vertex_pos × position × projection
 ```
 
-This is one 4×4 × 4-vector multiply (matrix mul matrix could be precomputed once per primitive, but the NDS GPU does it per-vertex). Output: a 4D **clip-space** position with potentially weird-looking `(x, y, z, w)` values.
+The NDS uses row-vector order here, matching GBATEK's `(x,y,z,1) * ClipMatrix` notation. This is one 4-vector × 4×4 multiply (matrix mul matrix could be precomputed once per primitive, but the NDS GPU does it per-vertex). Output: a 4D **clip-space** position with potentially weird-looking `(x, y, z, w)` values.
 
 ### 5b. Lighting (if enabled for this polygon)
 
@@ -195,7 +195,7 @@ The fix: **Sutherland-Hodgman clipping** against the six planes of the canonical
 ```
 -W ≤ x ≤ +W       (left and right planes)
 -W ≤ y ≤ +W       (bottom and top planes)
-   0 ≤ z ≤ +W     (near and far planes)
+-W ≤ z ≤ +W       (near and far planes)
 ```
 
 (`W` here is the w-coordinate of the homogenized vertex. These planes define a 4D frustum in clip space.)

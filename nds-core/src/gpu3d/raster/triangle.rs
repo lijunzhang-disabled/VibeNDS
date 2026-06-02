@@ -38,6 +38,7 @@ struct Vert {
     b: i32,
     s_over_w: i64, // (S / 16) × inv_w  (S is 1.11.4 → divide by 16 to get pixel units)
     t_over_w: i64,
+    edge_is_vertical: bool,
     attr: u32,
     poly_id: u8,
     alpha: u8,
@@ -66,6 +67,7 @@ impl Vert {
             // (we'll divide by inv_w per pixel to recover the true value).
             s_over_w: (s * inv_w) >> 4,
             t_over_w: (t * inv_w) >> 4,
+            edge_is_vertical: false,
             attr,
             poly_id,
             alpha,
@@ -557,6 +559,7 @@ fn lerp_vert(a: &Vert, b: &Vert, t: i64) -> Vert {
         b: lerp_i32(a.b, b.b, t),
         s_over_w: lerp_i64(a.s_over_w, b.s_over_w, t),
         t_over_w: lerp_i64(a.t_over_w, b.t_over_w, t),
+        edge_is_vertical: a.x == b.x,
         attr: a.attr,
         poly_id: a.poly_id,
         alpha: a.alpha,
@@ -584,7 +587,7 @@ fn rasterize_scanline(
 
     let x_left = ((a.x + 128) >> 8).max(0);
     let mut x_right = ((b.x + 128) >> 8).min(FB_WIDTH as i32 - 1);
-    if exclude_lower_right_edges {
+    if exclude_lower_right_edges || b.edge_is_vertical {
         x_right -= 1;
     }
     if x_left > x_right {
@@ -991,6 +994,7 @@ mod tests {
             b: ((color >> 10) & 0x1F) as i32,
             s_over_w: 0,
             t_over_w: 0,
+            edge_is_vertical: false,
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             poly_id: 0,
             alpha: 31,
@@ -1183,14 +1187,32 @@ mod tests {
         r.disp3dcnt = 1 << 5;
         let p = poly(vec![
             sv(10, 10, 0x001F),
+            sv(22, 15, 0x001F),
+            sv(20, 20, 0x001F),
+        ]);
+
+        r.render_frame(&[p], None);
+
+        let right_edge = 15 * FB_WIDTH + 22;
+        assert_eq!(r.framebuffer[right_edge] & (1 << 15), 1 << 15);
+    }
+
+    #[test]
+    fn test_vertical_right_edge_is_excluded_even_with_edge_marking() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 5;
+        let p = poly(vec![
+            sv(10, 10, 0x001F),
             sv(20, 10, 0x001F),
             sv(20, 20, 0x001F),
         ]);
 
         r.render_frame(&[p], None);
 
+        let inside = 15 * FB_WIDTH + 19;
         let right_edge = 15 * FB_WIDTH + 20;
-        assert_eq!(r.framebuffer[right_edge] & (1 << 15), 1 << 15);
+        assert_eq!(r.framebuffer[inside] & (1 << 15), 1 << 15);
+        assert_eq!(r.framebuffer[right_edge] & (1 << 15), 0);
     }
 
     #[test]
@@ -1212,14 +1234,31 @@ mod tests {
         let mut r = Rasterizer::new();
         r.disp3dcnt = 1 << 3;
         let p = colored_poly(
+            vec![sv(10, 10, 0x001F), sv(22, 15, 0x001F), sv(20, 20, 0x001F)],
+            16,
+        );
+
+        r.render_frame(&[p], None);
+
+        let right_edge = 15 * FB_WIDTH + 22;
+        assert_eq!(r.framebuffer[right_edge] & (1 << 15), 1 << 15);
+    }
+
+    #[test]
+    fn test_translucent_vertical_right_edge_is_excluded_with_alpha_blend_enabled() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 3;
+        let p = colored_poly(
             vec![sv(10, 10, 0x001F), sv(20, 10, 0x001F), sv(20, 20, 0x001F)],
             16,
         );
 
         r.render_frame(&[p], None);
 
+        let inside = 15 * FB_WIDTH + 19;
         let right_edge = 15 * FB_WIDTH + 20;
-        assert_eq!(r.framebuffer[right_edge] & (1 << 15), 1 << 15);
+        assert_eq!(r.framebuffer[inside] & (1 << 15), 1 << 15);
+        assert_eq!(r.framebuffer[right_edge] & (1 << 15), 0);
     }
 
     #[test]

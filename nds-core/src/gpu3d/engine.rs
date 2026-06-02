@@ -402,6 +402,21 @@ impl Engine3d {
         self.rasterizer.framebuffer.get(idx).copied().unwrap_or(0)
     }
 
+    pub fn read_disp3dcnt(&self) -> u16 {
+        let mut value = self.rasterizer.disp3dcnt;
+        if self.fifo.overflow {
+            value |= 1 << 13;
+        }
+        value
+    }
+
+    pub fn write_disp3dcnt(&mut self, value: u16) {
+        self.rasterizer.disp3dcnt = value & 0x4FFF;
+        if value & (1 << 13) != 0 {
+            self.fifo.overflow = false;
+        }
+    }
+
     pub fn gxstat_low(&self) -> u16 {
         let mut v = 0u16;
         if self.test_busy {
@@ -429,10 +444,18 @@ impl Engine3d {
     }
 
     pub fn write_gxstat(&mut self, value: u32) {
-        self.fifo.set_irq_mode((value >> 30) as u8);
+        self.write_gxstat_low(value as u16);
+        self.write_gxstat_high((value >> 16) as u16);
+    }
+
+    pub fn write_gxstat_low(&mut self, value: u16) {
         if value & (1 << 15) != 0 {
             self.stacks.clear_overflow_error();
         }
+    }
+
+    pub fn write_gxstat_high(&mut self, value: u16) {
+        self.fifo.set_irq_mode((value >> 14) as u8);
     }
 
     pub fn ram_count(&self) -> u32 {
@@ -570,10 +593,16 @@ fn box_intersects_view_volume(origin: [i32; 3], size: [i32; 3], clip: &Matrix) -
         [1, 5, 7, 3],
     ];
 
-    faces.iter().any(|face| {
+    if faces.iter().any(|face| {
         let polygon = face.iter().map(|&idx| corners[idx]).collect::<Vec<_>>();
         clip_homogeneous_polygon_to_view_volume(polygon)
-    })
+    }) {
+        return true;
+    }
+
+    // No cuboid face reached the frustum, but no frustum plane rejected the
+    // cuboid either. This covers boxes enclosing the view volume.
+    true
 }
 
 fn clip_homogeneous_polygon_to_view_volume(mut polygon: Vec<[i64; 4]>) -> bool {
@@ -1078,12 +1107,12 @@ mod tests {
     }
 
     #[test]
-    fn test_box_test_rejects_box_enclosing_view_volume() {
+    fn test_box_test_reports_box_enclosing_view_volume() {
         let clip = Matrix::identity();
         let origin = [-2 * ONE, -2 * ONE, -2 * ONE];
         let size = [4 * ONE, 4 * ONE, 4 * ONE];
 
-        assert!(!box_intersects_view_volume(origin, size, &clip));
+        assert!(box_intersects_view_volume(origin, size, &clip));
     }
 
     #[test]
@@ -1138,6 +1167,19 @@ mod tests {
         assert_eq!(e.gxstat_high() & (1 << 11), 1 << 11);
         assert_eq!(e.read_clip_matrix_word(12), 0);
         assert_eq!(e.read_direction_matrix_word(0), 0);
+    }
+
+    #[test]
+    fn test_direction_matrix_readback_exposes_directional_3x3_only() {
+        let mut e = Engine3d::new();
+        e.stacks.vector = Matrix::identity()
+            .mul_scale(2 * ONE, 3 * ONE, 4 * ONE)
+            .mul_translate(7 * ONE, 8 * ONE, 9 * ONE);
+
+        assert_eq!(e.read_direction_matrix_word(0), (2 * ONE) as u32);
+        assert_eq!(e.read_direction_matrix_word(4), (3 * ONE) as u32);
+        assert_eq!(e.read_direction_matrix_word(8), (4 * ONE) as u32);
+        assert_eq!(e.read_direction_matrix_word(9), 0);
     }
 
     #[test]

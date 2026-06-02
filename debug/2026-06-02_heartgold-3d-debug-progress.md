@@ -522,6 +522,10 @@ Why this matters:
 
 ### 3. Packed zero-param tail dummy was too broad
 
+Status: **Superseded later in this document**. This was an intermediate
+interpretation from the first FIFO pass. The later "packed zero-param tail
+dummy removed" section is the current implementation and test-backed result.
+
 Symptom class:
 
 - A packed command word ending in zero padding after a no-parameter command
@@ -787,7 +791,7 @@ Result:
 
 ## 2026-06-02 correction: packed zero-param tail dummy
 
-Status: **Fixed after correcting the earlier interpretation**
+Status: **Superseded by the following correction**
 
 Direct reference-emulator implementation use for this correction: **0**. The
 trigger was re-reading the ndsdoc 3D Geometry Engine FIFO text.
@@ -846,6 +850,53 @@ Why this matters:
 - Packed GXFIFO command streams are commonly DMA-fed.
 - Missing a dummy word shifts the command/parameter boundary and can turn a
   valid stream into visible random geometry.
+
+## 2026-06-02 correction: packed zero-param tail dummy removed
+
+Status: **Corrected again after checking GBATEK's FIFO overkill note**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+comes from re-reading GBATEK's `GXFIFO / Packed Commands` and `GXFIFO DMA
+Overkill on Packed Commands Without Parameters` sections.
+
+### What was wrong in the previous correction
+
+The previous section said that a packed command word whose final real command
+has no parameters must consume the next FIFO word as a dummy. That does not
+match GBATEK's overkill example:
+
+```text
+Packed(00151515h)
+```
+
+GBATEK describes repeated words of that form as producing many `Cmd(15h)`
+entries. If a dummy word were required after each such packed word, every other
+word would be discarded instead of producing commands, and the documented
+overfill behavior would not happen.
+
+### Fix
+
+- Removed `needs_zero_param_tail_dummy` from the packed FIFO decoder.
+- Zero-parameter commands still occupy FIFO entries, but they do not consume
+  parameter words.
+- A following FIFO word is decoded as the next packed command word once all
+  pending parameters have been satisfied.
+
+Tests updated/added:
+
+```text
+test_zero_padded_packed_word_ending_with_zero_param_command_allows_next_command_word
+test_zero_param_tail_after_prior_params_allows_next_command_word
+test_full_packed_word_ending_with_zero_param_command_allows_next_command_word
+test_repeated_packed_identity_words_do_not_need_dummy_words
+```
+
+Why this matters:
+
+- DMA-fed command streams can legitimately contain many packed no-parameter
+  commands.
+- Treating following words as dummy data drops commands and shifts the stream,
+  which can produce missing transforms or random-looking geometry.
 
 ## 2026-06-02 correction: `VEC_TEST` matrix mode
 
@@ -1574,3 +1625,125 @@ Result:
 - Wireframe translucent texture targeted release tests: `2 passed; 0 failed`.
 - Raster module release tests: `85 passed; 0 failed`.
 - `nds-core` full release suite: `498 passed; 0 failed`.
+
+## 2026-06-02 rejected hypothesis: `POLYGON_ATTR` pre-list writes were delayed
+
+Status: **Rejected and reverted**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from re-checking the documented `POLYGON_ATTR` / `BEGIN_VTXS` sequencing,
+reading local vertex-state tests, and then checking GBATEK's explicit command
+description.
+
+### Symptom
+
+The vertex pipeline treats every `POLYGON_ATTR` write as pending-for-next
+`BEGIN_VTXS`, even when no vertex list is active.
+
+That means this valid command order:
+
+```text
+POLYGON_ATTR
+BEGIN_VTXS
+VTX_16 ...
+```
+
+works because `BEGIN_VTXS` copies the pending value into the active attribute
+slot.
+
+### Root cause
+
+I initially suspected `VertexState::set_polygon_attr()` should apply
+immediately when no list was active and defer only during an active list.
+
+That suspicion was wrong. The local test
+`test_polygon_attr_snapshot_per_polygon` was encoding the hardware behavior:
+`polygon_attr` remains unchanged immediately after a pre-list
+`set_polygon_attr()` call, and `BEGIN_VTXS` applies the pending value.
+
+### Spec basis
+
+GBATEK says `POLYGON_ATTR` writes have no effect until the next
+`BEGIN_VTXS`, and the `BEGIN_VTXS` section says it additionally applies
+changes to `POLYGON_ATTR`.
+
+### Fix
+
+- Reverted the attempted immediate-apply change.
+- Kept `VertexState::set_polygon_attr()` writing to `pending_polygon_attr`.
+- Kept the snapshot test asserting `polygon_attr == 0` before `BEGIN_VTXS`.
+- Updated `docs/concepts/gpu-command-flow.md` to say writes before or during a
+  list are staged until the next `BEGIN_VTXS`.
+
+Tests run:
+
+```sh
+cargo test -p nds-core gpu3d::vertex --release
+cargo test -p nds-core gpu3d --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- Vertex pipeline release tests from the temporary patch: `26 passed; 0 failed`.
+- GPU3D release tests from the temporary patch: `229 passed; 0 failed`.
+- Full-suite verification after reverting: `514 passed; 0 failed`.
+
+## 2026-06-02 fix: texture matrix stack was treated as optional
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from comparing `MatrixStacks` against ndsdoc's matrix-stack command page and
+GBATEK's matrix-stack notes.
+
+### Symptom
+
+The texture matrix stack was modeled as a saved matrix plus a
+`texture_saved_valid` flag. `MTX_RESTORE` in texture mode did nothing useful
+and set the matrix-stack error flag unless software had previously executed
+`MTX_PUSH` or `MTX_STORE`.
+
+That is different from projection mode, where the one-entry stack slot exists
+from reset and is initialized to identity.
+
+### Root cause
+
+The code treated the texture saved slot as absent until explicitly initialized.
+ndsdoc describes the texture stack as size 1, and for size-1 stacks says
+`MTX_STORE` / `MTX_RESTORE` ignore the parameter and use slot 0. GBATEK lists a
+hidden texture stack pointer as `0..1`, not a missing stack.
+
+### Fix
+
+- Replaced texture saved-valid semantics with a hidden one-bit
+  `texture_sp`.
+- Kept `texture_saved` initialized to identity.
+- `MTX_RESTORE` in texture mode now always loads the single saved slot and
+  leaves the hidden pointer unchanged.
+- `MTX_STORE` writes the single saved slot and leaves the hidden pointer
+  unchanged.
+- `MTX_PUSH` / `MTX_POP` update the hidden one-bit pointer and set overflow on
+  the same empty/full-style boundaries as a one-entry stack.
+- Clearing the matrix-stack error now resets the hidden texture pointer to 0.
+
+Tests added:
+
+```text
+test_texture_restore_uses_single_initialized_stack_slot
+test_texture_store_restore_do_not_change_stack_pointer
+test_texture_push_pop_uses_hidden_one_bit_stack_pointer
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::stacks --release
+cargo test -p nds-core gpu3d --release
+```
+
+Result:
+
+- Stack release tests: `24 passed; 0 failed`.
+- GPU3D release tests: `232 passed; 0 failed`.
+- `nds-core` full release suite: `517 passed; 0 failed`.
