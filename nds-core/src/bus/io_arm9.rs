@@ -291,6 +291,11 @@ pub fn read_io32(shared: &SharedState, addr: u32) -> u32 {
             let idx = ((local - 0x0620) / 4) as usize;
             shared.gpu3d.read_pos_test_word(idx)
         }
+        0x0630 => {
+            (shared.gpu3d.read_vec_test_halfword(0) as u32)
+                | ((shared.gpu3d.read_vec_test_halfword(1) as u32) << 16)
+        }
+        0x0634 => shared.gpu3d.read_vec_test_halfword(2) as u32,
         0x0640..=0x067C => {
             let idx = ((local - 0x0640) / 4) as usize;
             shared.gpu3d.read_clip_matrix_word(idx)

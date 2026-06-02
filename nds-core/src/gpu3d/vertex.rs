@@ -704,6 +704,36 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_incomplete_list_detection_matches_primitive_vertex_counts() {
+        let mut v = VertexState::new();
+        let s = ident_stacks();
+
+        v.begin(PrimitiveType::TriangleStrip);
+        assert!(!v.has_incomplete_polygon_list());
+        v.submit_vertex([0, 0, 0], &s);
+        assert!(v.has_incomplete_polygon_list());
+        v.submit_vertex([ONE, 0, 0], &s);
+        assert!(v.has_incomplete_polygon_list());
+        v.submit_vertex([0, ONE, 0], &s);
+        assert!(!v.has_incomplete_polygon_list());
+        v.submit_vertex([ONE, ONE, 0], &s);
+        assert!(!v.has_incomplete_polygon_list());
+
+        v.begin(PrimitiveType::QuadStrip);
+        assert!(!v.has_incomplete_polygon_list());
+        for i in 0..3 {
+            v.submit_vertex([i * ONE, 0, 0], &s);
+            assert!(v.has_incomplete_polygon_list());
+        }
+        v.submit_vertex([3 * ONE, 0, 0], &s);
+        assert!(!v.has_incomplete_polygon_list());
+        v.submit_vertex([4 * ONE, 0, 0], &s);
+        assert!(v.has_incomplete_polygon_list());
+        v.submit_vertex([5 * ONE, 0, 0], &s);
+        assert!(!v.has_incomplete_polygon_list());
+    }
+
+    #[test]
     fn test_separate_triangles_snapshot_texture_per_polygon() {
         let mut v = VertexState::new();
         let s = ident_stacks();

@@ -1110,3 +1110,270 @@ Result:
 
 - Shadow-targeted release tests: `5 passed; 0 failed`.
 - `nds-core` full release suite: `486 passed; 0 failed`.
+
+## 2026-06-02 correction: decoded FIFO ops keep geometry busy
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+came from ndsdoc's 3D command FIFO and readable-matrix descriptions plus local
+FIFO-state inspection.
+
+### Symptom class
+
+- A packed FIFO command word can contain several zero-parameter geometry
+  commands.
+- After the first decoded command was popped, the raw packed word could already
+  be removed from the FIFO word queue while the remaining decoded commands were
+  still waiting in the dispatch queue.
+- `Engine3d::geometry_busy()` used `fifo.is_empty()`, and `fifo.is_empty()`
+  only checked the raw word queue.
+- That could make `GXSTAT.27` report idle too early and make readable matrices
+  return real matrix values while decoded geometry commands were still pending.
+
+### Root cause
+
+- `GxFifo` has multiple internal queues/states:
+  - raw FIFO words,
+  - pending packed commands waiting for parameters,
+  - pending direct-port commands waiting for parameters,
+  - decoded ready commands waiting for the geometry dispatcher.
+- Empty status for geometry-busy purposes must mean all of those are empty,
+  not only that no raw words remain.
+- The bug is easiest to trigger with a packed command word such as
+  `0x1515_1515`, which decodes to four `MTX_IDENTITY` commands. After popping
+  one command, three decoded ready commands remain even though the shared raw
+  command word has been consumed.
+
+### Spec basis
+
+- ndsdoc describes direct FIFO use as a command word containing up to four
+  packed command indices, followed by parameters in command order.
+- ndsdoc also says readable matrices require the geometry engine to be
+  disabled via `GXSTAT.27`.
+- Therefore decoded-but-not-dispatched commands are still geometry-engine work
+  and must keep the busy bit active.
+
+### Fix
+
+- Changed `GxFifo::is_empty()` to require every internal FIFO/decode state to
+  be empty:
+  - `entries == 0`,
+  - raw words empty,
+  - no pending packed command,
+  - no pending direct command,
+  - no decoded ready command.
+- Left entry counting and command decoding unchanged.
+
+Tests added:
+
+```text
+test_ready_ops_keep_fifo_nonempty_after_shared_packed_word_is_spent
+test_decoded_ready_fifo_ops_keep_geometry_busy
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core fifo --release
+cargo test -p nds-core test_decoded_ready_fifo_ops_keep_geometry_busy --release
+```
+
+Result:
+
+- FIFO-targeted release tests: `33 passed; 0 failed`.
+- Engine ready-FIFO busy regression: `1 passed; 0 failed`.
+
+## 2026-06-02 correction: VEC_TEST result 32-bit I/O readback
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this correction: **0**. This
+came from ndsdoc's `VEC_TEST` result-register description plus local ARM9 I/O
+readback inspection.
+
+### Symptom class
+
+- `VEC_TEST` writes three signed 4.12 halfword results at
+  `0x04000630..=0x04000635`.
+- The ARM9 I/O path supported 16-bit reads from that region.
+- The 32-bit read path did not handle `0x04000630` or `0x04000634`, so word
+  reads returned the default unmapped value `0`.
+- Software that reads the test result as words would see an all-zero direction
+  result even though halfword reads were correct.
+
+### Root cause
+
+- `read_io16()` had an explicit `0x0630..=0x0634` case.
+- `read_io32()` handled `POS_TEST`, clip matrix, and directional matrix
+  readback, but skipped the `VEC_TEST` result region.
+
+### Spec basis
+
+- ndsdoc describes the direction-test result at `0x04000630..=0x04000635`,
+  with each 2-byte halfword corresponding to one transformed vector
+  coordinate.
+- Since the DS I/O bus exposes this region as normal memory-mapped registers,
+  a 32-bit read at `0x04000630` should return the X and Y halfwords packed in
+  little-endian order, and a 32-bit read at `0x04000634` should return Z in
+  the low halfword.
+
+### Fix
+
+- Added `read_io32()` cases for:
+  - `0x0630`: packed X/Y direction-test halfwords,
+  - `0x0634`: Z direction-test halfword in the low halfword.
+- Left the existing `VEC_TEST` math and 16-bit readback unchanged.
+
+Tests added:
+
+```text
+test_vec_test_result_registers_support_word_reads
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core test_vec_test_result_registers_support_word_reads --release
+cargo test -p nds-core test_vec_test_writes_direction_result_registers --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- VEC_TEST word-read regression: `1 passed; 0 failed`.
+- Existing VEC_TEST halfword regression: `1 passed; 0 failed`.
+- `nds-core` full release suite: `489 passed; 0 failed`.
+
+## 2026-06-02 conformance coverage: strip completeness before SWAP_BUFFERS
+
+Status: **Coverage added; no implementation change required**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from ndsdoc's vertex-list primitive counts and the SWAP/vertex-list behavior.
+
+### Rule checked
+
+- `BEGIN_VTXS` primitive type 2, triangle strip, completes the first polygon
+  at 3 vertices and each additional vertex completes another triangle.
+- `BEGIN_VTXS` primitive type 3, quad strip, completes the first polygon at
+  4 vertices and each additional pair of vertices completes another quad.
+- `SWAP_BUFFERS` with a genuinely incomplete list should lock the geometry
+  engine, so the helper that detects incomplete lists must distinguish complete
+  strip states from partial strip tails.
+
+### Local result
+
+The current implementation already matched that rule:
+
+- Triangle strip lengths 1 and 2 are incomplete; lengths 3 and higher are
+  complete.
+- Quad strip lengths 1, 2, and 3 are incomplete; length 4 is complete; odd
+  tails after that are incomplete until the next vertex pair arrives.
+
+I added a regression test because this is the exact predicate that decides
+whether `SWAP_BUFFERS` succeeds or locks the geometry engine.
+
+Tests added:
+
+```text
+test_strip_incomplete_list_detection_matches_primitive_vertex_counts
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::vertex --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- Vertex targeted release tests: `25 passed; 0 failed`.
+- `nds-core` full release suite: `490 passed; 0 failed`.
+
+## 2026-06-02 conformance coverage: lighting/material field decoding
+
+Status: **Coverage added; no implementation change required**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from ndsdoc and GBATEK light/material command field definitions.
+
+### Rule checked
+
+- `SPE_EMI` low 15 bits set specular reflection color.
+- `SPE_EMI` bit 15 enables the shininess table.
+- `SPE_EMI` bits 16-30 set emission color.
+- `LIGHT_COLOR` low 15 bits set BGR555 light color.
+- `LIGHT_COLOR` bits 30-31 select light index `0..3`.
+
+### Local result
+
+The current implementation already matched those command field definitions. I
+added direct unit coverage because these fields affect every following
+`NORMAL` color calculation and can be hard to isolate once transformed into
+final vertex colors.
+
+Tests added:
+
+```text
+test_set_spe_emi_unpacks_correctly
+test_light_color_unpacks_index_and_color
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::lighting --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- Lighting targeted release tests: `10 passed; 0 failed`.
+- `nds-core` full release suite: `492 passed; 0 failed`.
+
+## 2026-06-02 conformance coverage: mode-1 matrix stack special case
+
+Status: **Coverage added; no implementation change required**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from ndsdoc matrix-stack descriptions and GBATEK's note that stack operations
+in matrix mode 1 act like mode 2.
+
+### Rule checked
+
+- `MTX_MODE=1` normally selects the position matrix for load/multiply/scale
+  and translate operations.
+- `MTX_PUSH`, `MTX_POP`, `MTX_STORE`, and `MTX_RESTORE` are a documented
+  special case: in mode 1 they operate on both the position and directional
+  stacks, same as mode 2.
+- The shared position/directional stack pointer must therefore restore both
+  matrices on a mode-1 pop/restore.
+
+### Local result
+
+The implementation already matched the special case. I renamed two misleading
+tests so they describe save/restore behavior instead of implying the vector
+matrix is ignored, and added direct coverage that mode-1 push/pop restores
+both position and vector matrices.
+
+Tests added/adjusted:
+
+```text
+test_position_mode_stack_ops_touch_both_position_and_vector_stacks
+test_position_mode_stack_ops_save_and_restore_vector_matrix
+test_position_mode_store_restore_save_and_restore_vector_matrix
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::stacks --release
+cargo test -p nds-core --release
+```
+
+Result:
+
+- Stack targeted release tests: `21 passed; 0 failed`.
+- `nds-core` full release suite: `493 passed; 0 failed`.

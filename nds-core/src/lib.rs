@@ -1953,6 +1953,23 @@ mod tests {
     }
 
     #[test]
+    fn test_vec_test_result_registers_support_word_reads() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_0440, 2); // MTX_MODE position+vector
+        bus.write32(0x0400_05C8, 1 | (2 << 10) | (3 << 20));
+
+        assert_eq!(bus.read32(0x0400_0630), 0x0010_0008);
+        assert_eq!(bus.read32(0x0400_0634), 0x0000_0018);
+    }
+
+    #[test]
     fn test_arm9_fog_table_halfword_writes_are_contiguous() {
         let mut nds = Nds::new(None, None);
         {

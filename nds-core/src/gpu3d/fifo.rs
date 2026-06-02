@@ -115,7 +115,11 @@ impl GxFifo {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.words.is_empty()
+        self.entries == 0
+            && self.words.is_empty()
+            && self.pending_cmds.is_empty()
+            && self.direct_pending.is_none()
+            && self.ready.is_empty()
     }
     pub fn is_full(&self) -> bool {
         self.entries >= FIFO_CAPACITY
@@ -415,6 +419,21 @@ mod tests {
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
         assert_eq!(ops.len(), 4);
         assert_eq!(f.len(), 0);
+    }
+
+    #[test]
+    fn test_ready_ops_keep_fifo_nonempty_after_shared_packed_word_is_spent() {
+        let mut f = GxFifo::new();
+        f.write_packed(0x1515_1515);
+
+        let op = f.pop_op().expect("first op");
+        assert_eq!(op.cmd, 0x15);
+        assert_eq!(f.len(), 3);
+        assert_eq!(f.ready.len(), 3);
+        assert!(
+            !f.is_empty(),
+            "decoded commands still queued in the geometry pipe keep FIFO non-empty"
+        );
     }
 
     #[test]

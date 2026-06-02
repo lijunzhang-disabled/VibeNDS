@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_position_mode_stack_ops_preserve_vector_matrix() {
+    fn test_position_mode_stack_ops_save_and_restore_vector_matrix() {
         let mut s = MatrixStacks::new();
         s.vector = Matrix::identity().mul_scale(2 * ONE, 3 * ONE, 4 * ONE);
         s.set_mode(MtxMode::Position);
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn test_position_mode_store_restore_preserves_vector_matrix() {
+    fn test_position_mode_store_restore_save_and_restore_vector_matrix() {
         let mut s = MatrixStacks::new();
         s.vector = Matrix::identity().mul_scale(2 * ONE, 3 * ONE, 4 * ONE);
         s.set_mode(MtxMode::Position);
@@ -437,6 +437,24 @@ mod tests {
         s.restore(4);
 
         assert_eq!(s.vector, saved_vector);
+    }
+
+    #[test]
+    fn test_position_mode_stack_ops_touch_both_position_and_vector_stacks() {
+        let mut s = MatrixStacks::new();
+        s.set_mode(MtxMode::Position);
+        s.position = Matrix::identity().mul_translate(ONE, 0, 0);
+        s.vector = Matrix::identity().mul_scale(2 * ONE, 3 * ONE, 4 * ONE);
+
+        s.push();
+        s.position = Matrix::identity().mul_translate(5 * ONE, 0, 0);
+        s.vector = Matrix::identity().mul_scale(5 * ONE, 6 * ONE, 7 * ONE);
+        s.pop(1);
+
+        assert_eq!(s.position.at(3, 0), ONE);
+        assert_eq!(s.vector.at(0, 0), 2 * ONE);
+        assert_eq!(s.vector.at(1, 1), 3 * ONE);
+        assert_eq!(s.vector.at(2, 2), 4 * ONE);
     }
 
     #[test]

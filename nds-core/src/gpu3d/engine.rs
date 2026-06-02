@@ -1141,6 +1141,17 @@ mod tests {
     }
 
     #[test]
+    fn test_decoded_ready_fifo_ops_keep_geometry_busy() {
+        let mut e = Engine3d::new();
+        e.fifo.write_packed(0x1515_1515);
+
+        let _ = e.fifo.pop_op().expect("first op");
+
+        assert_eq!(e.fifo.len(), 3);
+        assert_eq!(e.gxstat_high() & (1 << 11), 1 << 11);
+    }
+
+    #[test]
     fn test_gxstat_write_clears_stack_error_and_sets_irq_mode() {
         let mut e = Engine3d::new();
         e.stacks.overflow = true;

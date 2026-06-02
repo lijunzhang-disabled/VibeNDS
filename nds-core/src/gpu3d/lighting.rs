@@ -315,6 +315,16 @@ mod tests {
     }
 
     #[test]
+    fn test_set_spe_emi_unpacks_correctly() {
+        let mut s = LightingState::new();
+        s.set_spe_emi(0x4321_8765);
+
+        assert_eq!(s.mat_specular, 0x0765);
+        assert!(s.use_shininess_table, "bit 15 was set");
+        assert_eq!(s.mat_emission, 0x4321);
+    }
+
+    #[test]
     fn test_light_vector_unpacks_index() {
         let mut s = LightingState::new();
         // index 2 (bits 30-31 = 0b10 → 2), all zero direction.
@@ -325,6 +335,17 @@ mod tests {
         // a "stored to right slot" check.
         assert_eq!(s.lights[2].direction, [0, 0, 0]);
         assert_eq!(s.lights[2].half_vector, [0, 0, -ONE / 2]);
+    }
+
+    #[test]
+    fn test_light_color_unpacks_index_and_color() {
+        let mut s = LightingState::new();
+        s.set_light_color((3 << 30) | 0x7FFF);
+
+        assert_eq!(s.lights[3].color, 0x7FFF);
+        assert_eq!(s.lights[0].color, 0);
+        assert_eq!(s.lights[1].color, 0);
+        assert_eq!(s.lights[2].color, 0);
     }
 
     #[test]
