@@ -213,6 +213,8 @@ impl<'a> Bus9<'a> {
                 let v = self.read32(sad);
                 if timing == DmaTiming::GxFifo && is_gxfifo_packed_addr(dad) {
                     let _ = super::io_arm9::write_io32(self.shared, dad, v);
+                } else if timing == DmaTiming::MainMemDisplayFifo && is_disp_mmem_fifo_addr(dad) {
+                    let _ = super::io_arm9::write_io32(self.shared, 0x0400_0068, v);
                 } else {
                     self.write32(dad, v);
                 }
@@ -269,6 +271,10 @@ impl<'a> Bus9<'a> {
 fn is_gxfifo_packed_addr(addr: u32) -> bool {
     let local = addr & 0x00FF_FFFC;
     (0x0400..0x0440).contains(&local)
+}
+
+fn is_disp_mmem_fifo_addr(addr: u32) -> bool {
+    (addr & 0x00FF_FFFC) == 0x0068
 }
 
 fn advance(addr: &mut u32, ctrl: AddrControl, word: u32) {

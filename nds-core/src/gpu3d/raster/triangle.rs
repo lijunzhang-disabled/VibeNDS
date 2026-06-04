@@ -49,9 +49,9 @@ impl Vert {
         let y_pixel = v.screen_y >> 8;
         let w = v.w.max(1) as i64;
         let inv_w = (1i64 << 42) / w;
-        let r = (v.color & 0x1F) as i32;
-        let g = ((v.color >> 5) & 0x1F) as i32;
-        let b = ((v.color >> 10) & 0x1F) as i32;
+        let r = expand_5_to_6(v.color & 0x1F) as i32;
+        let g = expand_5_to_6((v.color >> 5) & 0x1F) as i32;
+        let b = expand_5_to_6((v.color >> 10) & 0x1F) as i32;
         let s = v.tex[0] as i64;
         let t = v.tex[1] as i64;
         Vert {
@@ -91,7 +91,7 @@ pub fn rasterize_polygon(p: &ScreenPolygon, rast: &mut Rasterizer, vram: Option<
         if let Some((a, b)) = degenerate_line_segment(p) {
             draw_wire_line(a, b, p, poly_id, rast, vram);
         } else if let Some(a) = p.vertices.first() {
-            draw_point(a, p.attr, poly_id, rast);
+            draw_point(a, p, poly_id, rast, vram);
         }
         return;
     }
@@ -290,9 +290,9 @@ fn advance_line_cursor(
 
 fn lerp_screen_color(a: &ScreenVertex, b: &ScreenVertex, t: i64) -> u16 {
     let blend = |shift: u32| -> u16 {
-        let ca = ((a.color >> shift) & 0x1F) as i32;
-        let cb = ((b.color >> shift) & 0x1F) as i32;
-        lerp_i32(ca, cb, t).clamp(0, 31) as u16
+        let ca = expand_5_to_6((a.color >> shift) & 0x1F) as i32;
+        let cb = expand_5_to_6((b.color >> shift) & 0x1F) as i32;
+        shrink_6_to_5(lerp_i32(ca, cb, t).clamp(0, 63) as u16)
     };
     let r = blend(0);
     let g = blend(5);
@@ -324,17 +324,56 @@ fn sample_line_texel(
     texture::sample(tex_params, s_pixel, t_pixel, palette_base, vram)
 }
 
-fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
+fn draw_point(
+    v: &ScreenVertex,
+    p: &ScreenPolygon,
+    poly_id: u8,
+    rast: &mut Rasterizer,
+    vram: Option<&VramRouter>,
+) {
     let x = v.screen_x >> 8;
     let y = v.screen_y >> 8;
     if x < 0 || x >= FB_WIDTH as i32 || y < 0 || y >= FB_HEIGHT as i32 {
         return;
     }
 
+    let attr = p.attr;
     let mode = ((attr >> 4) & 0x3) as u8;
+    let tex_params = TexParams::from_register(p.tex_image_param);
+    let texture_mapping_enabled = rast.disp3dcnt & 1 != 0;
+    let textured = texture_mapping_enabled && !tex_params.is_disabled() && vram.is_some();
     let attr_alpha = ((attr >> 16) & 0x1F) as u8;
     let poly_alpha = if attr_alpha == 0 { 31 } else { attr_alpha };
-    let effective_alpha = final_alpha(mode, 31, poly_alpha);
+    let (color_no_alpha_bit, frag_alpha) = if mode == 2 {
+        let texel = if textured {
+            texture::sample(
+                tex_params,
+                (v.tex[0] as i32) >> 4,
+                (v.tex[1] as i32) >> 4,
+                p.palette_base,
+                vram.unwrap(),
+            )
+        } else {
+            texture::Texel {
+                color: 0x7FFF,
+                alpha: 31,
+            }
+        };
+        combine_toon_highlight(texel, v.color, rast)
+    } else if textured {
+        let texel = texture::sample(
+            tex_params,
+            (v.tex[0] as i32) >> 4,
+            (v.tex[1] as i32) >> 4,
+            p.palette_base,
+            vram.unwrap(),
+        );
+        texture::combine_with_vertex(texel, v.color, mode)
+    } else {
+        (v.color & 0x7FFF, 31)
+    };
+
+    let effective_alpha = final_alpha(mode, frag_alpha, poly_alpha);
     if effective_alpha == 0 {
         return;
     }
@@ -355,7 +394,7 @@ fn draw_point(v: &ScreenVertex, attr: u32, poly_id: u8, rast: &mut Rasterizer) {
             return;
         }
 
-        let color = (v.color & 0x7FFF) | (1 << 15);
+        let color = color_no_alpha_bit | (1 << 15);
         if effective_alpha < 31 {
             let prev = rast.framebuffer[idx];
             let prev_alpha = rast.alpha_buffer[idx];
@@ -611,9 +650,9 @@ fn rasterize_scanline(
             lerp_i32(a.depth, b.depth, t)
         };
         let inv_w = lerp_i64(a.inv_w, b.inv_w, t).max(1);
-        let r = lerp_i32(a.r, b.r, t).clamp(0, 31) as u16;
-        let g = lerp_i32(a.g, b.g, t).clamp(0, 31) as u16;
-        let bch = lerp_i32(a.b, b.b, t).clamp(0, 31) as u16;
+        let r = shrink_6_to_5(lerp_i32(a.r, b.r, t).clamp(0, 63) as u16);
+        let g = shrink_6_to_5(lerp_i32(a.g, b.g, t).clamp(0, 63) as u16);
+        let bch = shrink_6_to_5(lerp_i32(a.b, b.b, t).clamp(0, 63) as u16);
         let vertex_color = r | (g << 5) | (bch << 10);
 
         // Combine with texel if textured.
@@ -716,11 +755,14 @@ fn shadow_fragment_is_hidden_or_masked(rast: &mut Rasterizer, idx: usize, poly_i
         rast.shadow_stencil[idx] = 1;
         return true;
     }
+    if rast.id_buffer[idx] == poly_id {
+        return true;
+    }
     if rast.shadow_stencil[idx] != 0 {
         rast.shadow_stencil[idx] = 0;
         return true;
     }
-    rast.id_buffer[idx] == poly_id
+    false
 }
 
 fn translucent_same_id_rejects(
@@ -989,9 +1031,9 @@ mod tests {
             depth: 0,
             w,
             inv_w,
-            r: (color & 0x1F) as i32,
-            g: ((color >> 5) & 0x1F) as i32,
-            b: ((color >> 10) & 0x1F) as i32,
+            r: expand_5_to_6(color & 0x1F) as i32,
+            g: expand_5_to_6((color >> 5) & 0x1F) as i32,
+            b: expand_5_to_6((color >> 10) & 0x1F) as i32,
             s_over_w: 0,
             t_over_w: 0,
             edge_is_vertical: false,
@@ -1055,6 +1097,54 @@ mod tests {
             (red as i32 - blue as i32).abs() <= 1,
             "screen-midpoint color should be linear, got red={red}, blue={blue}"
         );
+    }
+
+    #[test]
+    fn test_vertex_color_interpolation_uses_internal_six_bit_channels() {
+        let mut r = Rasterizer::new();
+        let left = scanline_vert(20, 20, 0x0010, 4096);
+        let right = scanline_vert(120, 20, 0x001F, 4096);
+
+        rasterize_scanline(
+            20,
+            left,
+            right,
+            &mut r,
+            None,
+            TexParams::from_register(0),
+            0,
+            0,
+            false,
+        );
+
+        let c = r.framebuffer[20 * FB_WIDTH + 70] & 0x7FFF;
+        assert_eq!(
+            c & 0x1F,
+            24,
+            "5-bit interpolation would produce 23; hardware expands vertex colors to 6-bit first"
+        );
+    }
+
+    #[test]
+    fn test_line_color_interpolation_uses_internal_six_bit_channels() {
+        let a = ScreenVertex {
+            screen_x: 20 << 8,
+            screen_y: 20 << 8,
+            depth_z: 0,
+            w: 4096,
+            color: 0x0010,
+            tex: [0, 0],
+        };
+        let b = ScreenVertex {
+            screen_x: 120 << 8,
+            screen_y: 20 << 8,
+            depth_z: 0,
+            w: 4096,
+            color: 0x001F,
+            tex: [0, 0],
+        };
+
+        assert_eq!(lerp_screen_color(&a, &b, I_SCALE / 2) & 0x1F, 24);
     }
 
     #[test]
@@ -1588,6 +1678,7 @@ mod tests {
     fn test_translucent_overlay_preserves_opaque_edge_mark_flag() {
         let mut r = Rasterizer::new();
         r.disp3dcnt = (1 << 3) | (1 << 5); // alpha blend + edge marking.
+        r.clear_color = 2 << 24; // rear-plane polygon ID differs from opaque poly ID.
         r.edge_color[0] = 0x03E0;
         r.edge_color[1] = 0x001F;
 
@@ -1921,6 +2012,41 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_dot_polygon_samples_texture_when_enabled() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1;
+        let p = textured_poly(vec![
+            sv(10, 10, 0x7FFF),
+            sv(10, 10, 0x7FFF),
+            sv(10, 10, 0x7FFF),
+        ]);
+        let vram = vram_with_direct_red_texture();
+
+        r.render_frame(&[p], Some(&vram));
+
+        let idx = (10 * FB_WIDTH) + 10;
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x001F);
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 1 << 15);
+    }
+
+    #[test]
+    fn test_zero_dot_polygon_uses_vertex_color_when_texture_mapping_disabled() {
+        let mut r = Rasterizer::new();
+        let p = textured_poly(vec![
+            sv(10, 10, 0x03E0),
+            sv(10, 10, 0x7FFF),
+            sv(10, 10, 0x7FFF),
+        ]);
+        let vram = vram_with_direct_red_texture();
+
+        r.render_frame(&[p], Some(&vram));
+
+        let idx = (10 * FB_WIDTH) + 10;
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x03E0);
+        assert_eq!(r.framebuffer[idx] & (1 << 15), 1 << 15);
+    }
+
+    #[test]
     fn test_zero_dot_wireframe_polygon_uses_fixed_opaque_alpha() {
         let mut r = Rasterizer::new();
         let mut p = poly(vec![
@@ -2168,6 +2294,43 @@ mod tests {
 
         assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x7C00);
         assert_eq!(r.shadow_stencil[idx], 0);
+    }
+
+    #[test]
+    fn test_visible_shadow_same_id_reject_preserves_mask() {
+        let mut r = Rasterizer::new();
+        r.set_swap_attrs(1);
+        let mut base = colored_poly_with_id(
+            vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 30, 0x7C00)],
+            31,
+            1,
+        );
+        let mut mask = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(50, 10, 0x0000), sv(30, 30, 0x0000)],
+            0,
+        );
+        let mut visible = shadow_poly(
+            vec![sv(10, 10, 0x0000), sv(50, 10, 0x0000), sv(30, 30, 0x0000)],
+            1,
+        );
+        for v in &mut base.vertices {
+            v.depth_z = 1024;
+        }
+        for v in &mut mask.vertices {
+            v.depth_z = 0;
+        }
+        for v in &mut visible.vertices {
+            v.depth_z = 0;
+        }
+
+        r.render_frame(&[base, mask, visible], None);
+
+        let idx = (15 * FB_WIDTH) + 30;
+        assert_eq!(r.framebuffer[idx] & 0x7FFF, 0x7C00);
+        assert_eq!(
+            r.shadow_stencil[idx], 1,
+            "same-ID shadow rejection should not consume the shadow mask"
+        );
     }
 
     #[test]

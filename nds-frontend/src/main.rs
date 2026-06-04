@@ -54,6 +54,22 @@ struct Args {
     /// Disable audio output.
     #[arg(long)]
     no_audio: bool,
+
+    /// Run this many frames, write a native-size dual-screen PPM, then exit.
+    #[arg(long, value_name = "PATH")]
+    capture_ppm: Option<PathBuf>,
+
+    /// Write numbered native-size PPM captures to this directory.
+    #[arg(long, value_name = "DIR")]
+    capture_dir: Option<PathBuf>,
+
+    /// Number of frames to run before writing `--capture-ppm`.
+    #[arg(long, default_value_t = 600)]
+    capture_frames: u32,
+
+    /// Frame interval for `--capture-dir` sequence captures.
+    #[arg(long, default_value_t = 60)]
+    capture_interval: u32,
 }
 
 fn save_state_path(rom: Option<&Path>) -> Option<PathBuf> {
@@ -163,6 +179,45 @@ fn read_optional(p: Option<PathBuf>) -> Option<Vec<u8>> {
     }
 }
 
+fn bgr555_to_rgb888(color: u16) -> [u8; 3] {
+    let expand = |v: u16| -> u8 {
+        let v = (v & 0x1F) as u8;
+        (v << 3) | (v >> 2)
+    };
+    [expand(color), expand(color >> 5), expand(color >> 10)]
+}
+
+fn write_capture_ppm(
+    path: &Path,
+    top: &[u16],
+    bottom: &[u16],
+    screen_gap: u32,
+) -> std::io::Result<()> {
+    let gap = screen_gap as usize;
+    let width = SCREEN_WIDTH;
+    let height = SCREEN_HEIGHT * 2 + gap;
+    let mut out = Vec::with_capacity(width * height * 3 + 64);
+    out.extend_from_slice(format!("P6\n{} {}\n255\n", width, height).as_bytes());
+
+    for y in 0..SCREEN_HEIGHT {
+        for x in 0..SCREEN_WIDTH {
+            out.extend_from_slice(&bgr555_to_rgb888(top[y * SCREEN_WIDTH + x]));
+        }
+    }
+    for _ in 0..gap {
+        for _ in 0..SCREEN_WIDTH {
+            out.extend_from_slice(&[0, 0, 0]);
+        }
+    }
+    for y in 0..SCREEN_HEIGHT {
+        for x in 0..SCREEN_WIDTH {
+            out.extend_from_slice(&bgr555_to_rgb888(bottom[y * SCREEN_WIDTH + x]));
+        }
+    }
+
+    fs::write(path, out)
+}
+
 fn main() {
     env_logger::init();
     let args = Args::parse();
@@ -247,6 +302,57 @@ fn main() {
             }
             Err(e) => eprintln!("warning: could not read firmware: {}", e),
         }
+    }
+
+    if args.capture_ppm.is_some() || args.capture_dir.is_some() {
+        if let Some(dir) = &args.capture_dir {
+            if let Err(e) = fs::create_dir_all(dir) {
+                eprintln!("warning: failed to create capture dir: {}", e);
+                return;
+            }
+        }
+        let interval = args.capture_interval.max(1);
+        for frame in 1..=args.capture_frames {
+            nds.run_frame();
+            if let Some(dir) = &args.capture_dir {
+                if frame % interval == 0 {
+                    let path = dir.join(format!("frame-{:06}.ppm", frame));
+                    if let Err(e) = write_capture_ppm(
+                        &path,
+                        &nds.framebuffer_top,
+                        &nds.framebuffer_bot,
+                        args.screen_gap,
+                    ) {
+                        eprintln!("warning: failed to write {}: {}", path.display(), e);
+                        return;
+                    }
+                }
+            }
+        }
+        if let Some(capture_path) = &args.capture_ppm {
+            match write_capture_ppm(
+                capture_path,
+                &nds.framebuffer_top,
+                &nds.framebuffer_bot,
+                args.screen_gap,
+            ) {
+                Ok(()) => eprintln!(
+                    "Captured frame {} to {}",
+                    args.capture_frames,
+                    capture_path.display()
+                ),
+                Err(e) => eprintln!("warning: failed to write capture: {}", e),
+            }
+        }
+        if let Some(dir) = &args.capture_dir {
+            eprintln!(
+                "Captured frame sequence through frame {} to {} every {} frames",
+                args.capture_frames,
+                dir.display(),
+                interval
+            );
+        }
+        return;
     }
 
     let sdl = sdl2::init().expect("failed to init SDL2");
@@ -372,4 +478,52 @@ fn main() {
     }
 
     eprintln!("nds-frontend: exiting");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bgr555_to_rgb888_expands_channels() {
+        assert_eq!(bgr555_to_rgb888(0x001F), [255, 0, 0]);
+        assert_eq!(bgr555_to_rgb888(0x03E0), [0, 255, 0]);
+        assert_eq!(bgr555_to_rgb888(0x7C00), [0, 0, 255]);
+    }
+
+    #[test]
+    fn test_capture_ppm_layout_size() {
+        let path = std::env::temp_dir().join(format!(
+            "nds_capture_test_{}.ppm",
+            std::process::id()
+        ));
+        let top = vec![0x001F; SCREEN_WIDTH * SCREEN_HEIGHT];
+        let bottom = vec![0x03E0; SCREEN_WIDTH * SCREEN_HEIGHT];
+
+        write_capture_ppm(&path, &top, &bottom, 8).expect("write capture");
+
+        let bytes = fs::read(&path).expect("read capture");
+        let header = format!("P6\n{} {}\n255\n", SCREEN_WIDTH, SCREEN_HEIGHT * 2 + 8);
+        assert!(bytes.starts_with(header.as_bytes()));
+        assert_eq!(bytes.len(), header.len() + SCREEN_WIDTH * (SCREEN_HEIGHT * 2 + 8) * 3);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_capture_args_accept_sequence_options() {
+        let args = Args::parse_from([
+            "nds-frontend",
+            "--capture-dir",
+            "/tmp/nds-captures",
+            "--capture-frames",
+            "180",
+            "--capture-interval",
+            "30",
+        ]);
+
+        assert_eq!(args.capture_dir, Some(PathBuf::from("/tmp/nds-captures")));
+        assert_eq!(args.capture_frames, 180);
+        assert_eq!(args.capture_interval, 30);
+        assert!(args.capture_ppm.is_none());
+    }
 }

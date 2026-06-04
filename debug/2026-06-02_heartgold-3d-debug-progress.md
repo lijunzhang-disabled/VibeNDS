@@ -1747,3 +1747,898 @@ Result:
 - Stack release tests: `24 passed; 0 failed`.
 - GPU3D release tests: `232 passed; 0 failed`.
 - `nds-core` full release suite: `517 passed; 0 failed`.
+
+## 2026-06-04 fix: test-busy state did not make GXSTAT geometry-busy
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from re-reading ndsdoc's readable-matrix note and GBATEK's `GXSTAT` bit layout.
+
+### Symptom class
+
+`GXSTAT` low bit 0 reported Box/POS/VEC test busy, but `GXSTAT` bit 27 did not
+include that same busy state. The matrix readback helpers only gate on the
+internal geometry-busy predicate, so a future non-instant test-command model
+could expose readable matrices while a test command was still executing.
+
+### Spec basis
+
+- ndsdoc says readable matrices require the geometry engine to be disabled via
+  `GXSTAT` bit 27.
+- GBATEK defines `GXSTAT` bit 0 as Box/POS/VEC test busy and bit 27 as geometry
+  engine busy while commands are executing.
+
+Even though the current emulator completes HLE test commands immediately, the
+state model should remain internally consistent.
+
+### Fix
+
+- Included `test_busy` in `Engine3d::geometry_busy()`.
+- Added `test_test_busy_keeps_geometry_busy_and_blocks_matrix_readback`.
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::engine --release
+```
+
+Result:
+
+- Engine release tests: `31 passed; 0 failed`.
+
+## 2026-06-04 fix: zero-dot polygons skipped texture/color combine
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from comparing the local point path against the already-correct filled and
+wireframe paths plus GBATEK's rule that alpha testing happens on final polygon
+pixels after texture/color blending.
+
+### Symptom class
+
+Degenerate polygons whose vertices collapse to one screen pixel used only the
+first vertex color. They ignored:
+
+- `DISP3DCNT` texture enable,
+- `TEXIMAGE_PARAM`,
+- `PLTT_BASE`,
+- texture alpha,
+- polygon blend mode,
+- toon/highlight combine.
+
+Filled triangles and degenerate line/wireframe paths already used the normal
+texture/color combiner, so the point path was inconsistent.
+
+### Why this matters
+
+Small and distant polygons are common during animated 3D scenes. If a collapsed
+textured polygon uses raw vertex color instead of the final texture/color
+result, it can appear as a wrong-colored single-pixel sparkle or fail alpha
+testing differently from hardware.
+
+### Fix
+
+- Changed the zero-dot draw path to receive the full `ScreenPolygon` and VRAM
+  context.
+- Applied the same texture sampling and polygon-mode combiner used by line and
+  filled paths.
+- Preserved the existing wireframe alpha rule where `POLYGON_ATTR` alpha 0
+  uses opaque wire/point fragments.
+
+Tests added:
+
+```text
+test_zero_dot_polygon_samples_texture_when_enabled
+test_zero_dot_polygon_uses_vertex_color_when_texture_mapping_disabled
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::raster::triangle::tests::test_zero_dot --release
+```
+
+Result:
+
+- Zero-dot raster release tests: `6 passed; 0 failed`.
+
+## 2026-06-04 tool: deterministic dual-screen PPM capture
+
+Status: **Added**
+
+Direct reference-emulator implementation use for this tool: **0**. This is a
+local debugging/conformance aid, not a hardware behavior fix.
+
+### Why this was added
+
+The HeartGold visual state has moved enough that old desktop screenshots are no
+longer reliable evidence. Manual screenshots also capture one arbitrary window
+frame and include host window scaling. For visual conformance work we need a
+repeatable native-size output artifact from the current emulator build.
+
+### Implementation
+
+Added two `nds-frontend` CLI options:
+
+```text
+--capture-ppm <PATH>
+--capture-frames <N>
+```
+
+When `--capture-ppm` is present, the frontend:
+
+- loads the ROM/save/firmware through the normal direct-boot path,
+- runs exactly `N` frames (`600` by default),
+- writes a binary PPM image at native DS width,
+- stacks the top and bottom framebuffers vertically,
+- inserts the configured native `--screen-gap`,
+- exits without opening SDL audio/video,
+- skips `.sav` export on exit so capture runs do not mutate test inputs.
+
+The capture uses the core's current `framebuffer_top` and `framebuffer_bot`
+values, converting BGR555 to RGB888.
+
+### Usage
+
+Example:
+
+```sh
+./target/release/nds-frontend \
+  --rom ~/Documents/Pokemon-HeartGoldVersionUSA.nds \
+  --no-audio \
+  --capture-frames 900 \
+  --capture-ppm /tmp/heartgold-900.ppm
+```
+
+This is intended for comparing current output across emulator changes and,
+eventually, against reference captures from the same frame window.
+
+### 2026-06-04 extension: frame sequence capture
+
+Added:
+
+```text
+--capture-dir <DIR>
+--capture-interval <N>
+```
+
+When `--capture-dir` is present, the frontend writes numbered files such as
+`frame-000600.ppm` every `N` frames while running up to `--capture-frames`.
+This is specifically for transient 3D problems like one-frame polygon flashes:
+we can now sample a known frame window from the same ROM/save state after each
+GPU3D change without depending on manual desktop screenshots.
+
+Smoke check:
+
+```sh
+./target/release/nds-frontend \
+  --rom ~/Documents/Pokemon-HeartGoldVersionUSA.nds \
+  --no-audio \
+  --capture-frames 180 \
+  --capture-interval 60 \
+  --capture-dir /tmp/heartgold-seq-smoke
+```
+
+Result:
+
+- `frame-000060.ppm`
+- `frame-000120.ppm`
+- `frame-000180.ppm`
+
+All three files were valid 256x392 native dual-screen PPM images.
+
+### Tests added
+
+```text
+test_bgr555_to_rgb888_expands_channels
+test_capture_ppm_layout_size
+test_capture_args_accept_sequence_options
+```
+
+## 2026-06-04 fix: edge marking ignored rear-plane polygon ID
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from re-reading GBATEK's edge-marking description and comparing it with the
+local post-effect implementation.
+
+### Symptom class
+
+The rasterizer initializes `id_buffer` and `depth_buffer` from the rear-plane
+state during clear, including the `CLEAR_COLOR` polygon ID. However, the edge
+mark post-pass treated any transparent/unwritten neighboring pixel as a generic
+different background. That ignored the initialized rear-plane polygon ID.
+
+### Spec basis
+
+GBATEK describes edge marking as comparing the new polygon ID against the old
+attribute-buffer ID, and notes that screen-border edges seem to respect the
+rear-plane polygon ID from `CLEAR_COLOR`.
+
+### Why this matters
+
+Games can choose rear-plane polygon IDs deliberately. If the emulator always
+outlines opaque pixels against transparent rear-plane pixels, it can create
+extra outlines around objects whose polygon ID intentionally matches the rear
+plane.
+
+### Fix
+
+- Edge marking now compares against `id_buffer` for transparent/unwritten
+  in-screen neighbors instead of forcing them to be "different."
+- The neighbor depth comes from the initialized depth buffer, so transparent
+  rear-plane depth is still honored.
+- Off-screen neighbors compare against `CLEAR_COLOR`'s polygon ID, matching
+  GBATEK's screen-border note.
+- Existing tests that intentionally expect an outline now set a different
+  rear-plane polygon ID explicitly instead of relying on the old default-ID
+  behavior.
+
+Tests added:
+
+```text
+test_edge_marking_respects_transparent_rear_plane_polygon_id
+test_edge_marking_outlines_against_different_rear_plane_polygon_id
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::raster::postfx --release
+cargo test -p nds-core gpu3d --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Post-effect release tests: `19 passed; 0 failed`.
+- GPU3D release tests: `237 passed; 0 failed`.
+- Workspace release tests: `nds-core 522 passed; nds-frontend 3 passed`.
+
+## 2026-06-04 fix: anti-aliasing also ignored rear-plane polygon ID
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This was a
+local consistency bug found after the edge-marking fix above.
+
+### Symptom class
+
+The anti-aliasing post-pass still treated any transparent/unwritten neighbor as
+exposed background. That was inconsistent with the attribute-buffer model used
+by the rest of the rasterizer: `clear()` initializes `id_buffer` and
+`depth_buffer` from the rear-plane state, including `CLEAR_COLOR`'s polygon ID.
+
+### Why this matters
+
+When a game gives the rear plane the same polygon ID as an object, edge marking
+now correctly suppresses that boundary. Anti-aliasing still softened the same
+boundary, which could leave unwanted blended silhouettes even after edge
+marking was corrected.
+
+### Fix
+
+- Anti-aliasing now checks neighboring `id_buffer` and `depth_buffer` entries
+  instead of treating transparent in-screen pixels as generic background.
+- Off-screen neighbors compare against `CLEAR_COLOR`'s polygon ID, matching
+  the same model used by the edge-marking post-pass.
+- The old silhouette test now explicitly sets a different rear-plane polygon
+  ID, so it still verifies the intended exposed-edge case.
+
+Tests added:
+
+```text
+test_antialias_respects_transparent_rear_plane_polygon_id
+test_antialias_softens_against_different_rear_plane_polygon_id
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::raster::postfx --release
+cargo test -p nds-core gpu3d --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Post-effect release tests: `21 passed; 0 failed`.
+- GPU3D release tests: `239 passed; 0 failed`.
+- Workspace release tests: `nds-core 524 passed; nds-frontend 3 passed`.
+
+## 2026-06-04 fix: same-ID visible shadows consumed the shadow mask
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from comparing the local shadow helper against GBATEK's shadow polygon rules.
+
+### Symptom class
+
+Visible shadow polygons (`POLYGON_ATTR.mode = 3`, polygon ID `1..3Fh`) must
+draw only when the shadow stencil bit is clear and the incoming shadow polygon
+ID differs from the existing attribute-buffer polygon ID. The local helper did
+perform the same-ID rejection, but only after checking and clearing the shadow
+stencil bit.
+
+That meant a same-ID visible shadow could consume the mask even though it was
+not allowed to shade that target pixel.
+
+### Spec basis
+
+GBATEK describes shadow rendering as:
+
+- polygon ID `0` writes the mask and does not draw color;
+- polygon ID `1..3Fh` draws normally only when stencil bits are zero;
+- step 2 resets stencil bits after checking them;
+- rendering additionally requires the incoming shadow polygon ID to differ
+  from the ID in the attribute buffer.
+
+The same-ID rejection is a render condition, so it must be checked before the
+visible-shadow path consumes the mask.
+
+### Why this matters
+
+Games use matching polygon IDs to prevent an object from casting a shadow onto
+itself. If the emulator consumes the mask during that rejection, later shadow
+volume passes can see the wrong stencil state. This is a subtle layered-scene
+bug rather than a boot blocker, but it affects visual conformance.
+
+### Fix
+
+- `shadow_fragment_is_hidden_or_masked()` now rejects same-ID visible shadows
+  before testing and clearing `shadow_stencil`.
+- Existing mask behavior for polygon ID `0` is unchanged.
+- Existing visible-shadow drawing behavior for different IDs is unchanged.
+
+Test added:
+
+```text
+test_visible_shadow_same_id_reject_preserves_mask
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core shadow --release
+cargo test -p nds-core gpu3d --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Shadow-targeted release tests: `8 passed; 0 failed`.
+- GPU3D release tests: `240 passed; 0 failed`.
+- Workspace release tests: `nds-core 525 passed; nds-frontend 3 passed`.
+
+## 2026-06-04 fix: SDL display path used darker 5-bit color expansion
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This was
+found by comparing the deterministic capture path with the live SDL display
+conversion.
+
+### Symptom class
+
+The deterministic PPM capture path expanded BGR555 channels to RGB888 with bit
+replication:
+
+```text
+rgb8 = (rgb5 << 3) | (rgb5 >> 2)
+```
+
+The SDL display path only shifted channels left by three:
+
+```text
+rgb8 = rgb5 << 3
+```
+
+That maps full-intensity `31` to `248` instead of `255`, and similarly darkens
+intermediate colors. The emulator could therefore show live gameplay slightly
+darker than its own captures.
+
+### Why this matters
+
+This is not a GPU command bug, but it is a visual conformance bug in the actual
+frontend output. HeartGold uses fades, sky gradients, logo art, and title-scene
+lighting where small channel-expansion differences are visible.
+
+### Fix
+
+- Added `expand_bgr555_to_rgb888()` in the SDL video path.
+- `DualScreen::convert()` now uses bit-replicating 5-bit to 8-bit expansion,
+  matching the capture path.
+
+Test added:
+
+```text
+video::tests::test_expand_bgr555_to_rgb888_matches_capture_path
+```
+
+Verification:
+
+```sh
+cargo test -p nds-frontend --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Frontend release tests: `4 passed; 0 failed`.
+- Workspace release tests: `nds-core 525 passed; nds-frontend 4 passed`.
+
+## 2026-06-04 fix: vertex color interpolation used 5-bit precision
+
+Status: **Fixed**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from re-reading GBATEK's vertex-color and texture-blending notes and comparing
+them with the local raster interpolators.
+
+### Symptom class
+
+GBATEK says 5-bit vertex color components are internally expanded to 6-bit:
+
+```text
+if X > 0: X = X*2 + 1
+```
+
+The rasterizer stored and interpolated vertex color channels as 5-bit values.
+That makes some gradients round down by one framebuffer level before texture
+combining or final untextured output.
+
+Example:
+
+```text
+red 16 -> red 31 at the midpoint
+old 5-bit interpolation: 23
+6-bit internal interpolation: 24
+```
+
+### Why this matters
+
+HeartGold uses subtle gradients and lit/textured 3D elements in title and intro
+scenes. One-level channel errors are small, but they accumulate across fades,
+toon/highlight, texture modulation, and live/capture comparison.
+
+### Fix
+
+- `Vert::from()` now expands vertex RGB channels to 6-bit before storing them
+  in the scanline interpolator.
+- Filled polygon scanlines shrink interpolated 6-bit channels back to 5-bit
+  when constructing the BGR555 vertex color.
+- Degenerate line interpolation now uses the same internal 6-bit expansion.
+- Existing framebuffer format remains BGR555.
+
+Tests added:
+
+```text
+test_vertex_color_interpolation_uses_internal_six_bit_channels
+test_line_color_interpolation_uses_internal_six_bit_channels
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu3d::raster::triangle --release
+cargo test -p nds-core gpu3d --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Triangle raster release tests: `57 passed; 0 failed`.
+- GPU3D release tests: `242 passed; 0 failed`.
+- Workspace release tests: `nds-core 527 passed; nds-frontend 4 passed`.
+
+## 2026-06-04 coverage: 3D BG0 ignores vertical scroll
+
+Status: **Covered**
+
+Direct reference-emulator implementation use for this coverage: **0**. This
+came from GBATEK's final 3D-to-2D output notes.
+
+### Behavior
+
+When the 3D renderer is mapped to Engine A BG0, BG0 horizontal scroll applies
+with a 512-pixel source region, but vertical scrolling does not apply. The 3D
+layer always uses the physical scanline currently being composited.
+
+The implementation already behaved this way because the 3D BG0 synthesis path
+uses `line` directly and only applies `BG0HOFS`.
+
+### Why this matters
+
+Commercial games freely mix 2D backgrounds, OBJs, and 3D BG0. Accidentally
+treating 3D BG0 like a normal vertically scrollable text/bitmap BG would shift
+the entire 3D layer relative to 2D overlays.
+
+### Test added
+
+```text
+gpu2d::tests::test_3d_bg0_ignores_vertical_scroll
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core gpu2d --release
+cargo test --workspace --release
+```
+
+Result:
+
+- GPU2D release tests: `7 passed; 0 failed`.
+- Workspace release tests: `nds-core 528 passed; nds-frontend 4 passed`.
+
+## 2026-06-04 fix: Engine A display-capture register and scanline capture subset
+
+Status: **Implemented as prerequisite coverage**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from GBATEK's `DISPCAPCNT` description and the existing local video pipeline.
+
+### Symptom / suspicion
+
+The old random-polygon title-page failure is no longer reproduced in current
+fixed-frame captures, but HeartGold still reaches a title/intro area where one
+screen can be black while the other shows the scene. Commercial DS games often
+use display capture for title transitions, motion trails, 3D-to-2D feedback, or
+VRAM-display effects.
+
+Before this change, `0x04000064..0x04000067` was deliberately excluded from
+normal Engine A register decoding but was not handled elsewhere. Writes to
+`DISPCAPCNT` therefore fell through to unhandled I/O, and the core had no way
+to copy Engine A/3D output into LCDC VRAM for later display.
+
+### Fix
+
+- Added shared-state storage for `DISPCAPCNT`.
+- Modeled pending vs active capture state:
+  - setting bit 31 arms capture for the next visible line 0;
+  - capture runs during visible scanlines;
+  - bit 31 clears after line 191.
+- Implemented scanline capture into LCDC VRAM for Engine A:
+  - source A = Engine A graphics output;
+  - source A = raw 3D framebuffer when `DISPCAPCNT[24]` is set;
+  - source B = LCDC VRAM readback;
+  - source A only, source B only, and source A+B blended modes;
+  - capture sizes `128x128`, `256x64`, `256x128`, and `256x192`;
+  - VRAM write block and read/write offsets.
+- Preserved capture alpha in bit 15 for later capture blending, while display
+  mode 2 continues to show only BGR555 color.
+
+At this point, using main-memory display FIFO as `DISPCAPCNT[25]` source B was
+still not implemented. That was closed in the follow-up section below.
+
+Tests added:
+
+```text
+test_dispcapcnt_readback_and_enable_arms_next_frame_capture
+test_display_capture_source_a_writes_engine_a_line_to_lcdc_vram
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core dispcap --release
+cargo test -p nds-core display_capture --release
+cargo test --workspace --release
+```
+
+Result:
+
+- `dispcap` focused test: `1 passed; 0 failed`.
+- `display_capture` focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 530 passed; nds-frontend 4 passed`.
+
+Fresh HeartGold capture after this change:
+
+```sh
+./target/release/nds-frontend \
+  --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds \
+  --no-audio \
+  --capture-frames 1800 \
+  --capture-dir /tmp/heartgold-dispcap-seq \
+  --capture-interval 900
+```
+
+Result:
+
+- Frame 1800 still reaches the stable title/intro scene.
+- No random polygon flashing was observed in the fixed capture.
+- This change did **not** visibly alter the inspected frame 1800 output, so it
+  should be considered display-system groundwork rather than proof that the
+  remaining HeartGold title-screen mismatch is solved.
+
+## 2026-06-04 fix: Main-memory display FIFO and Engine A display mode 3
+
+Status: **Implemented as display-system prerequisite coverage**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from GBATEK's `DISP_MMEM_FIFO` notes and the local DMA/display architecture.
+
+### Symptom / suspicion
+
+HeartGold's intro now advances through several title/animation phases without
+the old random-polygon flashing, but the remaining visual uncertainty is around
+commercial display composition paths rather than raw polygon emission. The DS
+has a main-memory display FIFO that can feed Engine A display mode 3 directly,
+and that FIFO can also participate in display capture effects.
+
+Before this change:
+
+- `DISPCNT` display mode 3 fell through to normal compositing.
+- `DISP_MMEM_FIFO` at `0x04000068` was not stored.
+- ARM9 DMA timing mode 4 existed in the DMA decoder, but no frame/display hook
+  consumed it for main-memory display.
+
+### Fix
+
+- Added a `DISP_MMEM_FIFO` queue to shared state.
+- Added 32-bit writes to `0x04000068`, storing two BGR555 pixels per word.
+- Implemented Engine A display mode 3 by consuming 128 FIFO words per scanline
+  and writing 256 BGR555 pixels.
+- Added a scheduler hook that, before rendering an Engine A main-memory display
+  scanline, repeatedly services ARM9 DMA3 timing mode 4 until the FIFO has a
+  full scanline or the DMA stops.
+- Added a DMA special-case so a DMA destination latched from `0x04000068`
+  reaches the FIFO despite the existing ARM9 DMA local-address masking.
+
+The implementation intentionally keeps the first slice narrow: it models the
+display path and DMA feed, but does not yet use the FIFO as display-capture
+source B.
+
+Tests added:
+
+```text
+test_main_memory_display_mode_consumes_fifo_pixels
+test_main_memory_display_fifo_dma_feeds_scanline
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core main_memory_display --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Main-memory display focused tests: `2 passed; 0 failed`.
+- Workspace release tests: `nds-core 532 passed; nds-frontend 4 passed`.
+
+Fresh HeartGold capture after this change:
+
+```sh
+./target/release/nds-frontend \
+  --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds \
+  --no-audio \
+  --capture-frames 3600 \
+  --capture-dir /tmp/heartgold-mmemfifo-3600 \
+  --capture-interval 1200
+```
+
+Result:
+
+- The intro still advances to the frame-3600 animation sample.
+- No obvious display regression was observed in the inspected capture.
+- The frame looked the same as the previous current-build sample, so this is
+  best counted as removing a known missing hardware path rather than solving a
+  newly observed HeartGold visual difference.
+
+## 2026-06-04 fix: Display capture source B can consume main-memory FIFO
+
+Status: **Implemented as display-capture conformance coverage**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from GBATEK's `DISPCAPCNT` source-B description and the local FIFO/DMA path.
+
+### Symptom / gap
+
+The previous display-capture subset handled source B when it came from LCDC
+VRAM, but `DISPCAPCNT[25]` selects the main-memory display FIFO instead. The
+core already had a FIFO queue and DMA3 timing mode 4 after the preceding fix,
+but capture source B still returned transparent black.
+
+That left an important commercial display-effect path incomplete:
+
+- Engine A can display FIFO-fed main-memory bitmaps directly.
+- Display capture can also use the same FIFO as source B.
+- Source A+B capture blending depends on source B having real color/alpha.
+
+### Fix
+
+- Capture source B now consumes `DISP_MMEM_FIFO` words when `DISPCAPCNT[25]`
+  is set.
+- Each FIFO word supplies two 15-bit BGR pixels.
+- FIFO pixels are treated as solid for capture alpha because GBATEK documents
+  the FIFO pixel format as 15-bit RGB with bit 15 unused.
+- The scheduler now feeds DMA3 main-memory-display FIFO before capture lines
+  that select FIFO source B, even when Engine A itself is not in display mode 3.
+
+Tests added:
+
+```text
+test_display_capture_source_b_consumes_main_memory_fifo
+test_display_capture_source_b_dma_feeds_main_memory_fifo
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core display_capture --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Display-capture focused tests: `3 passed; 0 failed`.
+- Workspace release tests: `nds-core 534 passed; nds-frontend 4 passed`.
+
+Fresh HeartGold capture after this change:
+
+```sh
+cargo build -p nds-frontend --release
+./target/release/nds-frontend \
+  --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds \
+  --no-audio \
+  --capture-frames 3600 \
+  --capture-dir /tmp/heartgold-capturefifo-3600 \
+  --capture-interval 1200
+```
+
+Result:
+
+- Frame 3600 still reaches the intro animation sample.
+- No new obvious display regression was observed in the inspected capture.
+
+## 2026-06-04 fix: Display capture VRAM read/write offsets wrap within block
+
+Status: **Implemented as display-capture conformance coverage**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from GBATEK's `DISPCAPCNT` note that VRAM read/write offsets wrap to `0` when
+exceeding `0x1FFFF`.
+
+### Symptom / gap
+
+Display capture can start reading or writing at offsets `0x00000`, `0x08000`,
+`0x10000`, or `0x18000` within a selected 128 KB VRAM block. A full
+`256x192` capture is `0x18000` bytes, so starting at offset `0x18000` crosses
+the end of the block halfway through the capture.
+
+Before this change, the emulator added block + offset + pixel position directly.
+When that exceeded the selected bank's 128 KB span, LCDC VRAM routing ignored
+the write/read instead of wrapping within the block.
+
+### Fix
+
+- Added a capture VRAM address helper:
+
+```text
+block * 0x20000 + ((offset + byte_pos) & 0x1FFFF)
+```
+
+- Applied it to display-capture destination writes.
+- Applied it to source-B VRAM reads when `DISPCAPCNT[25] = 0`.
+
+Tests added:
+
+```text
+test_display_capture_write_offset_wraps_within_vram_block
+test_display_capture_source_b_vram_read_offset_wraps_within_block
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core display_capture --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Display-capture focused tests: `5 passed; 0 failed`.
+- Workspace release tests: `nds-core 536 passed; nds-frontend 4 passed`.
+
+## 2026-06-04 coverage: Display capture source A+B blend formula
+
+Status: **Covered**
+
+Direct reference-emulator implementation use for this coverage: **0**. This
+came from GBATEK's `DISPCAPCNT` capture A+B formula.
+
+### Behavior
+
+When `DISPCAPCNT[29:30]` selects source A+B blending, the capture unit blends
+each 5-bit color channel using:
+
+```text
+Dest = (SrcA * SrcAAlpha * EVA + SrcB * SrcBAlpha * EVB) / 16
+```
+
+The destination alpha bit is set only when a contributing source is present and
+its corresponding factor is nonzero:
+
+```text
+DestAlpha = (SrcAAlpha AND EVA > 0) OR (SrcBAlpha AND EVB > 0)
+```
+
+### Why this matters
+
+Commercial games can use capture blending for fades, motion trails, feedback
+effects, and mixed 3D/2D intro transitions. A wrong alpha gate can leave stale
+captured pixels visible or make a capture disappear when a source is
+transparent.
+
+The existing implementation already matched this formula, but it was not
+directly covered by tests.
+
+Tests added:
+
+```text
+test_display_capture_blends_source_a_and_fifo_source_b
+test_capture_blend_ignores_transparent_sources_and_gates_alpha
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core display_capture --release
+cargo test -p nds-core capture_blend --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Display-capture focused tests: `6 passed; 0 failed`.
+- Capture-blend focused tests: `2 passed; 0 failed`.
+- Workspace release tests: `nds-core 538 passed; nds-frontend 4 passed`.
+
+## 2026-06-05 fix: VRAM display mode ignores capture source-B read offset
+
+Status: **Implemented as display-capture conformance coverage**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from GBATEK's `DISPCAPCNT` note that the VRAM read offset is ignored when the
+display mode is VRAM display mode.
+
+### Symptom / gap
+
+The display-capture source-B path uses `DISPCAPCNT[26:27]` as a VRAM read
+offset when source B is VRAM. GBATEK specifies that this read offset is ignored
+when `DISPCNT[16:17]` selects VRAM display mode.
+
+Before this change, capture always applied the source-B read offset. That means
+a capture configured while Engine A was in VRAM display mode could read from
+`0x08000`, `0x10000`, or `0x18000` instead of the selected block's start.
+
+### Fix
+
+- Source-B VRAM capture now forces read offset to `0` when Engine A display
+  mode is VRAM display mode.
+- Non-VRAM-display capture still uses the programmed read offset, with the
+  existing within-block wrapping.
+
+Test added:
+
+```text
+test_display_capture_vram_display_mode_ignores_source_b_read_offset
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core display_capture --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Display-capture focused tests: `7 passed; 0 failed`.
+- Workspace release tests: `nds-core 539 passed; nds-frontend 4 passed`.

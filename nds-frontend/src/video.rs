@@ -15,6 +15,14 @@ use sdl2::video::{Window, WindowContext};
 /// into a larger bezel with `--screen-gap`.
 pub const DEFAULT_SCREEN_GAP: u32 = 8;
 
+fn expand_bgr555_to_rgb888(c: u16) -> (u8, u8, u8) {
+    let expand = |v: u16| -> u8 {
+        let v = (v & 0x1F) as u8;
+        (v << 3) | (v >> 2)
+    };
+    (expand(c), expand(c >> 5), expand(c >> 10))
+}
+
 pub struct DualScreen {
     canvas: Canvas<Window>,
     texture_creator: TextureCreator<WindowContext>,
@@ -61,10 +69,7 @@ impl DualScreen {
     /// Convert a single 256x192 BGR555 framebuffer to ARGB8888 in-place.
     fn convert(&mut self, src: &[u16]) {
         for i in 0..(SCREEN_WIDTH * SCREEN_HEIGHT) {
-            let c = src[i];
-            let r = ((c & 0x1F) as u8) << 3;
-            let g = (((c >> 5) & 0x1F) as u8) << 3;
-            let b = (((c >> 10) & 0x1F) as u8) << 3;
+            let (r, g, b) = expand_bgr555_to_rgb888(src[i]);
             let off = i * 4;
             self.pixel_buffer[off] = b;
             self.pixel_buffer[off + 1] = g;
@@ -109,5 +114,18 @@ impl DualScreen {
         self.blit_one(bot, dst_bot);
 
         self.canvas.present();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_bgr555_to_rgb888_matches_capture_path() {
+        assert_eq!(expand_bgr555_to_rgb888(0x001F), (255, 0, 0));
+        assert_eq!(expand_bgr555_to_rgb888(0x03E0), (0, 255, 0));
+        assert_eq!(expand_bgr555_to_rgb888(0x7C00), (0, 0, 255));
+        assert_eq!(expand_bgr555_to_rgb888(0x4210), (132, 132, 132));
     }
 }

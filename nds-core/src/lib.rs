@@ -395,6 +395,46 @@ impl Nds {
         }
     }
 
+    fn feed_main_mem_display_fifo(&mut self) {
+        while self.shared.disp_mmem_fifo.len() < 128
+            && self.shared.dma9.channels[3].active
+            && self.shared.dma9.timing(3) == dma::DmaTiming::MainMemDisplayFifo
+        {
+            let before_len = self.shared.disp_mmem_fifo.len();
+            let before_active = self.shared.dma9.channels[3].active;
+            let itcm = self.cpu9.cp15.itcm;
+            let dtcm = self.cpu9.cp15.dtcm;
+            let mut bus = Bus9::new(&mut self.mem9, &mut self.shared, itcm, dtcm);
+            let irq = bus.run_dma(3);
+            if irq {
+                self.shared.irq9.request(Irq::Dma3);
+            }
+            if self.shared.disp_mmem_fifo.len() == before_len
+                && self.shared.dma9.channels[3].active == before_active
+            {
+                break;
+            }
+        }
+    }
+
+    fn capture_needs_main_mem_fifo(&self, line: u16) -> bool {
+        let cnt = self.shared.dispcapcnt;
+        if cnt & (1 << 31) == 0 || cnt & (1 << 25) == 0 {
+            return false;
+        }
+        let source = (cnt >> 29) & 0x3;
+        if source == 0 {
+            return false;
+        }
+        let capture_will_be_active =
+            self.shared.dispcap_active || (line == 0 && self.shared.dispcap_pending);
+        if !capture_will_be_active {
+            return false;
+        }
+        let (_, height) = capture_size(cnt);
+        (line as usize) < height
+    }
+
     fn run_dmas_for_timing7(&mut self, timing: dma::DmaTiming) {
         let channels = self.shared.dma7.channels_for_timing(timing);
         for ch in channels {
@@ -481,6 +521,11 @@ impl Nds {
                     };
                     // Engine A → top by default. Pass the 3D framebuffer
                     // slice so BG0 can read from it when DISPCNT bit 3 is set.
+                    if (self.shared.engine_a.dispcnt >> 16) & 0x3 == 3
+                        || self.capture_needs_main_mem_fifo(line)
+                    {
+                        self.feed_main_mem_display_fifo();
+                    }
                     {
                         let palette = &self.shared.palette[0..0x400];
                         let oam = &self.shared.oam[0..0x400];
@@ -500,8 +545,15 @@ impl Nds {
                             fb,
                             Some(fb_3d),
                             Some(alpha_3d),
+                            Some(&mut self.shared.disp_mmem_fifo),
                         );
                     }
+                    let engine_a_framebuffer = if top_engine_a {
+                        &self.framebuffer_top
+                    } else {
+                        &self.framebuffer_bot
+                    };
+                    capture_display_scanline(&mut self.shared, line, engine_a_framebuffer);
                     // Engine B → bottom by default. Engine B has no 3D source.
                     {
                         let palette = &self.shared.palette[0x400..0x800];
@@ -518,6 +570,7 @@ impl Nds {
                             oam,
                             &self.shared.vram,
                             fb,
+                            None,
                             None,
                             None,
                         );
@@ -594,6 +647,131 @@ impl Nds {
             }
         }
     }
+}
+
+fn capture_display_scanline(shared: &mut SharedState, line: u16, engine_a_framebuffer: &[u16]) {
+    if line == 0 && shared.dispcap_pending && shared.dispcapcnt & (1 << 31) != 0 {
+        shared.dispcap_pending = false;
+        shared.dispcap_active = true;
+    }
+
+    if !shared.dispcap_active || shared.dispcapcnt & (1 << 31) == 0 {
+        return;
+    }
+
+    let (width, height) = capture_size(shared.dispcapcnt);
+    if line as usize >= height {
+        finish_display_capture_if_last_visible_line(shared, line);
+        return;
+    }
+
+    let source_a_3d = shared.dispcapcnt & (1 << 24) != 0;
+    let source_b_mmem = shared.dispcapcnt & (1 << 25) != 0;
+    let capture_source = (shared.dispcapcnt >> 29) & 0x3;
+    let eva = (shared.dispcapcnt & 0x1F).min(16) as u16;
+    let evb = ((shared.dispcapcnt >> 8) & 0x1F).min(16) as u16;
+    let write_block = (shared.dispcapcnt >> 16) & 0x3;
+    let write_offset = ((shared.dispcapcnt >> 18) & 0x3) * 0x8000;
+    let read_block = (shared.engine_a.dispcnt >> 18) & 0x3;
+    let read_offset = if (shared.engine_a.dispcnt >> 16) & 0x3 == 2 {
+        0
+    } else {
+        ((shared.dispcapcnt >> 26) & 0x3) * 0x8000
+    };
+    let line_base = line as usize * SCREEN_WIDTH;
+    let mut mmem_word = 0u32;
+
+    for x in 0..width {
+        let src_a = if source_a_3d {
+            shared.gpu3d.rasterizer.framebuffer[line_base + x]
+        } else {
+            engine_a_framebuffer[line_base + x]
+        };
+        let src_a_alpha = if source_a_3d {
+            src_a & (1 << 15) != 0
+        } else {
+            true
+        };
+        let src_b = if source_b_mmem {
+            if x & 1 == 0 {
+                mmem_word = shared.disp_mmem_fifo.pop_front().unwrap_or(0);
+                (mmem_word as u16) & 0x7FFF
+            } else {
+                ((mmem_word >> 16) as u16) & 0x7FFF
+            }
+        } else {
+            let src_b_addr = capture_vram_addr(
+                read_block,
+                read_offset,
+                (line as u32 * 256 + x as u32) * 2,
+            );
+            shared.vram.read_lcdc_u16(src_b_addr)
+        };
+        let src_b_alpha = if source_b_mmem {
+            true
+        } else {
+            src_b & (1 << 15) != 0
+        };
+
+        let captured = match capture_source {
+            0 => (src_a & 0x7FFF) | if src_a_alpha { 1 << 15 } else { 0 },
+            1 => (src_b & 0x7FFF) | if src_b_alpha { 1 << 15 } else { 0 },
+            _ => blend_capture_pixels(src_a, src_a_alpha, src_b, src_b_alpha, eva, evb),
+        };
+
+        let dst_addr = 0x0680_0000
+            + capture_vram_addr(
+                write_block,
+                write_offset,
+                (line as u32 * 256 + x as u32) * 2,
+            );
+        shared.vram.cpu_write_arm9(dst_addr, captured as u8);
+        shared
+            .vram
+            .cpu_write_arm9(dst_addr + 1, (captured >> 8) as u8);
+    }
+
+    finish_display_capture_if_last_visible_line(shared, line);
+}
+
+fn capture_vram_addr(block: u32, offset: u32, byte_pos: u32) -> u32 {
+    block * 0x2_0000 + ((offset + byte_pos) & 0x1_FFFF)
+}
+
+fn finish_display_capture_if_last_visible_line(shared: &mut SharedState, line: u16) {
+    if line + 1 == VISIBLE_LINES {
+        shared.dispcapcnt &= !(1 << 31);
+        shared.dispcap_active = false;
+        shared.dispcap_pending = false;
+    }
+}
+
+fn capture_size(dispcapcnt: u32) -> (usize, usize) {
+    match (dispcapcnt >> 20) & 0x3 {
+        0 => (128, 128),
+        1 => (256, 64),
+        2 => (256, 128),
+        _ => (256, 192),
+    }
+}
+
+fn blend_capture_pixels(
+    src_a: u16,
+    src_a_alpha: bool,
+    src_b: u16,
+    src_b_alpha: bool,
+    eva: u16,
+    evb: u16,
+) -> u16 {
+    let alpha_a = if src_a_alpha { 1 } else { 0 };
+    let alpha_b = if src_b_alpha { 1 } else { 0 };
+    let chan = |shift: u16| -> u16 {
+        let a = (src_a >> shift) & 0x1F;
+        let b = (src_b >> shift) & 0x1F;
+        ((a * alpha_a * eva + b * alpha_b * evb) / 16).min(31)
+    };
+    let alpha = (src_a_alpha && eva > 0) || (src_b_alpha && evb > 0);
+    chan(0) | (chan(5) << 5) | (chan(10) << 10) | if alpha { 1 << 15 } else { 0 }
 }
 
 fn check_vcount_match(dispstat: &mut u16, irq: &mut InterruptController, line: u16) {
@@ -1135,6 +1313,310 @@ mod tests {
         nds.run_frame();
 
         assert_eq!(nds.framebuffer_top[0], 0x001F);
+    }
+
+    #[test]
+    fn test_main_memory_display_mode_consumes_fifo_pixels() {
+        let mut nds = Nds::new(None, None);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.engine_a.dispcnt = 3 << 16;
+        for _ in 0..128 {
+            nds.shared.disp_mmem_fifo.push_back(0x03E0_001F);
+        }
+
+        nds.run_frame();
+
+        assert_eq!(nds.framebuffer_top[0], 0x001F);
+        assert_eq!(nds.framebuffer_top[1], 0x03E0);
+    }
+
+    #[test]
+    fn test_main_memory_display_fifo_dma_feeds_scanline() {
+        let mut nds = Nds::new(None, None);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.engine_a.dispcnt = 3 << 16;
+        for i in 0..128 {
+            let lo: u32 = if i % 2 == 0 { 0x001F } else { 0x7C00 };
+            let hi: u32 = if i % 2 == 0 { 0x03E0 } else { 0x001F };
+            let word = lo | (hi << 16);
+            nds.shared.main_ram[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(0x0400_00D4, 0x0200_0000); // DMA3SAD
+            bus.write32(0x0400_00D8, 0x0400_0068); // DMA3DAD = DISP_MMEM_FIFO
+            bus.write32(
+                0x0400_00DC,
+                4 | (2 << 21) | (1 << 25) | (1 << 26) | (4 << 27) | (1 << 31),
+            );
+        }
+
+        nds.run_frame();
+
+        assert_eq!(nds.framebuffer_top[0], 0x001F);
+        assert_eq!(nds.framebuffer_top[1], 0x03E0);
+        assert_eq!(nds.framebuffer_top[2], 0x7C00);
+        assert_eq!(nds.framebuffer_top[3], 0x001F);
+    }
+
+    #[test]
+    fn test_dispcapcnt_readback_and_enable_arms_next_frame_capture() {
+        let mut nds = Nds::new(None, None);
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(0x0400_0064, 0x8031_0010);
+            assert_eq!(bus.read32(0x0400_0064), 0x8031_0010);
+        }
+
+        assert!(nds.shared.dispcap_pending);
+        assert!(!nds.shared.dispcap_active);
+    }
+
+    #[test]
+    fn test_display_capture_source_a_writes_engine_a_line_to_lcdc_vram() {
+        let mut nds = Nds::new(None, None);
+        let red = setup_solid_red_bg0(&mut nds);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        // Capture destination block 1 = VRAM B. Bank A remains Engine A BG.
+        nds.shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(0x0400_0064, (1 << 31) | (1 << 16) | (3 << 20));
+        }
+
+        nds.run_frame();
+
+        assert_eq!(nds.shared.vram.read_lcdc_u16(0x2_0000), red | (1 << 15));
+        assert_eq!(nds.shared.dispcapcnt & (1 << 31), 0);
+        assert!(!nds.shared.dispcap_active);
+        assert!(!nds.shared.dispcap_pending);
+    }
+
+    #[test]
+    fn test_display_capture_source_b_consumes_main_memory_fifo() {
+        let mut nds = Nds::new(None, None);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        for _ in 0..128 {
+            nds.shared.disp_mmem_fifo.push_back(0x03E0_001F);
+        }
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(
+                0x0400_0064,
+                (1 << 31) | (1 << 25) | (1 << 29) | (1 << 16) | (3 << 20),
+            );
+        }
+
+        nds.run_frame();
+
+        assert_eq!(nds.shared.vram.read_lcdc_u16(0x2_0000), 0x8000 | 0x001F);
+        assert_eq!(nds.shared.vram.read_lcdc_u16(0x2_0002), 0x8000 | 0x03E0);
+    }
+
+    #[test]
+    fn test_display_capture_source_b_dma_feeds_main_memory_fifo() {
+        let mut nds = Nds::new(None, None);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        for i in 0..128 {
+            let lo: u32 = if i % 2 == 0 { 0x001F } else { 0x7C00 };
+            let hi: u32 = if i % 2 == 0 { 0x03E0 } else { 0x001F };
+            let word = lo | (hi << 16);
+            nds.shared.main_ram[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(0x0400_00D4, 0x0200_0000); // DMA3SAD
+            bus.write32(0x0400_00D8, 0x0400_0068); // DMA3DAD = DISP_MMEM_FIFO
+            bus.write32(
+                0x0400_00DC,
+                4 | (2 << 21) | (1 << 25) | (1 << 26) | (4 << 27) | (1 << 31),
+            );
+            bus.write32(
+                0x0400_0064,
+                (1 << 31) | (1 << 25) | (1 << 29) | (1 << 16) | (3 << 20),
+            );
+        }
+
+        nds.run_frame();
+
+        assert_eq!(nds.shared.vram.read_lcdc_u16(0x2_0000), 0x8000 | 0x001F);
+        assert_eq!(nds.shared.vram.read_lcdc_u16(0x2_0002), 0x8000 | 0x03E0);
+        assert_eq!(nds.shared.vram.read_lcdc_u16(0x2_0004), 0x8000 | 0x7C00);
+        assert_eq!(nds.shared.vram.read_lcdc_u16(0x2_0006), 0x8000 | 0x001F);
+    }
+
+    #[test]
+    fn test_display_capture_write_offset_wraps_within_vram_block() {
+        let mut nds = Nds::new(None, None);
+        let red = setup_solid_red_bg0(&mut nds);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(
+                0x0400_0064,
+                (1 << 31) | (1 << 16) | (3 << 18) | (3 << 20),
+            );
+        }
+
+        nds.run_frame();
+
+        assert_eq!(
+            nds.shared.vram.read_lcdc_u16(0x2_0000),
+            red | (1 << 15),
+            "full-height capture at offset 0x18000 should wrap within VRAM B"
+        );
+    }
+
+    #[test]
+    fn test_display_capture_source_b_vram_read_offset_wraps_within_block() {
+        let mut nds = Nds::new(None, None);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.vram.write_cnt(crate::vram::BankId::A, 0x80);
+        nds.shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        nds.shared.engine_a.dispcnt = 0; // VRAM read block 0 = A.
+        nds.shared.vram.cpu_write_arm9(0x0680_0000, 0x1F);
+        nds.shared.vram.cpu_write_arm9(0x0680_0001, 0x80);
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(
+                0x0400_0064,
+                (1 << 31) | (1 << 16) | (3 << 20) | (3 << 26) | (1 << 29),
+            );
+        }
+
+        nds.run_frame();
+
+        assert_eq!(
+            nds.shared.vram.read_lcdc_u16(0x2_8000),
+            0x8000 | 0x001F,
+            "source-B VRAM read offset 0x18000 should wrap to block start"
+        );
+    }
+
+    #[test]
+    fn test_display_capture_vram_display_mode_ignores_source_b_read_offset() {
+        let mut nds = Nds::new(None, None);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.vram.write_cnt(crate::vram::BankId::A, 0x80);
+        nds.shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        nds.shared.engine_a.dispcnt = 2 << 16; // VRAM display mode, read block 0.
+        nds.shared.vram.cpu_write_arm9(0x0680_0000, 0x1F);
+        nds.shared.vram.cpu_write_arm9(0x0680_0001, 0x80);
+        nds.shared.vram.cpu_write_arm9(0x0681_8000, 0x00);
+        nds.shared.vram.cpu_write_arm9(0x0681_8001, 0xFC);
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(
+                0x0400_0064,
+                (1 << 31) | (1 << 16) | (3 << 20) | (3 << 26) | (1 << 29),
+            );
+        }
+
+        nds.run_frame();
+
+        assert_eq!(
+            nds.shared.vram.read_lcdc_u16(0x2_0000),
+            0x8000 | 0x001F,
+            "VRAM display mode should ignore DISPCAPCNT source-B read offset"
+        );
+    }
+
+    #[test]
+    fn test_display_capture_blends_source_a_and_fifo_source_b() {
+        let mut nds = Nds::new(None, None);
+        let red = setup_solid_red_bg0(&mut nds);
+        assert_eq!(red, 0x001F);
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+        nds.shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        for _ in 0..128 {
+            nds.shared.disp_mmem_fifo.push_back(0x03E0_03E0);
+        }
+        {
+            let mut bus = Bus9::new(
+                &mut nds.mem9,
+                &mut nds.shared,
+                nds.cpu9.cp15.itcm,
+                nds.cpu9.cp15.dtcm,
+            );
+            bus.write32(
+                0x0400_0064,
+                (1 << 31)
+                    | 8
+                    | (8 << 8)
+                    | (1 << 16)
+                    | (3 << 20)
+                    | (1 << 25)
+                    | (2 << 29),
+            );
+        }
+
+        nds.run_frame();
+
+        assert_eq!(
+            nds.shared.vram.read_lcdc_u16(0x2_0000),
+            0x8000 | (15 << 5) | 15
+        );
+    }
+
+    #[test]
+    fn test_capture_blend_ignores_transparent_sources_and_gates_alpha() {
+        let only_a = blend_capture_pixels(0x001F, true, 0x03E0, false, 8, 8);
+        assert_eq!(only_a, 0x8000 | 15);
+
+        let no_alpha = blend_capture_pixels(0x001F, true, 0x03E0, true, 0, 0);
+        assert_eq!(no_alpha, 0);
     }
 
     #[test]

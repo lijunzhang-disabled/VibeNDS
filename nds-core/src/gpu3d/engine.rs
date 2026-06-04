@@ -501,6 +501,7 @@ impl Engine3d {
     fn geometry_busy(&self) -> bool {
         self.geometry_locked
             || self.swap_pending
+            || self.test_busy
             || !self.fifo.is_empty()
             || !self.vertex.polygon_buffer.is_empty()
     }
@@ -1167,6 +1168,17 @@ mod tests {
         assert_eq!(e.gxstat_high() & (1 << 11), 1 << 11);
         assert_eq!(e.read_clip_matrix_word(12), 0);
         assert_eq!(e.read_direction_matrix_word(0), 0);
+    }
+
+    #[test]
+    fn test_test_busy_keeps_geometry_busy_and_blocks_matrix_readback() {
+        let mut e = Engine3d::new();
+        e.stacks.position = Matrix::identity().mul_translate(5 * ONE, 0, 0);
+        e.test_busy = true;
+
+        assert_eq!(e.gxstat_low() & 1, 1);
+        assert_eq!(e.gxstat_high() & (1 << 11), 1 << 11);
+        assert_eq!(e.read_clip_matrix_word(12), 0);
     }
 
     #[test]

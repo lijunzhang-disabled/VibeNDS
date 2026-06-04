@@ -86,6 +86,21 @@ pub struct SharedState {
     /// power; we mostly ignore them in Phase 3.
     pub powcnt1: u16,
 
+    /// `DISPCAPCNT` (0x04000064, ARM9). Display capture is Engine A-only.
+    #[serde(default)]
+    pub dispcapcnt: u32,
+    /// Set when capture has been requested and should begin on the next
+    /// visible line 0. The busy bit in `dispcapcnt` remains set meanwhile.
+    #[serde(default)]
+    pub dispcap_pending: bool,
+    /// True while the current frame is copying capture output into LCDC VRAM.
+    #[serde(default)]
+    pub dispcap_active: bool,
+
+    /// `DISP_MMEM_FIFO` backing queue. Words contain two BGR555 pixels.
+    #[serde(default)]
+    pub disp_mmem_fifo: VecDeque<u32>,
+
     /// ARM7 HALTCNT write latch. The bus can't directly mutate the CPU core,
     /// so `Nds` consumes this after the instruction that wrote HALTCNT.
     #[serde(default)]
@@ -162,6 +177,10 @@ impl SharedState {
             oam: boxed_zeroed(OAM_SIZE),
             vram: VramRouter::new(),
             powcnt1: 0x0001,
+            dispcapcnt: 0,
+            dispcap_pending: false,
+            dispcap_active: false,
+            disp_mmem_fifo: VecDeque::new(),
             halt7_requested: false,
             exmemcnt: 1 << 11,
             engine_a: Engine2d::new(EngineWhich::A),

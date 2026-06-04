@@ -230,6 +230,8 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
                 | ((shared.vram.read_cnt(BankId::I) as u16) << 8)
         }
         0x0304 => shared.powcnt1,
+        0x0064 => shared.dispcapcnt as u16,
+        0x0066 => (shared.dispcapcnt >> 16) as u16,
         0x0060 => shared.gpu3d.read_disp3dcnt(),
         0x0600 => shared.gpu3d.gxstat_low(),
         0x0602 => shared.gpu3d.gxstat_high(),
@@ -575,6 +577,14 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         }
         0x0610 => shared.gpu3d.disp_1dot_depth = val & 0x7FFF,
         0x0304 => shared.powcnt1 = val,
+        0x0064 => {
+            shared.dispcapcnt = (shared.dispcapcnt & 0xFFFF_0000) | val as u32;
+        }
+        0x0066 => {
+            shared.dispcapcnt = (shared.dispcapcnt & 0x0000_FFFF) | ((val as u32) << 16);
+            shared.dispcap_pending = shared.dispcapcnt & (1 << 31) != 0;
+            shared.dispcap_active = false;
+        }
         0x0330..=0x033F => {
             // EDGE_COLOR table — 8 × u16.
             let idx = ((local - 0x0330) / 2) as usize;
@@ -684,6 +694,16 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
         0x0600 => {
             shared.gpu3d.write_gxstat(val);
             update_gxfifo_irq(shared);
+            Write32Effect::None
+        }
+        0x0064 => {
+            shared.dispcapcnt = val;
+            shared.dispcap_pending = val & (1 << 31) != 0;
+            shared.dispcap_active = false;
+            Write32Effect::None
+        }
+        0x0068 => {
+            shared.disp_mmem_fifo.push_back(val);
             Write32Effect::None
         }
         0x01A4 => {

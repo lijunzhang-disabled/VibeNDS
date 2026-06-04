@@ -8,14 +8,15 @@
 //! - Window-priority compositing + alpha/brightness blends + MASTER_BRIGHT.
 //!
 //! Out of scope until later phases: extended palette, extended affine
-//! bitmap modes (3-5), large-screen mode 6, display capture, the 3D layer
-//! source. These are stubbed to render transparent.
+//! bitmap modes (3-5), and large-screen mode 6. Display capture is partially
+//! modeled at the frame scheduler level.
 
 pub mod bg;
 pub mod compositor;
 pub mod obj;
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 /// Which engine an instance represents — Engine A is the full-feature one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +153,7 @@ pub fn render_scanline(
     framebuffer: &mut [u16],
     framebuffer_3d: Option<&[u16]>,
     alpha_3d: Option<&[u8]>,
+    disp_mmem_fifo: Option<&mut VecDeque<u32>>,
 ) {
     let mode = engine.dispcnt & 0x07;
 
@@ -177,8 +179,20 @@ pub fn render_scanline(
         return;
     }
 
-    // Main Memory display (mode 3) is wired in later phases; for now fall
-    // through to normal compositing.
+    if engine.which == Which::A && display_mode == 3 {
+        if let Some(fifo) = disp_mmem_fifo {
+            for x_pair in 0..128 {
+                let word = fifo.pop_front().unwrap_or(0);
+                framebuffer[row_start + x_pair * 2] = (word as u16) & 0x7FFF;
+                framebuffer[row_start + x_pair * 2 + 1] = ((word >> 16) as u16) & 0x7FFF;
+            }
+        } else {
+            for x in 0..256 {
+                framebuffer[row_start + x] = 0;
+            }
+        }
+        return;
+    }
 
     // Collect BG layers active in this mode.
     let (text_bgs, affine_bgs): (&[usize], &[usize]) = match mode {
@@ -284,9 +298,41 @@ mod tests {
             &mut framebuffer,
             Some(&fb3d),
             Some(&alpha3d),
+            None,
         );
 
         assert_eq!(framebuffer[0] & 0x7FFF, 0x001F);
         assert_eq!(framebuffer[1] & 0x7FFF, 0);
+    }
+
+    #[test]
+    fn test_3d_bg0_ignores_vertical_scroll() {
+        let mut engine = Engine2d::new(Which::A);
+        engine.dispcnt = (1 << 16) | (1 << 8) | (1 << 3);
+        engine.bg_vofs[0] = 7;
+
+        let mut fb3d = vec![0u16; 256 * 192];
+        let alpha3d = vec![31u8; 256 * 192];
+        fb3d[0] = 0x8000 | 0x001F;
+        fb3d[7 * 256] = 0x8000 | 0x03E0;
+
+        let mut framebuffer = vec![0u16; 256 * 192];
+        render_scanline(
+            &mut engine,
+            0,
+            &[0; 0x400],
+            &[0; 0x400],
+            &VramRouter::new(),
+            &mut framebuffer,
+            Some(&fb3d),
+            Some(&alpha3d),
+            None,
+        );
+
+        assert_eq!(
+            framebuffer[0] & 0x7FFF,
+            0x001F,
+            "3D BG0 uses the physical scanline; BG0VOFS must not sample line 7"
+        );
     }
 }

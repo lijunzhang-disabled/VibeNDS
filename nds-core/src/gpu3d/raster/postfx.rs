@@ -60,16 +60,17 @@ fn apply_edge_marking(rast: &mut Rasterizer) {
             let center = ids[idx];
             let center_depth = depths[idx];
 
-            // A pixel that isn't written is treated as background at
-            // infinite depth, producing an edge along the visible boundary.
+            // The attribute/depth buffers are initialized from the rear-plane.
+            // Transparent rear-plane color still has polygon ID/depth state,
+            // and GBATEK notes screen-border edge checks respect that ID.
             let neighbor_diff = |nx: isize, ny: isize| -> bool {
                 if nx < 0 || nx >= FB_WIDTH as isize || ny < 0 || ny >= FB_HEIGHT as isize {
-                    return center_depth < DEPTH_MAX; // off-screen = background
+                    let clear_id = ((rast.clear_color >> 24) & 0x3F) as u8;
+                    return center != clear_id && center_depth < DEPTH_MAX;
                 }
                 let nidx = (ny as usize) * FB_WIDTH + (nx as usize);
-                let written = fb_snapshot[nidx] & (1 << 15) != 0;
-                let different = !written || ids[nidx] != center;
-                let neighbor_depth = if written { depths[nidx] } else { DEPTH_MAX };
+                let different = ids[nidx] != center;
+                let neighbor_depth = depths[nidx];
                 different && center_depth < neighbor_depth
             };
 
@@ -175,13 +176,10 @@ fn apply_antialiasing(rast: &mut Rasterizer) {
 
             let neighbor_exposes_edge = |nx: isize, ny: isize| -> bool {
                 if nx < 0 || nx >= FB_WIDTH as isize || ny < 0 || ny >= FB_HEIGHT as isize {
-                    return true;
+                    let clear_id = ((rast.clear_color >> 24) & 0x3F) as u8;
+                    return center != clear_id && center_depth < DEPTH_MAX;
                 }
                 let nidx = (ny as usize) * FB_WIDTH + (nx as usize);
-                let written = fb_snapshot[nidx] & (1 << 15) != 0;
-                if !written {
-                    return true;
-                }
                 ids[nidx] != center && center_depth < depths[nidx]
             };
 
@@ -311,6 +309,7 @@ mod tests {
     fn test_edge_marking_outlines_a_single_polygon() {
         let mut r = Rasterizer::new();
         r.disp3dcnt = 1 | (1 << 5); // 3D enable + edge mark
+        r.clear_color = 1 << 24; // rear-plane polygon ID differs from test polygon.
                                     // Edge color group 0 = red.
         r.edge_color[0] = 0x001F;
 
@@ -351,6 +350,7 @@ mod tests {
     fn test_edge_marking_color_is_not_fogged() {
         let mut r = Rasterizer::new();
         r.disp3dcnt = (1 << 5) | (1 << 7);
+        r.clear_color = 1 << 24; // rear-plane polygon ID differs from test polygon.
         r.edge_color[0] = 0x001F;
         r.fog_color = 0;
         for d in r.fog_table.iter_mut() {
@@ -444,10 +444,60 @@ mod tests {
     }
 
     #[test]
+    fn test_edge_marking_respects_transparent_rear_plane_polygon_id() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 5;
+        r.clear_color = 4 << 24; // transparent rear plane, polygon ID 4.
+        r.clear_depth = 0x7FFF;
+        r.edge_color[0] = 0x001F;
+        r.clear();
+
+        let center = 20 * FB_WIDTH + 20;
+        r.framebuffer[center] = 0x7C00 | (1 << 15);
+        r.alpha_buffer[center] = 31;
+        r.id_buffer[center] = 4;
+        r.depth_buffer[center] = 1000;
+        r.edge_enable_buffer[center] = 1;
+
+        apply(&mut r);
+
+        assert_eq!(
+            r.framebuffer[center] & 0x7FFF,
+            0x7C00,
+            "same rear-plane polygon ID should suppress the edge"
+        );
+    }
+
+    #[test]
+    fn test_edge_marking_outlines_against_different_rear_plane_polygon_id() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 5;
+        r.clear_color = 3 << 24; // transparent rear plane, polygon ID 3.
+        r.clear_depth = 0x7FFF;
+        r.edge_color[0] = 0x001F;
+        r.clear();
+
+        let center = 20 * FB_WIDTH + 20;
+        r.framebuffer[center] = 0x7C00 | (1 << 15);
+        r.alpha_buffer[center] = 31;
+        r.id_buffer[center] = 4;
+        r.depth_buffer[center] = 1000;
+        r.edge_enable_buffer[center] = 1;
+
+        apply(&mut r);
+
+        assert_eq!(
+            r.framebuffer[center] & 0x7FFF,
+            0x001F,
+            "different rear-plane polygon ID should allow the edge"
+        );
+    }
+
+    #[test]
     fn test_antialias_softens_opaque_silhouette_pixel() {
         let mut r = Rasterizer::new();
         r.disp3dcnt = 1 << 4;
-        r.clear_color = 0x7FFF;
+        r.clear_color = (1 << 24) | 0x7FFF;
         r.clear();
 
         let center = 20 * FB_WIDTH + 20;
@@ -491,8 +541,8 @@ mod tests {
 
         let mut r = Rasterizer::new();
         r.disp3dcnt = (1 << 4) | (1 << 5);
+        r.clear_color = (1 << 24) | 0x7FFF;
         r.edge_color[0] = 0x001F;
-        r.clear_color = 0x7FFF;
         r.clear();
         r.framebuffer[center] = 0x7C00 | (1 << 15);
         r.depth_buffer[center] = 1000;
@@ -504,6 +554,51 @@ mod tests {
         assert_eq!(
             r.framebuffer[center] & 0x7FFF,
             alpha_blend_bgr555(0x001F, 0x7FFF, 16)
+        );
+    }
+
+    #[test]
+    fn test_antialias_respects_transparent_rear_plane_polygon_id() {
+        let center = 20 * FB_WIDTH + 20;
+
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 4;
+        r.clear_color = (4 << 24) | 0x7FFF;
+        r.clear_depth = 0x7FFF;
+        r.clear();
+        r.framebuffer[center] = 0x7C00 | (1 << 15);
+        r.depth_buffer[center] = 1000;
+        r.id_buffer[center] = 4;
+        r.edge_enable_buffer[center] = 1;
+
+        apply(&mut r);
+
+        assert_eq!(
+            r.framebuffer[center] & 0x7FFF,
+            0x7C00,
+            "same rear-plane polygon ID should not expose an AA silhouette"
+        );
+    }
+
+    #[test]
+    fn test_antialias_softens_against_different_rear_plane_polygon_id() {
+        let center = 20 * FB_WIDTH + 20;
+
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 4;
+        r.clear_color = (3 << 24) | 0x7FFF;
+        r.clear_depth = 0x7FFF;
+        r.clear();
+        r.framebuffer[center] = 0x7C00 | (1 << 15);
+        r.depth_buffer[center] = 1000;
+        r.id_buffer[center] = 4;
+        r.edge_enable_buffer[center] = 1;
+
+        apply(&mut r);
+
+        assert_eq!(
+            r.framebuffer[center] & 0x7FFF,
+            alpha_blend_bgr555(0x7C00, 0x7FFF, 16)
         );
     }
 
