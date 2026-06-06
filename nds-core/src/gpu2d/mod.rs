@@ -335,4 +335,37 @@ mod tests {
             "3D BG0 uses the physical scanline; BG0VOFS must not sample line 7"
         );
     }
+
+    #[test]
+    fn test_3d_bg0_ignores_bgcnt_non_priority_bits() {
+        fn render_with_bgcnt(bgcnt: u16) -> u16 {
+            let mut engine = Engine2d::new(Which::A);
+            engine.dispcnt = (1 << 16) | (1 << 8) | (1 << 3);
+            engine.bgcnt[0] = bgcnt;
+
+            let mut fb3d = vec![0u16; 256 * 192];
+            let alpha3d = vec![31u8; 256 * 192];
+            fb3d[0] = 0x8000 | 0x001F;
+
+            let mut framebuffer = vec![0u16; 256 * 192];
+            render_scanline(
+                &mut engine,
+                0,
+                &[0; 0x400],
+                &[0; 0x400],
+                &VramRouter::new(),
+                &mut framebuffer,
+                Some(&fb3d),
+                Some(&alpha3d),
+                None,
+            );
+            framebuffer[0] & 0x7FFF
+        }
+
+        assert_eq!(
+            render_with_bgcnt(0),
+            render_with_bgcnt(0xFFFC),
+            "3D BG0 must ignore BG0CNT bits other than priority"
+        );
+    }
 }

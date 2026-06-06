@@ -54,6 +54,8 @@ ARM9 writes to 0x04000400:
 After all 3 words are consumed, the 3D engine has executed 4 commands in declaration order: `MTX_PUSH` (zero params, fires immediately), `MTX_MODE 2`, `MTX_IDENTITY` (zero params, fires when its declaration slot is reached), `MTX_POP 5`.
 
 Padding with `0x00` is valid — null bytes in the packed-cmd word are silently skipped.
+Invalid nonzero command bytes are ignored and consume no parameters; unlike
+`0x00` padding, they do not terminate the remaining bytes in that packed word.
 Zero-parameter commands still occupy FIFO entries, but they do not consume
 parameter words. A following FIFO word can therefore be the next packed command
 word. GBATEK's DMA-overkill note explicitly calls out repeated
@@ -79,6 +81,8 @@ VTX_16 now has all its params; the 3D engine executes it.
 The 256-entry × 32-bit FIFO sits between ARM9's writes and the 3D engine's consumer. Three "fill levels" matter:
 
 - **Entry count** (`GXSTAT[16..24]`) — number of 40-bit command FIFO entries.
+- **Full** (`GXSTAT[24] = 1`) — FIFO is full. This bit overlaps the top
+  visible count bit because a saturated visible count is 256 entries.
 - **Less-than-half** (`GXSTAT[25] = 1`) — fewer than 128 entries; **this is the DMA replenishment trigger**.
 - **Empty** (`GXSTAT[26] = 1`) — no FIFO entries pending.
 - **General busy** (`GXSTAT[27] = 1`) — geometry work is still pending or executing.

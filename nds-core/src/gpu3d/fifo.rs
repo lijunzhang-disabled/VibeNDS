@@ -83,7 +83,6 @@ pub struct GxFifo {
 
     /// GXSTAT bits 30-31: 0=never, 1=less-than-half, 2=empty.
     pub irq_mode: u8,
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,10 +206,11 @@ impl GxFifo {
                 break;
             }
             let Some(cmd) = GxCmd::from_u8(id) else {
-                // Invalid command indices behave like command 0, so they
-                // terminate the packed command list.
+                // Invalid command indices are ignored and consume no
+                // parameters. Unlike command 0 padding, they do not terminate
+                // the rest of the packed command word.
                 log::trace!("GXFIFO: unknown cmd byte 0x{:02X}", id);
-                break;
+                continue;
             };
             let needed = cmd.param_count();
             self.pending_cmds.push_back(PackedCmd {
@@ -327,6 +327,9 @@ impl GxFifo {
     pub fn gxstat_high_bits(&self, general_busy: bool) -> u16 {
         let count = self.entries.min(256) as u16;
         let mut v = count;
+        if self.is_full() {
+            v |= 1 << 8;
+        } // GXSTAT bit 24
         if self.entries < FIFO_HALF {
             v |= 1 << 9;
         } // GXSTAT bit 25
@@ -451,15 +454,22 @@ mod tests {
     }
 
     #[test]
-    fn test_packed_word_invalid_command_byte_acts_like_zero() {
+    fn test_packed_word_invalid_command_byte_is_ignored_without_terminating() {
         let mut f = GxFifo::new();
-        // MTX_PUSH, invalid byte 0xFF, then valid bytes that must be ignored.
+        // MTX_PUSH, invalid byte 0xFF, then MTX_IDENTITY and MTX_POP. GBATEK
+        // says invalid command bytes are ignored and do not fetch params; they
+        // are not zero padding.
         f.write_packed(0x1215_FF11);
+        f.write_packed(3);
 
         let ops: Vec<_> = std::iter::from_fn(|| f.pop_op()).collect();
-        assert_eq!(ops.len(), 1);
+        assert_eq!(ops.len(), 3);
         assert_eq!(ops[0].cmd, 0x11);
         assert!(ops[0].params.is_empty());
+        assert_eq!(ops[1].cmd, 0x15);
+        assert!(ops[1].params.is_empty());
+        assert_eq!(ops[2].cmd, 0x12);
+        assert_eq!(ops[2].params, vec![3]);
     }
 
     #[test]
@@ -603,6 +613,11 @@ mod tests {
         assert_eq!(f.len(), FIFO_CAPACITY + 1);
         assert_eq!(f.ready.len(), FIFO_CAPACITY + 1);
         assert_eq!(f.gxstat_high_bits(false) & 0x01FF, 256);
+        assert_ne!(
+            f.gxstat_high_bits(false) & (1 << 8),
+            0,
+            "GXSTAT[24] should report GXFIFO full through the engine readback path"
+        );
     }
 
     #[test]

@@ -24,6 +24,10 @@ use crate::vram::VramRouter;
 pub const FB_WIDTH: usize = 256;
 pub const FB_HEIGHT: usize = 192;
 pub const FB_PIXELS: usize = FB_WIDTH * FB_HEIGHT;
+pub(crate) const AA_EDGE_LEFT: u8 = 1 << 0;
+pub(crate) const AA_EDGE_RIGHT: u8 = 1 << 1;
+pub(crate) const AA_EDGE_UP: u8 = 1 << 2;
+pub(crate) const AA_EDGE_DOWN: u8 = 1 << 3;
 
 /// Maximum depth value (W-buffer space). Anything ≥ this is "infinitely
 /// far" — used to clear the depth buffer at frame start.
@@ -34,6 +38,18 @@ fn default_alpha_buffer() -> Vec<u8> {
 }
 
 fn default_zero_dot_buffer() -> Vec<u8> {
+    vec![0u8; FB_PIXELS]
+}
+
+fn default_rear_color_buffer() -> Vec<u16> {
+    vec![0u16; FB_PIXELS]
+}
+
+fn default_aa_coverage_buffer() -> Vec<u8> {
+    vec![0u8; FB_PIXELS]
+}
+
+fn default_aa_edge_hint_buffer() -> Vec<u8> {
     vec![0u8; FB_PIXELS]
 }
 
@@ -81,6 +97,29 @@ pub struct Rasterizer {
         with = "crate::bus::shared::serde_bytes_vec"
     )]
     pub zero_dot_buffer: Vec<u8>,
+    /// 256x192 rear-plane color snapshot from frame clear. Anti-aliasing
+    /// blends silhouette pixels toward this, which can come from CLEAR_COLOR
+    /// or the rear bitmap clear path.
+    #[serde(
+        default = "default_rear_color_buffer",
+        with = "crate::bus::shared::serde_bytes_vec_u16"
+    )]
+    pub rear_color_buffer: Vec<u16>,
+    /// 256x192 anti-alias coverage hint captured during rasterization.
+    /// Zero means "no scan-conversion coverage available"; the AA post-pass
+    /// falls back to its conservative silhouette blend in that case.
+    #[serde(
+        default = "default_aa_coverage_buffer",
+        with = "crate::bus::shared::serde_bytes_vec"
+    )]
+    pub aa_coverage_buffer: Vec<u8>,
+    /// 256x192 anti-alias edge direction hints captured during rasterization.
+    /// Values are a bitmask of `AA_EDGE_*`; zero means "unknown".
+    #[serde(
+        default = "default_aa_edge_hint_buffer",
+        with = "crate::bus::shared::serde_bytes_vec"
+    )]
+    pub aa_edge_hint_buffer: Vec<u8>,
     /// 256×192 shadow stencil buffer. Shadow polygon mode first writes a
     /// mask with polygon ID 0, then draws visible shadow polygons against it.
     #[serde(with = "crate::bus::shared::serde_bytes_vec")]
@@ -127,6 +166,10 @@ pub struct Rasterizer {
     pub manual_translucent_sort: bool,
     /// SWAP_BUFFERS bit 1. When set, depth tests use per-vertex W instead of Z.
     pub w_buffering: bool,
+    /// Diagnostic frontend override: keep recording AA coverage but skip the
+    /// final AA post-pass so captures can isolate AA artifacts.
+    #[serde(default)]
+    pub debug_disable_antialiasing: bool,
 }
 
 impl Rasterizer {
@@ -140,6 +183,9 @@ impl Rasterizer {
             translucent_id_buffer: vec![0xFFu8; FB_PIXELS],
             fog_enable_buffer: vec![0u8; FB_PIXELS],
             zero_dot_buffer: vec![0u8; FB_PIXELS],
+            rear_color_buffer: vec![0u16; FB_PIXELS],
+            aa_coverage_buffer: vec![0u8; FB_PIXELS],
+            aa_edge_hint_buffer: vec![0u8; FB_PIXELS],
             shadow_stencil: vec![0u8; FB_PIXELS],
             clear_color: 0,
             clear_depth: 0x7FFF,
@@ -153,6 +199,7 @@ impl Rasterizer {
             alpha_test_ref: 0,
             manual_translucent_sort: false,
             w_buffering: false,
+            debug_disable_antialiasing: false,
         }
     }
 
@@ -181,6 +228,9 @@ impl Rasterizer {
         let alpha = ((self.clear_color >> 16) & 0x1F) != 0;
         let color = (self.clear_color & 0x7FFF) as u16 | if alpha { 1 << 15 } else { 0 };
         for p in self.framebuffer.iter_mut() {
+            *p = color;
+        }
+        for p in self.rear_color_buffer.iter_mut() {
             *p = color;
         }
         let alpha_value = ((self.clear_color >> 16) & 0x1F) as u8;
@@ -216,6 +266,12 @@ impl Rasterizer {
         for z in self.zero_dot_buffer.iter_mut() {
             *z = 0;
         }
+        for c in self.aa_coverage_buffer.iter_mut() {
+            *c = 0;
+        }
+        for h in self.aa_edge_hint_buffer.iter_mut() {
+            *h = 0;
+        }
         for s in self.shadow_stencil.iter_mut() {
             *s = 0;
         }
@@ -237,6 +293,7 @@ impl Rasterizer {
                 let depth = read_texture_image_u16(vram, 0x6_0000 + src);
 
                 self.framebuffer[idx] = color;
+                self.rear_color_buffer[idx] = color;
                 self.alpha_buffer[idx] = if color & (1 << 15) != 0 { 31 } else { 0 };
                 self.depth_buffer[idx] = expand_clear_depth(depth);
                 self.id_buffer[idx] = clear_poly_id;
@@ -244,6 +301,8 @@ impl Rasterizer {
                 self.translucent_id_buffer[idx] = 0xFF;
                 self.fog_enable_buffer[idx] = if depth & (1 << 15) != 0 { 1 } else { 0 };
                 self.zero_dot_buffer[idx] = 0;
+                self.aa_coverage_buffer[idx] = 0;
+                self.aa_edge_hint_buffer[idx] = 0;
                 self.shadow_stencil[idx] = 0;
             }
         }
@@ -257,8 +316,10 @@ impl Rasterizer {
     pub fn render_frame(&mut self, polygons: &[ScreenPolygon], vram: Option<&VramRouter>) {
         self.clear_with_vram(vram);
 
-        let (opaque, mut translucent): (Vec<_>, Vec<_>) =
-            polygons.iter().partition(|p| !is_translucent(p));
+        let texture_mapping_enabled = self.disp3dcnt & 1 != 0;
+        let (opaque, mut translucent): (Vec<_>, Vec<_>) = polygons
+            .iter()
+            .partition(|p| !is_translucent(p, texture_mapping_enabled));
 
         if !self.manual_translucent_sort {
             translucent.sort_by_key(|p| polygon_y_sort_key(p));
@@ -293,10 +354,13 @@ impl Default for Rasterizer {
     }
 }
 
-fn is_translucent(p: &ScreenPolygon) -> bool {
+fn is_translucent(p: &ScreenPolygon, texture_mapping_enabled: bool) -> bool {
     let alpha = (p.attr >> 16) & 0x1F;
     if alpha > 0 && alpha != 31 {
         return true;
+    }
+    if !texture_mapping_enabled {
+        return false;
     }
 
     // A3I5 and A5I3 carry per-texel alpha. In modulation and toon/highlight
@@ -328,6 +392,20 @@ mod tests {
             w: 4096,
             color,
             tex: [0, 0],
+        }
+    }
+
+    fn translucent_triangle(min_y: i32, color: u16) -> ScreenPolygon {
+        ScreenPolygon {
+            vertices: vec![
+                sv(10, min_y, color),
+                sv(50, min_y + 10, color),
+                sv(30, min_y + 30, color),
+            ],
+            attr: (16 << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 0,
+            palette_base: 0,
+            front_area_negative: true,
         }
     }
 
@@ -368,6 +446,20 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_color_initializes_rear_color_buffer() {
+        let mut r = Rasterizer::new();
+        r.clear_color = 0x03E0 | (0x1F << 16);
+        r.aa_coverage_buffer[0] = 8;
+        r.aa_edge_hint_buffer[0] = AA_EDGE_UP;
+
+        r.clear();
+
+        assert!(r.rear_color_buffer.iter().all(|&p| p == 0x03E0 | (1 << 15)));
+        assert!(r.aa_coverage_buffer.iter().all(|&c| c == 0));
+        assert!(r.aa_edge_hint_buffer.iter().all(|&h| h == 0));
+    }
+
+    #[test]
     fn test_clear_color_initializes_rear_plane_polygon_id() {
         let mut r = Rasterizer::new();
         r.clear_color = 0x2A << 24;
@@ -397,11 +489,15 @@ mod tests {
             let color = &mut vram.banks[BankId::C as usize].data;
             color[src] = 0x1F;
             color[src + 1] = 0x80;
+            color[src + 2] = 0x1F;
+            color[src + 3] = 0x00;
         }
         {
             let depth = &mut vram.banks[BankId::D as usize].data;
             depth[src] = 0x34;
             depth[src + 1] = 0x92;
+            depth[src + 2] = 0xFF;
+            depth[src + 3] = 0xFF;
         }
 
         let mut r = Rasterizer::new();
@@ -412,10 +508,45 @@ mod tests {
         r.clear_with_vram(Some(&vram));
 
         assert_eq!(r.framebuffer[0], 0x801F);
+        assert_eq!(r.rear_color_buffer[0], 0x801F);
+        assert_eq!(r.alpha_buffer[0], 31);
         assert_eq!(r.depth_buffer[0], expand_clear_depth(0x1234));
         assert_eq!(r.id_buffer[0], 0x2A);
         assert_eq!(r.fog_enable_buffer[0], 1);
         assert_eq!(r.edge_enable_buffer[0], 0);
+
+        // Rear color bitmap alpha is 1-bit, while rear depth bit 15 is only
+        // the initial fog flag and must not affect 15-bit clear-depth expansion.
+        assert_eq!(r.framebuffer[1], 0x001F);
+        assert_eq!(r.rear_color_buffer[1], 0x001F);
+        assert_eq!(r.alpha_buffer[1], 0);
+        assert_eq!(r.depth_buffer[1], expand_clear_depth(0x7FFF));
+        assert_eq!(r.fog_enable_buffer[1], 1);
+    }
+
+    #[test]
+    fn test_swap_buffers_manual_sort_preserves_translucent_software_order() {
+        let red_later_y = translucent_triangle(20, 0x001F);
+        let blue_earlier_y = translucent_triangle(10, 0x7C00);
+        let idx = 25 * FB_WIDTH + 30;
+
+        let mut auto = Rasterizer::new();
+        auto.disp3dcnt = 1 << 3;
+        auto.render_frame(&[red_later_y.clone(), blue_earlier_y.clone()], None);
+
+        let mut manual = Rasterizer::new();
+        manual.disp3dcnt = 1 << 3;
+        manual.set_swap_attrs(1);
+        manual.render_frame(&[red_later_y, blue_earlier_y], None);
+
+        assert_ne!(
+            auto.framebuffer[idx] & 0x7FFF,
+            manual.framebuffer[idx] & 0x7FFF
+        );
+        assert!(
+            (manual.framebuffer[idx] & 0x1F) > ((manual.framebuffer[idx] >> 10) & 0x1F),
+            "manual sorting must preserve software order, leaving red as the later blend"
+        );
     }
 
     #[test]
@@ -428,7 +559,8 @@ mod tests {
             front_area_negative: true,
         };
 
-        assert!(is_translucent(&p));
+        assert!(is_translucent(&p, true));
+        assert!(!is_translucent(&p, false));
     }
 
     #[test]
@@ -441,7 +573,8 @@ mod tests {
             front_area_negative: true,
         };
 
-        assert!(is_translucent(&p));
+        assert!(is_translucent(&p, true));
+        assert!(!is_translucent(&p, false));
     }
 
     #[test]
@@ -491,6 +624,39 @@ mod tests {
     }
 
     #[test]
+    fn test_translucent_texture_format_is_opaque_when_texture_mapping_disabled() {
+        let mut r = Rasterizer::new();
+        r.disp3dcnt = 1 << 3; // alpha blend enabled, texture mapping disabled.
+
+        let front_red_a5i3 = ScreenPolygon {
+            vertices: vec![sv(10, 10, 0x001F), sv(50, 10, 0x001F), sv(30, 40, 0x001F)],
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 6 << 26,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+        let mut back_blue = ScreenPolygon {
+            vertices: vec![sv(10, 10, 0x7C00), sv(50, 10, 0x7C00), sv(30, 40, 0x7C00)],
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 0,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+        for v in &mut back_blue.vertices {
+            v.depth_z = 100;
+        }
+
+        r.render_frame(&[front_red_a5i3, back_blue], None);
+
+        let idx = 20 * FB_WIDTH + 30;
+        assert_eq!(
+            r.framebuffer[idx] & 0x7FFF,
+            0x001F,
+            "texture-alpha formats must not be delayed to the translucent pass when texture mapping is disabled"
+        );
+    }
+
+    #[test]
     fn test_opaque_decal_translucent_texture_stays_in_opaque_pass() {
         let p = ScreenPolygon {
             vertices: Vec::new(),
@@ -500,7 +666,7 @@ mod tests {
             front_area_negative: true,
         };
 
-        assert!(!is_translucent(&p));
+        assert!(!is_translucent(&p, true));
     }
 
     #[test]
@@ -513,6 +679,6 @@ mod tests {
             front_area_negative: true,
         };
 
-        assert!(!is_translucent(&p));
+        assert!(!is_translucent(&p, true));
     }
 }

@@ -9,40 +9,52 @@ This file is the canonical "what's left" list. Each entry has: where it was defe
 ## 3D engine — Phase 7 deferrals
 
 ### 3D-1. Format-5 (4×4 block-compressed) texture decoder
-- **Current**: returns transparent for every texel.
+- **Status**: Implemented with focused coverage.
+- **Current**: `gpu3d/raster/texture.rs::sample_block_compressed` decodes block indices, mode bits, palette offsets, transparent mode-0/1 index 3, mode-1 average color, mode-2 explicit colors, and mode-3 weighted colors. Slot-2 data uses the upper half of the slot-1 parameter table, and `PLTT_BASE` offsets the palette lookup for compressed textures.
 - **Hardware**: 4×4 blocks of pixels share a single block header in texture-image VRAM + a per-block palette in texture-palette VRAM. Decodes by combining 2 base colors with 2 interpolated colors via a 2-bit-per-texel index.
-- **Trigger**: many commercial games use this format for opaque textures (it's the most space-efficient option for full-color textures). Visible as missing/transparent textures.
-- **Spec**: `gpu3d/raster/texture.rs::sample_block_compressed` has the stub.
+- **Remaining risk**: Broader image-diff tests against known compressed-texture ROMs would still be useful, but this is no longer a stubbed/missing feature.
 
 ### 3D-2. Anti-aliasing
-- **Current**: `DISP3DCNT` bit 4 is loadable but has no effect.
+- **Status**: Partially implemented; still approximate.
+- **Current**: `DISP3DCNT` bit 4 softens opaque silhouette pixels using polygon-ID/depth neighborhood checks. When AA is enabled, the rasterizer clips each covered pixel square against the triangle and records a coverage value from the clipped area, plus an edge-direction bitmask for coverage-limited pixels. The AA pass uses those hints instead of a fixed 50% blend when available, and tries hinted neighbors before fallback scan order. Visible 3D edges blend toward the exposed neighbor pixel; opaque rear-plane edges blend toward rear color; transparent rear-plane exposure is alpha-only so Engine A can composite BG0-from-3D over the actual 2D layer underneath. Existing interactions remain covered: translucent pixels are skipped, zero-dot polygons follow the edge-marking quirk, same-polygon interior pixels remain opaque, and rear bitmap clears provide the opaque fallback blend color when their alpha bit is set.
 - **Hardware**: coverage-based on triangle edges — fractional pixel coverage stored per-pixel during rasterization, edge pixels blended with their cross-edge neighbor by the coverage value.
-- **Trigger**: jagged edges on polygon silhouettes. Cosmetic; never breaks gameplay.
+- **Validation so far**: HeartGold title-loop sweep through frame 5400 on
+  2026-06-06 produced coherent sampled frames at 540-frame intervals, including
+  the title frames around 4320 and 5400, with no recurrence of the earlier
+  random-polygon flashing and no large artificial screen gap.
+- **Remaining risk**: Needs image-level confirmation against hardware/reference
+  captures for complex AA edge intersections; sampled commercial-game frames are
+  useful smoke tests, but they are not pixel-level conformance.
 
 ### 3D-3. Toon / highlight via `POLYGON_ATTR.mode = 2`
-- **Current**: `combine_with_vertex` treats mode 2 the same as mode 0 (modulate). The toon table is loaded into `rasterizer.toon_table` but never consulted.
+- **Status**: Implemented with focused coverage.
+- **Current**: `combine_toon_highlight` uses the toon table for mode-2 polygons, and `DISP3DCNT` bit 1 selects highlight addition versus toon replacement.
 - **Hardware**: red channel of the per-vertex color (after lighting + texture combine) gets remapped through the 32-entry `TOON_TABLE`. `DISP3DCNT` bit 1 selects toon (replace) vs highlight (add).
-- **Trigger**: cel-shaded games (e.g. *Trauma Center*, *Mario vs Donkey Kong: March of the Minis*) lose their characteristic banded shading look.
+- **Remaining risk**: Needs broader visual ROM coverage for cel-shaded scenes, especially combined with texture alpha and fog.
 
 ### 3D-4. Shadow polygon mode (`POLYGON_ATTR.mode = 3`)
-- **Current**: stubbed — returns the vertex color unmodified in `combine_with_vertex`.
-- **Hardware**: two-pass: shadow-mask pass writes 1s to a per-pixel mask; shadow-volume pass darkens pixels where the mask is 1 AND polygon-ID matches.
-- **Trigger**: missing shadows under 3D characters in most action games.
+- **Status**: Implemented with focused coverage.
+- **Current**: The rasterizer tracks a shadow stencil. Polygon ID 0 writes the mask, visible shadow polygons draw only where the mask bit is set, same-ID rejection is preserved, the consumed mask bit is cleared, and polygon alpha controls shadow intensity.
+- **Hardware**: two-pass: shadow-mask pass writes 1s to a per-pixel mask; shadow-volume pass darkens pixels where the mask is 1 and the destination polygon ID differs from the visible shadow polygon ID.
+- **Remaining risk**: Needs image-level ROM coverage for complex shadow volumes and overlaps.
 
 ### 3D-5. W-buffer mode
-- **Current**: always Z-buffer (depth = z/w from NDC).
-- **Hardware**: `DISP3DCNT.depth_buffer_mode` (bit not currently checked) selects W (= raw w) vs Z (= z/w). Different precision distribution — W is uniform across the frustum, Z is more precise near the camera.
-- **Trigger**: Z-fighting on close coplanar polygons in games that explicitly select W-buffer for those scenes.
+- **Status**: Implemented with focused coverage.
+- **Current**: `SWAP_BUFFERS` bit 1 selects W-buffering for depth tests, and fog lookup follows the active depth mode. The rasterizer has draw-path coverage for W-depth ordering, inclusive equal-depth tolerance, and rejection just outside that tolerance.
+- **Hardware**: `SWAP_BUFFERS` bit 1 selects W (= raw w) vs Z (= z/w). Different precision distribution: W is uniform across the frustum, Z is more precise near the camera.
+- **Remaining risk**: More image-level ROM coverage would help catch subtle W overflow/clamping issues in real scenes.
 
 ### 3D-6. Display capture from 3D framebuffer
-- **Current**: `DISPCAPCNT` is not wired (Phase 3 stub).
+- **Status**: Implemented for the covered Engine A paths.
+- **Current**: `DISPCAPCNT` can arm capture on the next visible line 0, read Engine A/3D source A, consume main-memory FIFO source B, blend, and write to the selected VRAM block with wrapping behavior. Capture output is packed by selected capture width, including compact 128-pixel row stride for 128×128 captures and 256-pixel row stride plus height cutoff for 256×64 and 256×128 captures.
 - **Hardware**: Engine A can capture its output (or just the 3D framebuffer, or a blend) into a VRAM bank for use as a texture next frame. Enables motion blur, screen distortion, picture-in-picture effects.
-- **Trigger**: any game that uses these effects loses them silently.
+- **Remaining risk**: Needs game-level coverage for feedback effects and all capture source/size combinations.
 
 ### 3D-7. Box / position / vector test commands
-- **Current**: `BOX_TEST`, `POS_TEST`, `VEC_TEST` are decoded and consumed by the GXFIFO but produce no result.
+- **Status**: Implemented with focused coverage.
+- **Current**: `BOX_TEST`, `POS_TEST`, and `VEC_TEST` produce visible/result-register state, clear the test-busy state, and are covered through the GX command path with live matrix state. `BOX_TEST` follows the hardware face-clipping quirk where a box enclosing the whole view volume reports not visible because no box face intersects the view volume.
 - **Hardware**: hardware-side frustum tests that return results via `GXSTAT`. Used by games for view-frustum culling on the ARM9 side.
-- **Trigger**: games that rely on these tests for early culling will draw everything (slow) but should still render correctly. Performance issue, not a correctness one — but could land here as a regression test if a game becomes unplayably slow.
+- **Remaining risk**: More ROM-level visibility/culling coverage would help, but this is no longer a no-result stub.
 
 ---
 
@@ -83,10 +95,17 @@ This file is the canonical "what's left" list. Each entry has: where it was defe
 - **Trigger**: Pokémon, Animal Crossing, anything that does time-based events; could read wrong time of day depending on the access path.
 
 ### Cart-3. Slot-1 ROM transfer machine
-- **Current**: AUXSPI backup path works; the actual cart ROM-read command machine is stubbed.
+- **Current**: AUXSPI backup path works, and the minimal unencrypted Slot-1
+  command path handles header reads, chip ID reads, normal `B7` ROM reads,
+  transfer-ready status, Slot-1 data IRQ, and Slot-1 DMA from both ARM9 and
+  ARM7. The direct-boot path also mirrors the loaded ROM bytes into the shared
+  Slot-1 backing store for runtime NitroFS/card reads.
 - **Hardware**: ARM9 writes 8-byte commands to `ROMCTRL` + `ROMCMD`; cart returns up to 0x4000 bytes via `ROMDATAIN`. Most games never touch this after direct boot reads the ARM9/ARM7 binaries, but games that *load assets from cart at runtime* (e.g. *Pokémon* level data, voice clips) need this.
-- **Trigger**: a game that direct-boots fine but freezes at the first "loading next area" prompt.
-- **Note**: when this lands, fire `Nds::run_dmas_for_timing9/7(DmaTiming::Slot1)` on each "data word ready" transition — Phase 4 DMA carry-over.
+- **Remaining risk**: The encrypted KEY1/KEY2 protocol, detailed transfer
+  timing, card ownership arbitration, and less common cart commands are still
+  approximate. A game that depends on true encrypted command sequencing or
+  cycle-level card timing can still fail after the simple direct-boot/runtime
+  read path succeeds.
 
 ### Cart-4. Cart backup type ROM database
 - **Current**: `--save-type` CLI flag forces the type; default is EEPROM 64K via header `device_capacity`. Header byte isn't reliable.

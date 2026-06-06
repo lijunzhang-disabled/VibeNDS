@@ -700,11 +700,8 @@ fn capture_display_scanline(shared: &mut SharedState, line: u16, engine_a_frameb
                 ((mmem_word >> 16) as u16) & 0x7FFF
             }
         } else {
-            let src_b_addr = capture_vram_addr(
-                read_block,
-                read_offset,
-                (line as u32 * 256 + x as u32) * 2,
-            );
+            let src_b_addr =
+                capture_vram_addr(read_block, read_offset, (line as u32 * 256 + x as u32) * 2);
             shared.vram.read_lcdc_u16(src_b_addr)
         };
         let src_b_alpha = if source_b_mmem {
@@ -723,7 +720,7 @@ fn capture_display_scanline(shared: &mut SharedState, line: u16, engine_a_frameb
             + capture_vram_addr(
                 write_block,
                 write_offset,
-                (line as u32 * 256 + x as u32) * 2,
+                capture_output_byte_pos(width, line, x),
             );
         shared.vram.cpu_write_arm9(dst_addr, captured as u8);
         shared
@@ -736,6 +733,11 @@ fn capture_display_scanline(shared: &mut SharedState, line: u16, engine_a_frameb
 
 fn capture_vram_addr(block: u32, offset: u32, byte_pos: u32) -> u32 {
     block * 0x2_0000 + ((offset + byte_pos) & 0x1_FFFF)
+}
+
+fn capture_output_byte_pos(width: usize, line: u16, x: usize) -> u32 {
+    let stride = if width == 128 { 128 } else { 256 };
+    (line as u32 * stride + x as u32) * 2
 }
 
 fn finish_display_capture_if_last_visible_line(shared: &mut SharedState, line: u16) {
@@ -1159,6 +1161,43 @@ mod tests {
     }
 
     #[test]
+    fn test_arm9_3d_render_register_byte_writes_preserve_neighbor_bytes() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write8(0x0400_0340, 0x12);
+        bus.write8(0x0400_0341, 0xFF);
+        assert_eq!(bus.shared.gpu3d.rasterizer.alpha_test_ref, 0x12);
+
+        bus.write16(0x0400_0350, 0x1234);
+        bus.write8(0x0400_0351, 0x56);
+        assert_eq!(bus.shared.gpu3d.rasterizer.clear_color & 0xFFFF, 0x5634);
+        bus.write16(0x0400_0352, 0xFFFF);
+        assert_eq!(bus.shared.gpu3d.rasterizer.clear_color, 0x3F1F_5634);
+        bus.write16(0x0400_0354, 0xFFFF);
+        assert_eq!(bus.shared.gpu3d.rasterizer.clear_depth, 0x7FFF);
+
+        bus.write16(0x0400_0360, 0xAABB);
+        bus.write8(0x0400_0361, 0xCC);
+        assert_eq!(bus.shared.gpu3d.rasterizer.fog_table[0], 0x3B);
+        assert_eq!(bus.shared.gpu3d.rasterizer.fog_table[1], 0x4C);
+        bus.write16(0x0400_0358, 0xFFFF);
+        bus.write16(0x0400_035A, 0xFFFF);
+        assert_eq!(bus.shared.gpu3d.rasterizer.fog_color, 0x001F_7FFF);
+        bus.write16(0x0400_035C, 0xFFFF);
+        assert_eq!(bus.shared.gpu3d.rasterizer.fog_offset, 0x7FFF);
+
+        bus.write16(0x0400_0380, 0x7BCD);
+        bus.write8(0x0400_0381, 0xFE);
+        assert_eq!(bus.shared.gpu3d.rasterizer.toon_table[0], 0x7ECD);
+    }
+
+    #[test]
     fn test_disp3dcnt_write_ignores_status_and_unused_bits() {
         let mut nds = Nds::new(None, None);
         let mut bus = Bus9::new(
@@ -1491,10 +1530,7 @@ mod tests {
                 nds.cpu9.cp15.itcm,
                 nds.cpu9.cp15.dtcm,
             );
-            bus.write32(
-                0x0400_0064,
-                (1 << 31) | (1 << 16) | (3 << 18) | (3 << 20),
-            );
+            bus.write32(0x0400_0064, (1 << 31) | (1 << 16) | (3 << 18) | (3 << 20));
         }
 
         nds.run_frame();
@@ -1503,6 +1539,95 @@ mod tests {
             nds.shared.vram.read_lcdc_u16(0x2_0000),
             red | (1 << 15),
             "full-height capture at offset 0x18000 should wrap within VRAM B"
+        );
+    }
+
+    #[test]
+    fn test_display_capture_128_width_uses_compact_output_stride() {
+        let mut shared = SharedState::new();
+        shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        shared.dispcapcnt = (1 << 31) | (1 << 16); // 128x128, source A, dest block B.
+        shared.dispcap_active = true;
+
+        let mut engine_a_framebuffer = vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT];
+        engine_a_framebuffer[0] = 0x001F;
+        engine_a_framebuffer[SCREEN_WIDTH] = 0x03E0;
+
+        capture_display_scanline(&mut shared, 0, &engine_a_framebuffer);
+        capture_display_scanline(&mut shared, 1, &engine_a_framebuffer);
+
+        assert_eq!(shared.vram.read_lcdc_u16(0x2_0000), 0x8000 | 0x001F);
+        assert_eq!(
+            shared.vram.read_lcdc_u16(0x2_0100),
+            0x8000 | 0x03E0,
+            "128-wide capture row 1 should start immediately after row 0"
+        );
+        assert_eq!(
+            shared.vram.read_lcdc_u16(0x2_0200),
+            0,
+            "128-wide capture must not use a 256-pixel output stride"
+        );
+    }
+
+    #[test]
+    fn test_display_capture_256x64_uses_screen_stride_and_stops_at_height() {
+        let mut shared = SharedState::new();
+        shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        shared.dispcapcnt = (1 << 31) | (1 << 16) | (1 << 20); // 256x64, source A, dest block B.
+        shared.dispcap_active = true;
+
+        let mut engine_a_framebuffer = vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT];
+        engine_a_framebuffer[63 * SCREEN_WIDTH] = 0x001F;
+        engine_a_framebuffer[64 * SCREEN_WIDTH] = 0x03E0;
+
+        capture_display_scanline(&mut shared, 63, &engine_a_framebuffer);
+        capture_display_scanline(&mut shared, 64, &engine_a_framebuffer);
+
+        assert_eq!(
+            shared.vram.read_lcdc_u16(0x2_7E00),
+            0x8000 | 0x001F,
+            "256-wide capture row 63 should use a 256-pixel output stride"
+        );
+        assert_eq!(
+            shared.vram.read_lcdc_u16(0x2_8000),
+            0,
+            "256x64 capture must not write line 64"
+        );
+        assert_ne!(shared.dispcapcnt & (1 << 31), 0);
+        assert!(
+            shared.dispcap_active,
+            "short captures keep the busy bit until the visible frame ends"
+        );
+    }
+
+    #[test]
+    fn test_display_capture_256x128_uses_screen_stride_and_stops_at_height() {
+        let mut shared = SharedState::new();
+        shared.vram.write_cnt(crate::vram::BankId::B, 0x80);
+        shared.dispcapcnt = (1 << 31) | (1 << 16) | (2 << 20); // 256x128, source A, dest block B.
+        shared.dispcap_active = true;
+
+        let mut engine_a_framebuffer = vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT];
+        engine_a_framebuffer[127 * SCREEN_WIDTH] = 0x001F;
+        engine_a_framebuffer[128 * SCREEN_WIDTH] = 0x03E0;
+
+        capture_display_scanline(&mut shared, 127, &engine_a_framebuffer);
+        capture_display_scanline(&mut shared, 128, &engine_a_framebuffer);
+
+        assert_eq!(
+            shared.vram.read_lcdc_u16(0x2_FE00),
+            0x8000 | 0x001F,
+            "256-wide capture row 127 should use a 256-pixel output stride"
+        );
+        assert_eq!(
+            shared.vram.read_lcdc_u16(0x3_0000),
+            0,
+            "256x128 capture must not write line 128"
+        );
+        assert_ne!(shared.dispcapcnt & (1 << 31), 0);
+        assert!(
+            shared.dispcap_active,
+            "short captures keep the busy bit until the visible frame ends"
         );
     }
 
@@ -1592,13 +1717,7 @@ mod tests {
             );
             bus.write32(
                 0x0400_0064,
-                (1 << 31)
-                    | 8
-                    | (8 << 8)
-                    | (1 << 16)
-                    | (3 << 20)
-                    | (1 << 25)
-                    | (2 << 29),
+                (1 << 31) | 8 | (8 << 8) | (1 << 16) | (3 << 20) | (1 << 25) | (2 << 29),
             );
         }
 
@@ -2869,6 +2988,62 @@ mod tests {
         );
         assert_eq!(nds.shared.slot1_data.len(), 124);
         assert_eq!(nds.shared.dma9.read_control(1) & (1 << 31), 0);
+    }
+
+    #[test]
+    fn test_arm7_slot1_command_registers_preserve_byte_order() {
+        let mut nds = Nds::new(None, None);
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
+
+        bus.write32(0x0400_01A8, 0xDDCC_BBAA);
+        bus.write32(0x0400_01AC, 0x4433_2211);
+
+        assert_eq!(
+            nds.shared.slot1_command,
+            [0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]
+        );
+    }
+
+    #[test]
+    fn test_arm7_slot1_read_with_irq_enable_requests_arm7_irq() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
+
+        bus.write8(0x0400_01A8, 0x00);
+        bus.write32(0x0400_01A4, (1 << 31) | (7 << 24) | (1 << 14));
+
+        assert_ne!(
+            nds.shared.irq7.read_if() & interrupt::Irq::Slot1Data.bit(),
+            0
+        );
+        assert_eq!(
+            nds.shared.irq9.read_if() & interrupt::Irq::Slot1Data.bit(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_arm7_slot1_dma_fires_when_armed_after_card_data_ready() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
+
+        bus.write8(0x0400_01A8, 0x00);
+        bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+        bus.write32(0x0400_00BC, 0x0410_0010);
+        bus.write32(0x0400_00C0, 0x0200_3000);
+        bus.write32(
+            0x0400_00C4,
+            (1u32 << 31) | (1 << 26) | (2 << 23) | (2 << 27) | 4,
+        );
+
+        assert_eq!(
+            &nds.shared.main_ram[0x3000..0x3010],
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+        assert_eq!(nds.shared.slot1_data.len(), 124);
+        assert_eq!(nds.shared.dma7.read_control(1) & (1 << 31), 0);
     }
 
     #[test]

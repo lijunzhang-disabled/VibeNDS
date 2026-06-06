@@ -464,6 +464,84 @@ mod tests {
     }
 
     #[test]
+    fn test_4color_color0_transparent() {
+        let mut v = vram_with_palette_at_0(&[0x0000, 0x001F]);
+        v.write_cnt(BankId::A, 0x80 | 3); // texture image slot 0
+                                          // Texel indices 0 then 1 in the low two 2bpp slots.
+        v.banks[BankId::A as usize].data[0] = 0b0000_0100;
+
+        let tp = TexParams {
+            vram_offset: 0,
+            width: 4,
+            height: 1,
+            format: 2,
+            color0_transparent: true,
+            repeat_s: false,
+            repeat_t: false,
+            flip_s: false,
+            flip_t: false,
+        };
+
+        assert_eq!(sample(tp, 0, 0, 0, &v).alpha, 0);
+        let opaque = sample(tp, 1, 0, 0, &v);
+        assert_eq!(opaque.color, 0x001F);
+        assert_eq!(opaque.alpha, 31);
+    }
+
+    #[test]
+    fn test_16color_color0_transparent() {
+        let mut v = vram_with_palette_at_0(&[0x0000, 0x001F]);
+        v.write_cnt(BankId::A, 0x80 | 3); // texture image slot 0
+                                          // Texel indices 0 then 1 in the low/high 4bpp nibbles.
+        v.banks[BankId::A as usize].data[0] = 0x10;
+
+        let tp = TexParams {
+            vram_offset: 0,
+            width: 2,
+            height: 1,
+            format: 3,
+            color0_transparent: true,
+            repeat_s: false,
+            repeat_t: false,
+            flip_s: false,
+            flip_t: false,
+        };
+
+        assert_eq!(sample(tp, 0, 0, 0, &v).alpha, 0);
+        let opaque = sample(tp, 1, 0, 0, &v);
+        assert_eq!(opaque.color, 0x001F);
+        assert_eq!(opaque.alpha, 31);
+    }
+
+    #[test]
+    fn test_a3i5_alpha_expands_to_five_bits() {
+        let mut v = vram_with_palette_at_0(&[0x0000, 0x001F]);
+        v.write_cnt(BankId::A, 0x80 | 3); // texture image slot 0
+        let image = &mut v.banks[BankId::A as usize].data;
+        image[0] = 1; // alpha 0, palette index 1.
+        image[1] = (1 << 5) | 1;
+        image[2] = (4 << 5) | 1;
+        image[3] = (7 << 5) | 1;
+
+        let tp = TexParams {
+            vram_offset: 0,
+            width: 8,
+            height: 8,
+            format: 1,
+            color0_transparent: false,
+            repeat_s: false,
+            repeat_t: false,
+            flip_s: false,
+            flip_t: false,
+        };
+
+        assert_eq!(sample(tp, 0, 0, 0, &v).alpha, 0);
+        assert_eq!(sample(tp, 1, 0, 0, &v).alpha, 4);
+        assert_eq!(sample(tp, 2, 0, 0, &v).alpha, 18);
+        assert_eq!(sample(tp, 3, 0, 0, &v).alpha, 31);
+    }
+
+    #[test]
     fn test_4color_palette_base_uses_8_byte_units() {
         let mut v = vram_with_image(&[0b01]);
         v.write_cnt(BankId::E, 0x80 | 3);
@@ -516,7 +594,7 @@ mod tests {
 
     #[test]
     fn test_direct_color_format() {
-        let mut v = vram_with_image(&[
+        let v = vram_with_image(&[
             0x1F, 0x80, // texel 0: red + alpha
             0x00, 0x7C, // texel 1: blue (BGR555 = 0x7C00) + alpha 0 (top bit clear)
         ]);
@@ -608,6 +686,147 @@ mod tests {
     }
 
     #[test]
+    fn test_4x4_compressed_mode_1_interpolates_index_2_evenly() {
+        let mut v = VramRouter::new();
+        v.write_cnt(BankId::A, 0x80 | 3);
+        v.write_cnt(BankId::B, 0x80 | (1 << 3) | 3);
+        v.write_cnt(BankId::E, 0x80 | 3);
+
+        v.banks[BankId::A as usize].data[0] = 0b10;
+        v.banks[BankId::B as usize].data[1] = 1 << 6;
+        let b = &mut v.banks[BankId::E as usize].data;
+        b[0] = 0x1F; // c0 red = 31.
+        b[1] = 0x00;
+        b[2] = 0xE0; // c1 green = 31.
+        b[3] = 0x03;
+
+        let tp = TexParams {
+            vram_offset: 0,
+            width: 4,
+            height: 4,
+            format: 5,
+            color0_transparent: false,
+            repeat_s: false,
+            repeat_t: false,
+            flip_s: false,
+            flip_t: false,
+        };
+
+        let texel = sample(tp, 0, 0, 0, &v);
+        assert_eq!(texel.alpha, 31);
+        assert_eq!(texel.color, 15 | (15 << 5));
+    }
+
+    #[test]
+    fn test_4x4_compressed_mode_3_uses_five_three_weighted_colors() {
+        let mut v = VramRouter::new();
+        v.write_cnt(BankId::A, 0x80 | 3);
+        v.write_cnt(BankId::B, 0x80 | (1 << 3) | 3);
+        v.write_cnt(BankId::E, 0x80 | 3);
+
+        // Top row indices 0, 1, 2, 3; mode 3 derives indices 2 and 3 from
+        // c0/c1 with 5:3 and 3:5 weights.
+        v.banks[BankId::A as usize].data[0] = 0b11_10_01_00;
+        v.banks[BankId::B as usize].data[1] = 3 << 6;
+        let b = &mut v.banks[BankId::E as usize].data;
+        b[0] = 0x1F; // c0 red = 31.
+        b[1] = 0x00;
+        b[2] = 0xE0; // c1 green = 31.
+        b[3] = 0x03;
+
+        let tp = TexParams {
+            vram_offset: 0,
+            width: 4,
+            height: 4,
+            format: 5,
+            color0_transparent: false,
+            repeat_s: false,
+            repeat_t: false,
+            flip_s: false,
+            flip_t: false,
+        };
+
+        let idx2 = sample(tp, 2, 0, 0, &v);
+        let idx3 = sample(tp, 3, 0, 0, &v);
+
+        assert_eq!(idx2.alpha, 31);
+        assert_eq!(idx2.color, 19 | (11 << 5));
+        assert_eq!(idx3.alpha, 31);
+        assert_eq!(idx3.color, 11 | (19 << 5));
+    }
+
+    #[test]
+    fn test_4x4_compressed_slot2_uses_upper_slot1_params() {
+        let mut v = VramRouter::new();
+        v.write_cnt(BankId::A, 0x80 | (2 << 3) | 3); // texture image slot 2
+        v.write_cnt(BankId::B, 0x80 | (1 << 3) | 3); // compressed params in slot 1
+        v.write_cnt(BankId::E, 0x80 | 3); // texture palette slot 0
+
+        // One 4x4 block in slot 2. Top row texel indices are 0, 1, 2, 3.
+        v.banks[BankId::A as usize].data[0] = 0b11_10_01_00;
+        // Slot 2's compressed palette params are in the upper 64 KiB of slot 1.
+        // Mode 2 keeps index 3 opaque, so this catches reads from the lower
+        // half as transparent mode 0.
+        v.banks[BankId::B as usize].data[0x10000 + 1] = 2 << 6;
+        let colors = [0x001F, 0x03E0, 0x7C00, 0x7FFF];
+        for (i, &c) in colors.iter().enumerate() {
+            let b = &mut v.banks[BankId::E as usize].data;
+            b[i * 2] = c as u8;
+            b[i * 2 + 1] = (c >> 8) as u8;
+        }
+
+        let tp = TexParams {
+            vram_offset: 0x4_0000,
+            width: 4,
+            height: 4,
+            format: 5,
+            color0_transparent: false,
+            repeat_s: false,
+            repeat_t: false,
+            flip_s: false,
+            flip_t: false,
+        };
+
+        assert_eq!(sample(tp, 3, 0, 0, &v).color, colors[3]);
+        assert_eq!(sample(tp, 3, 0, 0, &v).alpha, 31);
+    }
+
+    #[test]
+    fn test_4x4_compressed_palette_base_offsets_palette_lookup() {
+        let mut v = VramRouter::new();
+        v.write_cnt(BankId::A, 0x80 | 3);
+        v.write_cnt(BankId::B, 0x80 | (1 << 3) | 3);
+        v.write_cnt(BankId::E, 0x80 | 3);
+
+        // One block, first texel index 0. Mode 2 samples explicit palette
+        // color 0 from the palette page selected by PLTT_BASE.
+        v.banks[BankId::B as usize].data[1] = 2 << 6;
+        let b = &mut v.banks[BankId::E as usize].data;
+        // Base 0 color 0: red. This catches accidental base-zero sampling.
+        b[0] = 0x1F;
+        b[1] = 0x00;
+        // PLTT_BASE=1 is a 16-byte offset for 4x4-compressed textures.
+        b[16] = 0xE0;
+        b[17] = 0x03;
+
+        let tp = TexParams {
+            vram_offset: 0,
+            width: 4,
+            height: 4,
+            format: 5,
+            color0_transparent: false,
+            repeat_s: false,
+            repeat_t: false,
+            flip_s: false,
+            flip_t: false,
+        };
+
+        let texel = sample(tp, 0, 0, 1, &v);
+        assert_eq!(texel.color, 0x03E0);
+        assert_eq!(texel.alpha, 31);
+    }
+
+    #[test]
     fn test_combine_modulate_with_vertex() {
         let texel = Texel {
             color: 0x001F,
@@ -676,5 +895,17 @@ mod tests {
 
         assert_eq!(a, 31);
         assert_eq!(out, 0x001F);
+    }
+
+    #[test]
+    fn test_decal_mid_alpha_uses_six_bit_ratio_formula() {
+        let texel = Texel {
+            color: 0x001F,
+            alpha: 16,
+        };
+        let (out, a) = combine_with_vertex(texel, 0x0000, 1);
+
+        assert_eq!(a, 31);
+        assert_eq!(out & 0x1F, 16);
     }
 }

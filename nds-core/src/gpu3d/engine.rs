@@ -601,9 +601,10 @@ fn box_intersects_view_volume(origin: [i32; 3], size: [i32; 3], clip: &Matrix) -
         return true;
     }
 
-    // No cuboid face reached the frustum, but no frustum plane rejected the
-    // cuboid either. This covers boxes enclosing the view volume.
-    true
+    // BOX_TEST clips the cuboid faces, not the view volume. If no cuboid face
+    // reaches the frustum, the result is false even when the cuboid fully
+    // encloses the view volume.
+    false
 }
 
 fn clip_homogeneous_polygon_to_view_volume(mut polygon: Vec<[i64; 4]>) -> bool {
@@ -680,6 +681,49 @@ mod tests {
     use super::super::matrix::ONE;
     use super::super::vertex::{Polygon, Vertex};
     use super::*;
+
+    fn dispatch_load_texture_matrix(e: &mut Engine3d, m: Matrix) {
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxMode as u8,
+            params: vec![MtxMode::Texture as u32],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxLoad4x4 as u8,
+            params: m.m.iter().map(|&word| word as u32).collect(),
+        });
+    }
+
+    fn dispatch_load_pos_vector_matrix(e: &mut Engine3d, m: Matrix) {
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxMode as u8,
+            params: vec![MtxMode::PosVector as u32],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxLoad4x4 as u8,
+            params: m.m.iter().map(|&word| word as u32).collect(),
+        });
+    }
+
+    fn dispatch_vtx16(e: &mut Engine3d, x: i32, y: i32, z: i32) {
+        e.dispatch(GxOp {
+            cmd: GxCmd::Vtx16 as u8,
+            params: vec![
+                ((y as i16 as u16 as u32) << 16) | (x as i16 as u16 as u32),
+                z as i16 as u16 as u32,
+            ],
+        });
+    }
+
+    fn dispatch_box_test(e: &mut Engine3d, origin: [i32; 3], size: [i32; 3]) {
+        e.dispatch(GxOp {
+            cmd: GxCmd::BoxTest as u8,
+            params: vec![
+                ((origin[1] as i16 as u16 as u32) << 16) | (origin[0] as i16 as u16 as u32),
+                ((size[0] as i16 as u16 as u32) << 16) | (origin[2] as i16 as u16 as u32),
+                ((size[2] as i16 as u16 as u32) << 16) | (size[1] as i16 as u16 as u32),
+            ],
+        });
+    }
 
     #[test]
     fn test_full_pipeline_triangle_to_screen() {
@@ -1011,6 +1055,249 @@ mod tests {
     }
 
     #[test]
+    fn test_normal_recomputes_current_color_from_enabled_lights() {
+        let mut e = Engine3d::new();
+        e.vertex.current_color = 0x7C00;
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::PolygonAttr as u8,
+            params: vec![(1 << 6) | (1 << 7) | 1], // render both sides, enable light 0.
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::BeginVtxs as u8,
+            params: vec![0],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::DifAmb as u8,
+            params: vec![0x001F << 16], // red ambient, no bit15 color side effect.
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::LightColor as u8,
+            params: vec![0x7FFF],
+        });
+
+        assert_eq!(
+            e.vertex.current_color, 0x7C00,
+            "material/light changes should not recolor vertices until NORMAL"
+        );
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::Normal as u8,
+            params: vec![0],
+        });
+
+        assert_eq!(
+            e.vertex.current_color, 0x001F,
+            "NORMAL must recompute current color from POLYGON_ATTR light bits and material/light state"
+        );
+    }
+
+    #[test]
+    fn test_light_vector_uses_current_vector_matrix_through_gx_command_path() {
+        let mut e = Engine3d::new();
+        dispatch_load_pos_vector_matrix(&mut e, Matrix::identity().mul_scale(2 * ONE, ONE, ONE));
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::LightVector as u8,
+            params: vec![0x100], // Light 0, x = +256 in 1.0.9.
+        });
+
+        assert_eq!(
+            e.lighting.lights[0].direction,
+            [ONE, 0, 0],
+            "LIGHT_VECTOR must transform its raw vector by the current vector matrix"
+        );
+        assert_eq!(
+            e.lighting.lights[0].half_vector,
+            [ONE / 2, 0, -ONE / 2],
+            "half-vector should be derived from the transformed light vector"
+        );
+    }
+
+    #[test]
+    fn test_light_vector_ignores_pos_vector_mtx_scale_command() {
+        let mut e = Engine3d::new();
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxMode as u8,
+            params: vec![MtxMode::PosVector as u32],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxScale as u8,
+            params: vec![(2 * ONE) as u32, ONE as u32, ONE as u32],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::LightVector as u8,
+            params: vec![0x100], // Light 0, x = +256 in 1.0.9.
+        });
+
+        assert_eq!(
+            e.lighting.lights[0].direction,
+            [ONE / 2, 0, 0],
+            "MTX_SCALE in position/vector mode must not scale the vector matrix used by LIGHT_VECTOR"
+        );
+    }
+
+    #[test]
+    fn test_pos_test_uses_clip_matrix_and_seeds_last_position_through_gx_command_path() {
+        let mut e = Engine3d::new();
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxMode as u8,
+            params: vec![MtxMode::Position as u32],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxTrans as u8,
+            params: vec![(5 * ONE) as u32, 0, 0],
+        });
+        e.test_busy = true;
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::PosTest as u8,
+            params: vec![ONE as u32, (ONE / 2) as u32],
+        });
+
+        assert_eq!(
+            e.pos_test_result,
+            [6 * ONE, 0, ONE / 2, ONE],
+            "POS_TEST must transform its VTX_16-style source by the current clip matrix"
+        );
+        assert_eq!(
+            e.vertex.last_pos,
+            [ONE, 0, ONE / 2],
+            "POS_TEST must seed the inherited VTX_* position components"
+        );
+        assert!(
+            !e.test_busy,
+            "POS_TEST command completion should clear the test-busy bit"
+        );
+    }
+
+    #[test]
+    fn test_vec_test_uses_vector_matrix_through_gx_command_path() {
+        let mut e = Engine3d::new();
+        dispatch_load_pos_vector_matrix(&mut e, Matrix::identity().mul_scale(2 * ONE, ONE, ONE));
+        e.test_busy = true;
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::VecTest as u8,
+            params: vec![0x100], // x = +256 in 1.0.9.
+        });
+
+        assert_eq!(
+            e.read_vec_test_halfword(0),
+            0xF000,
+            "VEC_TEST must transform through the current vector matrix and wrap to 4.12 readback"
+        );
+        assert_eq!(e.read_vec_test_halfword(1), 0);
+        assert_eq!(e.read_vec_test_halfword(2), 0);
+        assert!(
+            !e.test_busy,
+            "VEC_TEST command completion should clear the test-busy bit"
+        );
+    }
+
+    #[test]
+    fn test_box_test_uses_clip_matrix_through_gx_command_path() {
+        let mut e = Engine3d::new();
+        let origin = [0, 0, 0];
+        let size = [ONE / 2, ONE / 2, ONE / 2];
+
+        e.test_busy = true;
+        dispatch_box_test(&mut e, origin, size);
+        assert!(
+            e.box_test_visible,
+            "identity clip matrix should report the small box inside the view volume"
+        );
+        assert!(
+            !e.test_busy,
+            "BOX_TEST command completion should clear the test-busy bit"
+        );
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxMode as u8,
+            params: vec![MtxMode::Position as u32],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::MtxTrans as u8,
+            params: vec![(3 * ONE) as u32, 0, 0],
+        });
+        e.test_busy = true;
+        dispatch_box_test(&mut e, origin, size);
+
+        assert!(
+            !e.box_test_visible,
+            "BOX_TEST must transform the box through the current clip matrix before frustum testing"
+        );
+        assert!(
+            !e.test_busy,
+            "rejected BOX_TEST command should also clear the test-busy bit"
+        );
+    }
+
+    #[test]
+    fn test_texcoord_transform_mode_2_through_gx_command_path() {
+        let mut e = Engine3d::new();
+        dispatch_load_texture_matrix(&mut e, Matrix::identity().mul_scale(8 * ONE, 4 * ONE, ONE));
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::TexImageParm as u8,
+            params: vec![2 << 30],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::TexCoord as u8,
+            params: vec![(20 << 16) | 10],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::Normal as u8,
+            params: vec![0x100 | (0x100 << 10)],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::BeginVtxs as u8,
+            params: vec![0],
+        });
+        dispatch_vtx16(&mut e, 0, 0, 0);
+        dispatch_vtx16(&mut e, ONE / 4, 0, 0);
+        dispatch_vtx16(&mut e, 0, ONE / 4, 0);
+
+        assert_eq!(e.geometry_polygons.len(), 1);
+        for v in &e.geometry_polygons[0].vertices {
+            assert_eq!(
+                v.tex,
+                [10 + (4 << 4), 20 + (2 << 4)],
+                "mode 2 must apply NORMAL-derived S/T before following VTX commands"
+            );
+        }
+    }
+
+    #[test]
+    fn test_texcoord_transform_mode_3_through_gx_command_path() {
+        let mut e = Engine3d::new();
+        dispatch_load_texture_matrix(&mut e, Matrix::identity().mul_scale(2 * ONE, 3 * ONE, ONE));
+
+        e.dispatch(GxOp {
+            cmd: GxCmd::TexImageParm as u8,
+            params: vec![3 << 30],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::TexCoord as u8,
+            params: vec![(8 << 16) | 4],
+        });
+        e.dispatch(GxOp {
+            cmd: GxCmd::BeginVtxs as u8,
+            params: vec![0],
+        });
+        dispatch_vtx16(&mut e, ONE, ONE, 0);
+        dispatch_vtx16(&mut e, 0, 0, 0);
+        dispatch_vtx16(&mut e, ONE / 2, 0, 0);
+
+        assert_eq!(e.geometry_polygons.len(), 1);
+        assert_eq!(
+            e.geometry_polygons[0].vertices[0].tex,
+            [4 + (2 << 4), 8 + (3 << 4)],
+            "mode 3 must transform each VTX source position through the texture matrix"
+        );
+    }
+
+    #[test]
     fn test_far_plane_intersecting_polygon_requires_attr_bit() {
         let mut e = Engine3d::new();
         let poly = Polygon {
@@ -1068,6 +1355,32 @@ mod tests {
     }
 
     #[test]
+    fn test_disp_1dot_depth_uses_any_vertex_w_to_keep_zero_dot_polygon() {
+        let mut e = Engine3d::new();
+        e.disp_1dot_depth = 12;
+        let poly = Polygon {
+            vertices: vec![
+                Vertex::new([0, 0, ONE / 2, 2 * ONE], 0x001F, [0, 0]),
+                Vertex::new([0, 0, ONE / 2, ONE], 0x03E0, [0, 0]),
+                Vertex::new([0, 0, ONE / 2, 2 * ONE], 0x7C00, [0, 0]),
+            ],
+            attr: (0x1F << 16) | (1 << 6) | (1 << 7),
+            tex_image_param: 0,
+            palette_base: 0,
+            front_area_negative: true,
+        };
+
+        e.vertex.polygon_buffer.push(poly);
+        e.flush_polygons();
+
+        assert_eq!(e.geometry_polygons.len(), 1);
+        assert_eq!(
+            e.geometry_polygons[0].vertices[0].color, 0x001F,
+            "0-dot visibility checks all vertex W values, but rendering still uses the first vertex"
+        );
+    }
+
+    #[test]
     fn test_polygon_attr_bit13_keeps_zero_dot_polygon() {
         let mut e = Engine3d::new();
         e.disp_1dot_depth = 0;
@@ -1108,12 +1421,12 @@ mod tests {
     }
 
     #[test]
-    fn test_box_test_reports_box_enclosing_view_volume() {
+    fn test_box_test_rejects_box_enclosing_view_volume() {
         let clip = Matrix::identity();
         let origin = [-2 * ONE, -2 * ONE, -2 * ONE];
         let size = [4 * ONE, 4 * ONE, 4 * ONE];
 
-        assert!(box_intersects_view_volume(origin, size, &clip));
+        assert!(!box_intersects_view_volume(origin, size, &clip));
     }
 
     #[test]

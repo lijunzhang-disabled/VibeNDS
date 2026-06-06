@@ -7,7 +7,7 @@ mod audio;
 mod video;
 
 use clap::Parser;
-use nds_core::cart::BackupKind;
+use nds_core::cart::{BackupKind, CartHeader};
 use nds_core::{Nds, SCREEN_HEIGHT, SCREEN_WIDTH};
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Scancode};
@@ -70,6 +70,10 @@ struct Args {
     /// Frame interval for `--capture-dir` sequence captures.
     #[arg(long, default_value_t = 60)]
     capture_interval: u32,
+
+    /// Diagnostic: skip the 3D anti-alias post-pass.
+    #[arg(long, hide = true)]
+    debug_disable_3d_aa: bool,
 }
 
 fn save_state_path(rom: Option<&Path>) -> Option<PathBuf> {
@@ -218,6 +222,105 @@ fn write_capture_ppm(
     fs::write(path, out)
 }
 
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn capture_sequence_frames(capture_frames: u32, capture_interval: u32) -> Vec<u32> {
+    let interval = capture_interval.max(1);
+    (1..=capture_frames)
+        .filter(|frame| frame % interval == 0)
+        .collect()
+}
+
+fn write_capture_metadata(
+    path: &Path,
+    rom: Option<&Path>,
+    rom_size: Option<usize>,
+    header: Option<&CartHeader>,
+    capture_frames: u32,
+    capture_interval: u32,
+    screen_gap: u32,
+    sequence: bool,
+) -> std::io::Result<()> {
+    let interval = capture_interval.max(1);
+    let output_width = SCREEN_WIDTH;
+    let output_height = SCREEN_HEIGHT * 2 + screen_gap as usize;
+    let rom_json = rom
+        .map(|p| format!("\"{}\"", json_escape(&p.display().to_string())))
+        .unwrap_or_else(|| "null".to_string());
+    let rom_size_json = rom_size
+        .map(|size| size.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let (title_json, gamecode_json, header_crc_valid_json) = if let Some(h) = header {
+        (
+            format!("\"{}\"", json_escape(&h.title)),
+            format!("\"{}\"", json_escape(&h.gamecode_str())),
+            h.header_crc_valid().to_string(),
+        )
+    } else {
+        ("null".to_string(), "null".to_string(), "null".to_string())
+    };
+    let frame_entries = if sequence {
+        capture_sequence_frames(capture_frames, interval)
+            .iter()
+            .map(|frame| format!("\"frame-{:06}.ppm\"", frame))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        String::new()
+    };
+    let capture_kind = if sequence { "sequence" } else { "single" };
+    let json = format!(
+        concat!(
+            "{{\n",
+            "  \"format\": \"nds-frontend-capture-v1\",\n",
+            "  \"kind\": \"{}\",\n",
+            "  \"rom\": {},\n",
+            "  \"rom_size\": {},\n",
+            "  \"rom_title\": {},\n",
+            "  \"gamecode\": {},\n",
+            "  \"header_crc_valid\": {},\n",
+            "  \"capture_frames\": {},\n",
+            "  \"capture_interval\": {},\n",
+            "  \"screen_gap\": {},\n",
+            "  \"screen_width\": {},\n",
+            "  \"screen_height\": {},\n",
+            "  \"output_width\": {},\n",
+            "  \"output_height\": {},\n",
+            "  \"frame_files\": [{}]\n",
+            "}}\n"
+        ),
+        capture_kind,
+        rom_json,
+        rom_size_json,
+        title_json,
+        gamecode_json,
+        header_crc_valid_json,
+        capture_frames,
+        interval,
+        screen_gap,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        output_width,
+        output_height,
+        frame_entries
+    );
+    fs::write(path, json)
+}
+
 fn main() {
     env_logger::init();
     let args = Args::parse();
@@ -304,6 +407,8 @@ fn main() {
         }
     }
 
+    nds.shared.gpu3d.rasterizer.debug_disable_antialiasing = args.debug_disable_3d_aa;
+
     if args.capture_ppm.is_some() || args.capture_dir.is_some() {
         if let Some(dir) = &args.capture_dir {
             if let Err(e) = fs::create_dir_all(dir) {
@@ -343,8 +448,42 @@ fn main() {
                 ),
                 Err(e) => eprintln!("warning: failed to write capture: {}", e),
             }
+            let metadata_path = capture_path.with_extension("json");
+            if let Err(e) = write_capture_metadata(
+                &metadata_path,
+                args.rom.as_deref(),
+                nds.cart.rom().map(|rom| rom.len()),
+                nds.cart.header(),
+                args.capture_frames,
+                args.capture_interval,
+                args.screen_gap,
+                false,
+            ) {
+                eprintln!(
+                    "warning: failed to write capture metadata {}: {}",
+                    metadata_path.display(),
+                    e
+                );
+            }
         }
         if let Some(dir) = &args.capture_dir {
+            let metadata_path = dir.join("capture-metadata.json");
+            if let Err(e) = write_capture_metadata(
+                &metadata_path,
+                args.rom.as_deref(),
+                nds.cart.rom().map(|rom| rom.len()),
+                nds.cart.header(),
+                args.capture_frames,
+                interval,
+                args.screen_gap,
+                true,
+            ) {
+                eprintln!(
+                    "warning: failed to write capture metadata {}: {}",
+                    metadata_path.display(),
+                    e
+                );
+            }
             eprintln!(
                 "Captured frame sequence through frame {} to {} every {} frames",
                 args.capture_frames,
@@ -493,10 +632,8 @@ mod tests {
 
     #[test]
     fn test_capture_ppm_layout_size() {
-        let path = std::env::temp_dir().join(format!(
-            "nds_capture_test_{}.ppm",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("nds_capture_test_{}.ppm", std::process::id()));
         let top = vec![0x001F; SCREEN_WIDTH * SCREEN_HEIGHT];
         let bottom = vec![0x03E0; SCREEN_WIDTH * SCREEN_HEIGHT];
 
@@ -505,7 +642,54 @@ mod tests {
         let bytes = fs::read(&path).expect("read capture");
         let header = format!("P6\n{} {}\n255\n", SCREEN_WIDTH, SCREEN_HEIGHT * 2 + 8);
         assert!(bytes.starts_with(header.as_bytes()));
-        assert_eq!(bytes.len(), header.len() + SCREEN_WIDTH * (SCREEN_HEIGHT * 2 + 8) * 3);
+        assert_eq!(
+            bytes.len(),
+            header.len() + SCREEN_WIDTH * (SCREEN_HEIGHT * 2 + 8) * 3
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_capture_sequence_frames_respects_interval_floor() {
+        assert_eq!(capture_sequence_frames(10, 3), vec![3, 6, 9]);
+        assert_eq!(capture_sequence_frames(3, 0), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_capture_metadata_lists_sequence_frames_and_layout() {
+        let path = std::env::temp_dir().join(format!(
+            "nds_capture_metadata_test_{}.json",
+            std::process::id()
+        ));
+
+        write_capture_metadata(
+            &path,
+            Some(Path::new("/tmp/test\"rom.nds")),
+            Some(1024),
+            None,
+            180,
+            60,
+            8,
+            true,
+        )
+        .expect("write metadata");
+
+        let json = fs::read_to_string(&path).expect("read metadata");
+        assert!(json.contains("\"format\": \"nds-frontend-capture-v1\""));
+        assert!(json.contains("\"kind\": \"sequence\""));
+        assert!(json.contains("\"rom\": \"/tmp/test\\\"rom.nds\""));
+        assert!(json.contains("\"rom_size\": 1024"));
+        assert!(json.contains("\"rom_title\": null"));
+        assert!(json.contains("\"gamecode\": null"));
+        assert!(json.contains("\"header_crc_valid\": null"));
+        assert!(json.contains("\"capture_frames\": 180"));
+        assert!(json.contains("\"capture_interval\": 60"));
+        assert!(json.contains("\"screen_gap\": 8"));
+        assert!(json.contains("\"output_width\": 256"));
+        assert!(json.contains("\"output_height\": 392"));
+        assert!(json.contains("\"frame-000060.ppm\""));
+        assert!(json.contains("\"frame-000120.ppm\""));
+        assert!(json.contains("\"frame-000180.ppm\""));
         let _ = fs::remove_file(path);
     }
 
@@ -525,5 +709,12 @@ mod tests {
         assert_eq!(args.capture_frames, 180);
         assert_eq!(args.capture_interval, 30);
         assert!(args.capture_ppm.is_none());
+    }
+
+    #[test]
+    fn test_screen_gap_defaults_to_compact_layout() {
+        let args = Args::parse_from(["nds-frontend"]);
+
+        assert_eq!(args.screen_gap, 0);
     }
 }

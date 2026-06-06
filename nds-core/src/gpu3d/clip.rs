@@ -264,6 +264,23 @@ mod tests {
     }
 
     #[test]
+    fn test_texcoord_interpolation_along_clipped_edge() {
+        let mut inside_a = vtx(0, 0, ONE, ONE, 0x7FFF);
+        inside_a.tex = [0, 0];
+        let mut inside_b = vtx(0, ONE, ONE, ONE, 0x7FFF);
+        inside_b.tex = [0, 0];
+        let mut outside = vtx(0, 0, -3 * ONE, ONE, 0x7FFF);
+        outside.tex = [64, 128];
+
+        let out = clip_polygon(&[inside_a, inside_b, outside]).expect("clipped");
+
+        assert!(
+            out.iter().any(|v| v.tex == [32, 64]),
+            "near-plane intersections should interpolate S/T halfway between inside and outside vertices"
+        );
+    }
+
+    #[test]
     fn test_quad_fully_inside_passes_through_four_planes() {
         // A quad fully inside the frustum should survive with 4 vertices.
         let q = vec![

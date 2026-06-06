@@ -9,6 +9,52 @@ HeartGold is no longer a black-screen boot failure. It reaches a recognizable
 title scene, and the latest Desktop screenshot showed the Ho-Oh title art and
 `TOUCH TO START` instead of a blank frame or broken layout.
 
+Latest direct capture from the rebuilt release binary:
+
+```sh
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4200 --capture-ppm /private/tmp/heartgold-current.ppm
+```
+
+Result:
+
+- Capture completed successfully at `256 x 384`.
+- The default screen gap is no longer present.
+- The title frame is coherent: Ho-Oh scene on the top screen, HeartGold logo on
+  the bottom screen, and no random full-frame polygon corruption in that frame.
+- Remaining visible risk is now finer 3D raster/post-effect correctness in the
+  top-screen scene, rather than the earlier black-screen, giant-gap, or random
+  polygon state.
+
+Short sequence check:
+
+```sh
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4320 --capture-dir /private/tmp/heartgold-seq --capture-interval 60
+```
+
+Result:
+
+- Sequence capture completed through frame 4320.
+- Late sampled frames `4200`, `4260`, and `4320` were generated for inspection.
+- Frame `4320` remained coherent and did not reproduce the previously reported
+  random-polygon flashing.
+
+Current 5400-frame sequence check:
+
+```sh
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 5400 --capture-interval 540 --capture-dir /private/tmp/heartgold-20260606-current-verify
+```
+
+Result:
+
+- Sequence capture completed through frame 5400.
+- Captures were `256 x 384`, matching the compact dual-screen layout.
+- Frame `540` showed the expected Game Freak splash.
+- Frame `2700` showed coherent title-animation art.
+- Frames `4320` and `5400` showed stable Ho-Oh title frames with the bottom
+  HeartGold logo and `TOUCH TO START`.
+- The sampled sequence did not reproduce the earlier black screen, oversized
+  vertical gap, or random polygon flashing failure modes.
+
 This does **not** mean the NDS 3D renderer is complete. The current goal is
 still broader: make local 3D graphics behavior match the NDS geometry docs.
 The remaining artifacts still look like real 3D correctness problems, not a
@@ -1895,6 +1941,67 @@ Example:
 This is intended for comparing current output across emulator changes and,
 eventually, against reference captures from the same frame window.
 
+### 2026-06-06 extension: PPM image comparator
+
+Added:
+
+```text
+tools/compare_ppm.py
+tools/compare_ppm_test.py
+tools/run_visual_manifest.py
+tools/run_visual_manifest_test.py
+```
+
+The comparator reads binary `P6` PPM files emitted by `nds-frontend` and
+reports:
+
+- image size;
+- total pixels;
+- changed-pixel count and percentage;
+- changed-channel count;
+- maximum channel delta;
+- RGB RMSE.
+
+It also supports `--write-diff <PATH>`, which writes an amplified PPM diff
+image for visual inspection. When both inputs are directories, it compares
+matching `frame-000000.ppm` sequence captures and treats `--write-diff` as an
+output directory for per-frame diff PPMs. The script has no third-party
+dependencies, so it can be used in local debug sessions or CI once reference
+captures are checked in or produced by a trusted external runner.
+
+Example exact comparison:
+
+```sh
+python3 tools/compare_ppm.py \
+  /tmp/current/frame-004320.ppm \
+  /tmp/reference/frame-004320.ppm
+```
+
+Example sequence comparison:
+
+```sh
+python3 tools/compare_ppm.py \
+  /tmp/current-heartgold-seq \
+  /tmp/reference-heartgold-seq \
+  --write-diff /tmp/heartgold-seq-diff
+```
+
+Example with a tolerance and diff artifact:
+
+```sh
+python3 tools/compare_ppm.py \
+  /tmp/current/frame-004320.ppm \
+  /tmp/reference/frame-004320.ppm \
+  --pixel-threshold 2 \
+  --max-changed-pixels 100 \
+  --max-channel-delta 8 \
+  --write-diff /tmp/frame-004320-diff.ppm
+```
+
+This closes the tooling gap between deterministic captures and actual
+hardware/reference image comparison. It does not provide the reference images
+by itself.
+
 ### 2026-06-04 extension: frame sequence capture
 
 Added:
@@ -1929,12 +2036,58 @@ Result:
 
 All three files were valid 256x392 native dual-screen PPM images.
 
+### 2026-06-06 extension: capture metadata sidecars
+
+Added dependency-free JSON sidecars for frontend capture output:
+
+- single `--capture-ppm /path/frame.ppm` also writes `/path/frame.json`;
+- sequence `--capture-dir /path/seq` also writes
+  `/path/seq/capture-metadata.json`.
+
+The sidecar format is currently `nds-frontend-capture-v1` and records:
+
+- capture kind (`single` or `sequence`);
+- ROM path;
+- ROM size;
+- ROM title;
+- gamecode;
+- header CRC status;
+- requested frame count;
+- capture interval;
+- native screen gap;
+- source screen dimensions;
+- output PPM dimensions;
+- sequence frame filenames.
+
+This makes reference-image comparisons less ambiguous: current and reference
+captures can be checked for the same frame window and compact/tall layout
+before pixel deltas are interpreted.
+
+Smoke check:
+
+```sh
+cargo run --release -p nds-frontend -- --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 120 --capture-interval 60 --capture-dir /private/tmp/heartgold-20260606-metadata-smoke-new --capture-ppm /private/tmp/heartgold-20260606-metadata-smoke-new.ppm
+```
+
+Result:
+
+- single capture `/private/tmp/heartgold-20260606-metadata-smoke-new.ppm` is a
+  valid `256 x 384` PPM;
+- single sidecar `/private/tmp/heartgold-20260606-metadata-smoke-new.json`
+  reports `kind: single`, `capture_frames: 120`, `capture_interval: 60`,
+  `screen_gap: 0`, and `output_height: 384`;
+- sequence directory contains `frame-000060.ppm`, `frame-000120.ppm`, and
+  `capture-metadata.json`;
+- sequence sidecar reports `kind: sequence` and lists both frame files.
+
 ### Tests added
 
 ```text
 test_bgr555_to_rgb888_expands_channels
 test_capture_ppm_layout_size
 test_capture_args_accept_sequence_options
+test_capture_sequence_frames_respects_interval_floor
+test_capture_metadata_lists_sequence_frames_and_layout
 ```
 
 ## 2026-06-04 fix: edge marking ignored rear-plane polygon ID
@@ -2642,3 +2795,3794 @@ Result:
 
 - Display-capture focused tests: `7 passed; 0 failed`.
 - Workspace release tests: `nds-core 539 passed; nds-frontend 4 passed`.
+
+## 2026-06-05 fix: ARM9 byte writes to 3D render registers preserve adjacent bytes
+
+Status: **Implemented as 3D render-register conformance fix**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from inspecting the local ARM9 IO dispatcher against GBATEK's 3D rendering
+register map. The relevant registers are write-only or table-like, so byte
+writes must update the emulator's stored value directly instead of using a
+read-modify-write path that reads back zero.
+
+### Symptom / gap
+
+`write_io8` handled unrecognized registers by reading the containing halfword,
+replacing one byte, and writing the halfword back. That works for readable IO
+registers, but the 3D rendering tables/registers at `0x04000330..0x040003BF`
+are mostly write-only in the current read path.
+
+Before this change, a byte write to the high byte of one of these registers
+could erase the low byte:
+
+```text
+write16 FOG_TABLE[0..1] = AABB
+write8  FOG_TABLE[1]    = CC
+old result: 00CC
+new result: BBCC
+```
+
+The same class of bug applied to `EDGE_COLOR`, `CLEAR_COLOR`, `CLEAR_DEPTH`,
+`CLRIMAGE_OFFSET`, `FOG_COLOR`, `FOG_OFFSET`, and `TOON_TABLE`.
+
+### Fix
+
+- Added direct `write_io8` handling for the ARM9 3D rendering register block:
+  - `EDGE_COLOR`
+  - `ALPHA_TEST_REF`
+  - `CLEAR_COLOR`
+  - `CLEAR_DEPTH`
+  - `CLRIMAGE_OFFSET`
+  - `FOG_COLOR`
+  - `FOG_OFFSET`
+  - `FOG_TABLE`
+  - `TOON_TABLE`
+- Kept 15-bit color masking for `EDGE_COLOR` and `TOON_TABLE` high-byte writes.
+- Left the generic read-modify-write fallback for ordinary readable registers.
+
+### Why this matters
+
+Commercial games can update fog/toon/edge/clear data through byte stores. If
+the paired byte is silently cleared, post-effects and toon/edge colors can
+change even though the game only intended to touch one entry byte.
+
+Tests added:
+
+```text
+test_arm9_3d_render_register_byte_writes_preserve_neighbor_bytes
+test_3d_bg0_ignores_bgcnt_non_priority_bits
+test_3d_bg0_second_target_uses_bldalpha_not_3d_alpha
+test_3d_bg0_first_target_supports_brightness_effects
+test_disp_1dot_depth_uses_any_vertex_w_to_keep_zero_dot_polygon
+test_depth_equal_uses_hardware_tolerance
+test_a3i5_alpha_expands_to_five_bits
+test_4color_color0_transparent
+test_16color_color0_transparent
+test_4x4_compressed_slot2_uses_upper_slot1_params
+test_rear_bitmap_clear_uses_texture_slots_and_scroll
+test_toon_highlight_rgb_uses_hardware_formula
+test_decal_mid_alpha_uses_six_bit_ratio_formula
+test_edge_marking_uses_polygon_id_color_group_and_masks_bit15
+test_translucent_polygon_overwrites_transparent_framebuffer
+test_translucent_blend_updates_alpha_buffer_to_max
+test_opaque_polygon_overwrites_when_alpha_blend_enabled
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core test_arm9_3d_render_register_byte_writes_preserve_neighbor_bytes --release
+cargo test -p nds-core test_3d_bg0_ignores_bgcnt_non_priority_bits --release
+cargo test -p nds-core test_3d_bg0_second_target_uses_bldalpha_not_3d_alpha --release
+cargo test -p nds-core test_3d_bg0_first_target_supports_brightness_effects --release
+cargo test -p nds-core test_disp_1dot_depth_uses_any_vertex_w_to_keep_zero_dot_polygon --release
+cargo test -p nds-core test_depth_equal_uses_hardware_tolerance --release
+cargo test -p nds-core test_a3i5_alpha_expands_to_five_bits --release
+cargo test -p nds-core color0_transparent --release
+cargo test -p nds-core compressed --release
+cargo test -p nds-core test_rear_bitmap_clear_uses_texture_slots_and_scroll --release
+cargo test -p nds-core test_toon_highlight_rgb_uses_hardware_formula --release
+cargo test -p nds-core test_decal_mid_alpha_uses_six_bit_ratio_formula --release
+cargo test -p nds-core test_edge_marking_uses_polygon_id_color_group_and_masks_bit15 --release
+cargo test -p nds-core test_translucent_polygon_overwrites_transparent_framebuffer --release
+cargo test -p nds-core test_translucent_blend_updates_alpha_buffer_to_max --release
+cargo test -p nds-core test_opaque_polygon_overwrites_when_alpha_blend_enabled --release
+cargo test --workspace --release
+```
+
+Result:
+
+- 3D render-register byte-write focused test: `1 passed; 0 failed`.
+- 3D BG0 BG0CNT focused test: `1 passed; 0 failed`.
+- 3D BG0 second-target blend focused test: `1 passed; 0 failed`.
+- 3D BG0 brightness focused test: `1 passed; 0 failed`.
+- 0-dot W-boundary focused test: `1 passed; 0 failed`.
+- Depth-equal tolerance focused test: `1 passed; 0 failed`.
+- A3I5 alpha expansion focused test: `1 passed; 0 failed`.
+- 4/16/256-color color-0 transparency focused tests: `3 passed; 0 failed`.
+- 4x4 compressed texture focused tests: `3 passed; 0 failed`.
+- Rear-plane bitmap focused test: `1 passed; 0 failed`.
+- Toon/highlight RGB formula focused test: `1 passed; 0 failed`.
+- Decal mid-alpha formula focused test: `1 passed; 0 failed`.
+- Edge-color group focused test: `1 passed; 0 failed`.
+- Transparent-framebuffer alpha-blend bypass focused test: `1 passed; 0 failed`.
+- Alpha-buffer max focused test: `1 passed; 0 failed`.
+- Opaque-polygon alpha-blend bypass focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 555 passed; nds-frontend 4 passed`.
+
+### Additional coverage: 0-dot polygon W comparison
+
+GBATEK notes that `DISP_1DOT_DEPTH` checks the W coordinates of all vertices,
+but the 0-dot polygon is still rendered using the first vertex's
+color/depth/texture data. Added coverage for a polygon where the first vertex
+is behind the boundary, a later vertex is within the boundary, and all vertices
+land on the same screen pixel. This locks in the existing all-vertices W check
+and protects against regressing to first-vertex-only culling.
+
+### Additional coverage: depth-equal tolerance
+
+GBATEK documents `POLYGON_ATTR.Bit14` depth-equal mode as allowing matches
+within `+/-0x200` in the 24-bit depth range, not only exact equality. Added a
+boundary test for exact equality, both inclusive `0x200` edges, and both
+exclusive `0x201` edges. The same test also confirms normal depth-less mode
+does not accept equal depth.
+
+### Additional coverage: 3D BG0 as blend second target
+
+GBATEK describes special-effects behavior for the final 3D output: when BG0/3D
+is the first blend target, per-pixel 3D alpha is used; when BG0/3D is the
+second target, normal `BLDALPHA` EVA/EVB blending is used like other 2D
+layers. Added coverage where BG1 is first target, BG0/3D is second target, and
+the 3D pixel's alpha is intentionally set to a value that would produce a
+different result if it were incorrectly used.
+
+### Additional coverage: 3D BG0 brightness effects
+
+GBATEK also lists brightness increase/decrease with BG0 as first target as
+normal 2D special effects for the final 3D output. Added coverage that routes
+BG0/3D through `BLDY` brightness-up and brightness-down modes, confirming that
+3D BG0 participates in those first-target effects just like a normal BG layer.
+
+### Additional coverage: A3I5 alpha expansion
+
+GBATEK specifies that A3I5 texture alpha expands from 3-bit to 5-bit with
+`Alpha=(Alpha*4)+(Alpha/2)`. Added sampler coverage for representative values
+`0`, `1`, `4`, and `7`, proving they produce 5-bit alpha values `0`, `4`,
+`18`, and `31`. This protects translucent textured polygons from regressions
+in the texture-fetch path.
+
+### Additional coverage: indexed texture color-0 transparency
+
+GBATEK applies the `TEXIMAGE_PARAM.Bit29` color-0 transparency flag to the
+4-color, 16-color, and 256-color indexed texture formats. Existing coverage
+already checked the 256-color case; added 4-color and 16-color fixtures that
+sample palette index `0` as transparent and palette index `1` as opaque. The
+production sampler already used the shared indexed-texture path correctly.
+
+### Additional coverage: 4x4 compressed texture Slot 2 parameters
+
+GBATEK maps 4x4 compressed texture blocks in Slot 2 to compressed parameter
+entries in the upper 64 KiB of texture-image Slot 1:
+`slot1_addr = slot2_addr / 2 + 10000h`. Added a Slot 2 fixture whose texel
+index `3` is opaque only when the sampler reads mode `2` from that upper-half
+parameter entry. Reading the lower-half Slot 0 parameter area would incorrectly
+leave the texel transparent. The production sampler already matched this
+addressing rule.
+
+### Extended coverage: rear-plane bitmap alpha and fog/depth separation
+
+GBATEK's rear-plane bitmap mode uses texture Slot 2 for color and texture Slot
+3 for depth. The color bitmap has only a 1-bit alpha flag, while depth bitmap
+bit 15 is the initial fog flag and must not contribute to the 15-bit clear
+depth value. Extended the existing rear-plane bitmap test to assert both alpha
+states and to prove a `0xFFFF` depth bitmap entry expands as clear depth
+`0x7FFF` with fog enabled, not as a larger depth value.
+
+### Additional coverage: toon/highlight RGB blend formula
+
+GBATEK defines toon and highlight shading in 6-bit expanded channel space:
+toon mode multiplies texture and toon-table channels, while highlight mode
+adds the toon-table shade after that multiply and clamps before shrinking back
+to 5-bit color. Added a direct formula test with mid-intensity texture and
+shade values. The same input now proves toon red output `9` and highlight red
+output `25`, protecting textured title graphics from subtle color/intensity
+regressions.
+
+### Additional coverage: decal mid-alpha ratio formula
+
+GBATEK specifies decal mode as using texture alpha only as the RGB mix ratio;
+the final output alpha still comes from `POLYGON_ATTR`. Existing tests covered
+only the `At=0` and `At=31` shortcuts. Added a mid-alpha texture sample that
+proves `At=16` is expanded to the 6-bit ratio before mixing, producing red
+channel `16` over a black vertex color while leaving the helper's fragment
+alpha at the opaque placeholder used before `final_alpha` applies polygon
+alpha.
+
+### Additional coverage: edge-color group selection
+
+GBATEK maps edge colors by polygon ID group: IDs `00h..07h` use
+`EDGE_COLOR[0]`, IDs `08h..0Fh` use `EDGE_COLOR[1]`, and so on. Added a
+post-effect fixture for polygon ID `8` that must select `EDGE_COLOR[1]` and
+mask off the table entry's unused bit 15. This protects outlines on objects
+using nonzero polygon-ID groups.
+
+### Additional coverage: alpha-blend bypass on transparent framebuffer
+
+GBATEK says translucent polygon blending is bypassed when the old framebuffer
+pixel has alpha `0`; the new polygon color/alpha is written directly instead
+of blending against the transparent rear plane. Added a rendered triangle test
+with alpha blending enabled and the default transparent rear plane. A red
+alpha-16 polygon must write full red color with alpha buffer `16`, rather than
+half-red from blending against black.
+
+### Additional coverage: framebuffer alpha max on translucent blending
+
+GBATEK specifies blended framebuffer alpha as `max(Poly[A], FrameBuf[A])`.
+Added a two-layer translucent overlap test with manual order: the first
+fragment writes alpha `8` over a transparent rear plane, and the second
+different-ID fragment blends over it with alpha `16`. The resulting alpha
+buffer must become `16`, proving the emulator preserves the max-alpha rule for
+translucent-over-translucent pixels.
+
+### Additional coverage: alpha-blend bypass for opaque polygon pixels
+
+GBATEK says alpha blending is bypassed when `Poly[A]=31`, even if
+`DISP3DCNT.Bit3` enables alpha blending. Added an overlap test with a far blue
+opaque polygon and a nearer red opaque polygon while alpha blending is enabled.
+The output must be full red with alpha buffer `31`, not a blended color.
+
+## 2026-06-06 status: current HeartGold capture reaches title screen
+
+Status: **Boot path past title-screen blocker; remaining work is visual conformance**
+
+Current verification command used the already-built release binary, avoiding a
+recompile on every manual run:
+
+```sh
+target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-dir /private/tmp/heartgold-captures-long --capture-frames 4800 --capture-interval 600
+```
+
+Result:
+
+- Direct boot loaded `POKEMON HG` / `IPKE`.
+- Existing save loaded from `/Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.sav`.
+- Sparse captures through frame `4800` reached the interactive title screen.
+- Frame `4200` shows the top-screen Ho-Oh scene with `TOUCH TO START` and the
+  bottom-screen HeartGold logo.
+- Frame `4800` shows the same title scene without the prompt phase.
+
+The previous Desktop screenshot `Screenshot 2026-06-01 at 11.57.19 PM.png`
+should now be treated as a stale baseline for the boot/flicker blocker. It
+matches the broad title-screen state rather than showing the earlier black
+screen or random-polygon failure. The next useful debugging target is not card
+I/O or NitroFS; it is remaining 3D visual conformance, especially polygon
+edge/fill behavior, interpolation, depth ordering, and post-effects on the
+top-screen title model.
+
+## 2026-06-06 coverage: SWAP_BUFFERS manual translucent sort affects rendered output
+
+Status: **Added focused 3D order-conformance coverage**
+
+Direct reference-emulator implementation use for this test: **0**. This came
+from GBATEK's `SWAP_BUFFERS` bit definition:
+
+- Bit 0 clear: translucent polygon Y-sorting is automatic.
+- Bit 0 set: translucent polygon sorting is manual, preserving software order.
+
+The rasterizer already stored this bit as `manual_translucent_sort`, but the
+existing tests did not prove that it changes final pixels. Added a focused
+overlap test with two alpha-16 translucent triangles whose software order
+conflicts with the automatic Y-sort key. The automatic and manual paths must
+produce different blended colors, and the manual path must leave the later
+software polygon as the stronger color contribution.
+
+Test added:
+
+```text
+test_swap_buffers_manual_sort_preserves_translucent_software_order
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core test_swap_buffers_manual_sort_preserves_translucent_software_order --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Manual translucent sort focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 556 passed; nds-frontend 4 passed`.
+
+## 2026-06-06 fix: texture-alpha formats are opaque when texture mapping is disabled
+
+Status: **Implemented as 3D render-order conformance fix**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from comparing the rasterizer's translucent-pass classification with
+`DISP3DCNT.Bit0` and GBATEK's texture-blending rules. A3I5 and A5I3 texture
+formats carry texel alpha only when texture mapping is enabled. If texture
+mapping is disabled, an alpha-31 polygon using one of those texture formats
+renders from vertex color with opaque alpha and must stay in the opaque pass.
+
+### Symptom / gap
+
+`is_translucent` classified modulation/toon polygons with A3I5/A5I3 texture
+formats as translucent without checking whether texture mapping was enabled.
+That could delay an otherwise opaque polygon into the translucent pass, changing
+render order and depth behavior when a game temporarily disabled texture
+mapping through `DISP3DCNT.Bit0`.
+
+### Fix
+
+- Threaded the rasterizer's texture-mapping enable bit into the translucent
+  classification used by `render_frame`.
+- Kept polygon alpha `1..30` classified as translucent regardless of texture
+  state.
+- Classified A3I5/A5I3 alpha-31 modulation/toon polygons as texture-alpha
+  translucent only when texture mapping is enabled.
+
+Test added:
+
+```text
+test_translucent_texture_format_is_opaque_when_texture_mapping_disabled
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core translucent_texture --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Texture/translucency focused tests: `7 passed; 0 failed`.
+- Workspace release tests: `nds-core 557 passed; nds-frontend 4 passed`.
+
+## 2026-06-06 fix: texture-disabled alpha formats do not force translucent fill rule
+
+Status: **Implemented as 3D raster fill-rule conformance fix**
+
+Direct reference-emulator implementation use for this fix: **0**. This is the
+same texture-enable distinction as the render-order fix above, applied to the
+scan converter's small-polygon edge rule.
+
+### Symptom / gap
+
+The rasterizer uses GBATEK's lower/right edge exclusion rule for small polygons:
+opaque polygons without edge-marking or anti-aliasing are shrunken, translucent
+polygons are shrunken when alpha blending is disabled, and vertical right edges
+are still excluded. The local implementation treated A3I5/A5I3 texture formats
+as translucent for that rule even when `DISP3DCNT.Bit0` disabled texture
+mapping.
+
+That was wrong when anti-aliasing was enabled and texture mapping was disabled:
+an alpha-31 A5I3/A3I5 polygon should behave as opaque vertex-color geometry,
+so a non-vertical right edge should remain included.
+
+### Fix
+
+- Added the texture-mapping enable gate to `uses_small_polygon_fill_rule`.
+- A3I5/A5I3 texture formats only contribute "translucent texture" behavior to
+  edge exclusion when texture sampling is actually enabled.
+
+Test added:
+
+```text
+test_disabled_texture_alpha_format_does_not_force_translucent_fill_rule
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core test_disabled_texture_alpha_format_does_not_force_translucent_fill_rule --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Disabled-texture fill-rule focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 558 passed; nds-frontend 4 passed`.
+
+## 2026-06-06 fix: canonical masks for write-only 3D render register state
+
+Status: **Implemented as 3D render-register conformance fix**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from GBATEK's bit layouts for the rendering-engine registers and the local
+write paths added earlier for byte writes.
+
+### Symptom / gap
+
+The emulator already masked unused bits at many use sites, but the stored
+write-only register state could still retain unused bits:
+
+- `CLEAR_COLOR` bits 21..23 and 30..31
+- `CLEAR_DEPTH` bit 15
+- `FOG_COLOR` bit 15 and bits 21..31
+- `FOG_OFFSET` bit 15
+- `FOG_TABLE` bit 7 for each density entry
+
+That did not usually affect current rendering because later code masked the
+fields again, but it left non-hardware state in save states and made byte-write
+preservation tests less precise than the register definitions.
+
+### Fix
+
+- Mask `CLEAR_COLOR` to the hardware-defined color/fog/alpha/polygon-ID bits
+  after byte and halfword writes.
+- Mask `CLEAR_DEPTH` and `FOG_OFFSET` to 15 bits after byte and halfword writes.
+- Mask `FOG_COLOR` to color plus fog-alpha bits after byte and halfword writes.
+- Mask each `FOG_TABLE` byte to its 7-bit density field for byte and halfword
+  writes.
+- Extended the existing ARM9 3D render-register byte-write test so it now
+  verifies both neighbor-byte preservation and unused-bit masking.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_arm9_3d_render_register_byte_writes_preserve_neighbor_bytes --release
+cargo test --workspace --release
+```
+
+Result:
+
+- ARM9 render-register byte-write/mask focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 558 passed; nds-frontend 4 passed`.
+
+## 2026-06-06 check: quad fan diagonal coverage
+
+Status: **Ruled out as the current HeartGold title artifact**
+
+Direct reference-emulator implementation use for this check: **0**. This was a
+local hypothesis from the rasterizer architecture plus GBATEK's note that the
+DS supports native triangles and quadliterals.
+
+### Hypothesis
+
+The NDS rasterizer accepts native 4-vertex quads, while the current software
+rasterizer triangulates every polygon as a fan around vertex 0. If the lower /
+right edge exclusion rule were applied to the artificial diagonal between the
+two fan triangles, a quad could show a missing-pixel seam. That kind of seam
+would be visible in title-screen polygon art and could look like flashing
+polygon corruption when animated.
+
+### Result
+
+Added a focused regression test that renders an opaque axis-aligned quad
+through the current fan path and samples pixels on the fan diagonal:
+
+```text
+test_quad_fan_does_not_leave_internal_diagonal_gap
+```
+
+The test passes. That means the current fan triangulation does not leave a
+simple internal diagonal coverage hole for this case. It does not prove native
+quad interpolation is fully hardware-accurate, but it rules out the simplest
+coverage-seam explanation for the remaining HeartGold title-screen artifacts.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_quad_fan_does_not_leave_internal_diagonal_gap --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Quad fan diagonal focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 559 passed; nds-frontend 4 passed`.
+
+## 2026-06-06 fix: default dual-screen gap removed
+
+Status: **Implemented as frontend layout fix**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from inspecting the local frontend capture/window layout after the current
+HeartGold frame was coherent but still showed a large separator between
+screens.
+
+### Symptom / gap
+
+The command:
+
+```sh
+target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4200 --capture-ppm /private/tmp/heartgold-compact-gap.ppm
+```
+
+still produced a 256x392 capture before rebuilding the release binary. That
+height is `192 + 8 + 192`, proving the visible gap was not a rendering bug in
+the core; it was the frontend's default `DEFAULT_SCREEN_GAP = 8` native pixels.
+At `--scale 2`, that default becomes a 16-pixel window separator.
+
+### Fix
+
+- Changed the frontend default screen gap from 8 native pixels to 0.
+- Kept `--screen-gap` available for explicit DS-style separation.
+- Added `test_screen_gap_defaults_to_compact_layout` so the default remains
+  compact.
+
+Verification:
+
+```sh
+cargo test -p nds-frontend --release
+cargo build --release -p nds-frontend
+target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4200 --capture-ppm /private/tmp/heartgold-compact-gap.ppm
+cargo test --workspace --release
+```
+
+Result:
+
+- Frontend release tests: `5 passed; 0 failed`.
+- Rebuilt `target/release/nds-frontend`.
+- New HeartGold frame-4200 capture is `256 x 384`, which is exactly two
+  256x192 screens with no separator.
+- Workspace release tests: `nds-core 559 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: texture-coordinate transform mode formulas
+
+Status: **Added focused 3D texture-transform conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's texture-coordinate transformation formulas.
+
+### Why this matters
+
+Commercial model/title-screen assets often rely on texture matrices for
+scrolling, projection-like effects, and reflection mapping. A row/column or
+fixed-point mistake in these formulas can make otherwise correct polygons show
+wrong or unstable texture placement.
+
+### Coverage added
+
+- `test_texcoord_transform_mode_0_ignores_texture_matrix` proves mode 0 keeps
+  raw `TEXCOORD` values even when the texture matrix contains translation.
+- `test_texcoord_transform_mode_1_uses_one_sixteenth_matrix_terms` proves mode
+  1 uses GBATEK's `(S, T, 1/16, 1/16)` input vector, including the documented
+  contribution from matrix row `m[8]/m[9]`.
+
+The existing implementation already matched this behavior; this change locks
+it down while continuing the 3D visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core texcoord_transform_mode_ --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Texture-coordinate transform focused tests: `7 passed; 0 failed`.
+- Workspace release tests: `nds-core 561 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: visible shadow alpha controls intensity
+
+Status: **Added focused 3D shadow conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's shadow-polygon notes: visible shadow polygons use
+`POLYGON_ATTR` alpha as the shadow intensity, while polygon mode 3 and nonzero
+polygon ID control the shadow rendering pass.
+
+### Why this matters
+
+If visible shadow polygons ignored polygon alpha, commercial scenes would show
+hard black/colored overlays instead of translucent shadows. That would be a
+large visual mismatch even when geometry, depth, and texture sampling are
+otherwise correct.
+
+### Coverage added
+
+`test_visible_shadow_uses_polygon_alpha_as_intensity` renders an opaque blue
+base polygon, then a nearer polygon-mode-3 visible shadow with polygon ID 2 and
+alpha 16. With alpha blending enabled, the result must be the normal
+alpha-blend of black shadow color over the blue surface, while the framebuffer
+alpha remains the max of the two fragments.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_visible_shadow_uses_polygon_alpha_as_intensity --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Visible-shadow alpha focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 562 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: W-buffer mode orders pixels by W
+
+Status: **Added focused 3D depth-order conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's `SWAP_BUFFERS.Bit1` definition: depth buffering can use either
+Z values or W values, and fog depth follows the active depth-buffer mode.
+
+### Why this matters
+
+If W-buffer mode accidentally kept using Z for depth tests, overlapping
+polygons could sort differently from hardware whenever a game selects
+`SWAP_BUFFERS.Bit1`. That kind of mismatch can show up as flickering or
+incorrectly layered 3D title-screen geometry.
+
+### Coverage added
+
+`test_w_buffering_uses_w_for_depth_ordering` renders two overlapping polygons
+whose Z values and W values disagree about which polygon is closer. With
+W-buffering enabled, the polygon with smaller W must win even though its Z
+value is farther.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_w_buffering_uses_w_for_depth_ordering --release
+cargo test --workspace --release
+```
+
+Result:
+
+- W-buffer depth-order focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 563 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: fog follows W-buffered depth
+
+Status: **Added focused 3D fog/depth conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's fog notes and `SWAP_BUFFERS.Bit1`: fog depth follows the active
+depth-buffer mode, so W-buffered frames must use W-derived depth for fog-table
+lookup.
+
+### Why this matters
+
+Fog is applied after rasterization from the per-pixel attribute/depth state. If
+the renderer sorted pixels by W but computed fog density from Z, scenes using
+W-buffer mode could have correct polygon ordering but incorrect fog intensity.
+That kind of mismatch would show as washed-out or missing fog on otherwise
+stable title-screen geometry.
+
+### Coverage added
+
+`test_fog_uses_w_buffered_depth_when_enabled` renders a white fog-enabled
+polygon with near Z but farther W while W-buffering is enabled. The fog table is
+set so near Z would keep the pixel white, while W-derived depth turns it black.
+The rendered framebuffer color proves the post-effect uses the W-buffered depth
+stored by rasterization.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_fog_uses_w_buffered_depth_when_enabled --release
+cargo test --workspace --release
+```
+
+Result:
+
+- W-buffer fog focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 564 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: texture coordinates are perspective-corrected
+
+Status: **Added focused 3D texture-interpolation conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the DS raster path requirement that texture coordinates use the post-
+projection W value for perspective-correct sampling, while vertex color remains
+screen-linear.
+
+### Why this matters
+
+Commercial DS models frequently put title logos, character art, and UI panels
+on textured polygons. If S/T coordinates were interpolated affinely in screen
+space, textured surfaces with changing W would visibly swim or choose the wrong
+texels even when polygon positions and vertex colors looked stable.
+
+### Coverage added
+
+`test_texture_coordinates_are_perspective_corrected` rasterizes one textured
+scanline with endpoints whose W values differ. The midpoint is constructed so
+affine interpolation would sample texel 4, while perspective-correct
+interpolation samples texel 2. The test marks those texels with different
+direct-color values and asserts the framebuffer receives the perspective-
+correct texel.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_texture_coordinates_are_perspective_corrected --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Perspective-correct texture focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 565 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: repeat+flip texture coordinates reach raster sampling
+
+Status: **Added focused 3D texture-coordinate addressing coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's `TEXIMAGE_PARAM` bits 16 and 18: repeat in S and flip every
+second repeated S tile.
+
+### Why this matters
+
+Mirrored texture repeat is commonly used to tile graphics without visible hard
+edges. If the standalone coordinate helper worked but the raster path failed to
+carry `TEXIMAGE_PARAM` repeat/flip bits into texture sampling, commercial
+models could show wrong seams, reversed panels, or clamped border texels even
+when the texture data itself decoded correctly.
+
+### Coverage added
+
+`test_texture_repeat_flip_bits_are_applied_during_raster_sampling` rasterizes a
+direct-color textured scanline with S=9 on an 8-wide texture. The marker texture
+uses different colors at texel 1, texel 6, and texel 7:
+
+- plain repeat would fetch texel 1,
+- clamp would fetch texel 7,
+- repeat+flip must mirror the second tile and fetch texel 6.
+
+The rendered framebuffer color proves the full raster sampling path applies
+the repeat+flip bits correctly.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_texture_repeat_flip_bits_are_applied_during_raster_sampling --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Texture repeat+flip raster focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 566 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: same polygon ID rejection is translucent-only
+
+Status: **Added focused 3D alpha-blending/polygon-ID conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's alpha-blending and polygon-ID notes: translucent polygon pixels
+are rejected only after a previous translucent write with the same polygon ID.
+An opaque base pixel with the same polygon ID must not suppress a later
+translucent overlay.
+
+### Why this matters
+
+Commercial scenes can reuse polygon IDs across opaque and translucent geometry
+for related model parts, masks, or effects. If the renderer rejected a
+translucent pixel merely because the framebuffer's current polygon ID matched,
+valid overlays would disappear. The hardware behavior needs a separate
+"previous translucent ID" state, not just the ordinary polygon ID buffer.
+
+### Coverage added
+
+`test_same_id_translucent_can_blend_over_opaque_pixel` renders an opaque blue
+triangle with polygon ID 7, then a nearer translucent red triangle with the
+same ID. With alpha blending enabled, the red triangle must blend over the blue
+base. This catches implementations that use the ordinary `id_buffer` for the
+same-ID translucent rejection instead of tracking only prior translucent
+writes.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_same_id_translucent_can_blend_over_opaque_pixel --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Same-ID opaque/translucent focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 567 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: shininess table controls specular intensity
+
+Status: **Added focused 3D lighting/material conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's `SPE_EMI.Bit15` and `SHININESS` notes: when the shininess table is
+enabled, the raw specular reflection level is replaced by the table value.
+
+### Why this matters
+
+Specular highlights are a visible part of many commercial 3D models. If
+`SPE_EMI.Bit15` were treated as only a stored flag, or if the `SHININESS` table
+were loaded but not used during `NORMAL`, highlight intensity would be wrong
+even when diffuse and ambient lighting looked plausible.
+
+### Coverage added
+
+`test_shininess_table_enabled_scales_specular_level` computes the same fully
+aligned white specular highlight twice. With the table disabled, the raw
+specular level produces white. With the table enabled and the matching table
+entries set to zero, the same light/material/normal must produce no specular
+contribution. This proves the table participates in the lighting equation, not
+just command decode state.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_shininess_table_enabled_scales_specular_level --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Shininess-table specular focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 568 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: NORMAL recalculates current vertex color
+
+Status: **Added focused 3D lighting command-timing coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from GBATEK's `NORMAL` and polygon-light notes: changing material, light, or
+polygon light-enable bits does not by itself recolor vertices; executing
+`NORMAL` recalculates the current vertex color from the active light/material
+state.
+
+### Why this matters
+
+Commercial model command streams often bind material/light state before
+emitting normals and vertices. If material writes immediately changed vertex
+color, or if `NORMAL` ignored the latched `POLYGON_ATTR` light bits, lit model
+surfaces could pick up stale or premature colors.
+
+### Coverage added
+
+`test_normal_recomputes_current_color_from_enabled_lights` drives the real GX
+command path: `POLYGON_ATTR` enables light 0, `BEGIN_VTXS` latches it,
+`DIF_AMB` sets red ambient without the bit15 color side effect, and
+`LIGHT_COLOR` sets a white light. The test asserts the previous current color
+survives until `NORMAL`, then asserts `NORMAL` recomputes the current vertex
+color to red from the enabled light/material state.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_normal_recomputes_current_color_from_enabled_lights --release
+cargo test --workspace --release
+```
+
+Result:
+
+- NORMAL lighting command-timing focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 569 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: clipping interpolates texture coordinates
+
+Status: **Added focused 3D clipping/attribute conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the homogeneous clipping requirement: when an edge crosses a clip plane,
+the inserted intersection vertex must carry interpolated per-vertex attributes,
+including texture coordinates.
+
+### Why this matters
+
+Textured commercial models often cross the view frustum at screen edges. If
+clipping preserved endpoint S/T values instead of interpolating them, textures
+would visibly jump or smear along clipped polygon edges even if unclipped
+polygons sampled correctly.
+
+### Coverage added
+
+`test_texcoord_interpolation_along_clipped_edge` clips a triangle against the
+near plane with one outside vertex carrying distinct S/T coordinates. The
+generated near-plane intersection must contain the halfway interpolated
+texture coordinates `[32, 64]`, proving that clipping updates texture
+attributes alongside position and color.
+
+The existing implementation already matched this behavior; this change locks
+it down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_texcoord_interpolation_along_clipped_edge --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Clipped-edge texture-coordinate focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 570 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: texture transforms through GX command path
+
+Status: **Added focused command-path texture-transform coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from ndsdoc/GBATEK's texture-coordinate transform modes and command ordering:
+mode 2 is evaluated when `NORMAL` executes, while mode 3 is evaluated when each
+`VTX_*` command executes.
+
+### Why this matters
+
+The earlier helper-level tests proved the transform math in `VertexState`, but
+commercial display lists do not call helper APIs directly. They interleave
+`MTX_MODE`, `MTX_LOAD_*`, `TEXIMAGE_PARAM`, `TEXCOORD`, `NORMAL`, and `VTX_*`
+commands through the geometry engine. A bug in command sequencing would produce
+wrong texture coordinates even if the helper functions were correct.
+
+### Coverage added
+
+`test_texcoord_transform_mode_2_through_gx_command_path` loads a texture
+matrix through GX matrix commands, selects transform mode 2 with
+`TEXIMAGE_PARAM`, sets a base `TEXCOORD`, executes `NORMAL`, and then submits a
+triangle. The emitted screen polygon must carry the normal-derived transformed
+S/T values on every vertex.
+
+`test_texcoord_transform_mode_3_through_gx_command_path` performs the same
+setup for mode 3, then verifies that the first submitted `VTX_16` position is
+used as the texture-transform source when the vertex command executes.
+
+The existing implementation already matched these behaviors; this change locks
+the command ordering down as part of the visual-conformance audit.
+
+Verification:
+
+```sh
+cargo test -p nds-core texcoord_transform_mode_ --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Texture-transform focused tests: `9 passed; 0 failed`.
+- Workspace release tests: `nds-core 572 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: 4x4 compressed texture interpolation modes
+
+Status: **Added focused compressed-texture conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the NDS 4x4 compressed texture mode table: mode 1 derives texel index 2
+as the even average of palette colors 0 and 1 while index 3 is transparent;
+mode 3 derives indices 2 and 3 from 5:3 and 3:5 weighted averages.
+
+### Why this matters
+
+Commercial 3D scenes often use 4x4 compressed textures for larger models and
+background elements. The previous tests covered explicit-color mode 2, mode 1
+transparency, and the slot-2 parameter-address quirk, but they did not prove
+the interpolated color formulas. A wrong formula here would not usually break
+boot, but it can tint or band textured polygons in title scenes.
+
+### Coverage added
+
+`test_4x4_compressed_mode_1_interpolates_index_2_evenly` verifies that mode 1
+texel index 2 resolves to the per-channel average of colors 0 and 1.
+
+`test_4x4_compressed_mode_3_uses_five_three_weighted_colors` verifies that
+mode 3 derives texel index 2 from 5:3 weights and texel index 3 from 3:5
+weights.
+
+The existing implementation already matched these formulas; this change locks
+them down as part of the texture-conformance sweep.
+
+Verification:
+
+```sh
+cargo test -p nds-core 4x4_compressed --release
+cargo test --workspace --release
+```
+
+Result:
+
+- 4x4 compressed texture focused tests: `5 passed; 0 failed`.
+- Workspace release tests: `nds-core 574 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: LIGHT_VECTOR uses the vector matrix
+
+Status: **Added focused lighting command-path conformance coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the NDS geometry/lighting command rule that `LIGHT_VECTOR` transforms the
+raw 10-bit light vector by the current vector matrix when the command executes.
+
+### Why this matters
+
+Lit commercial models commonly update the position/vector matrix stack before
+submitting light vectors and normals. Helper-level lighting tests verified
+unpacking and specular behavior, but they did not prove that the real GX
+command path feeds `LIGHT_VECTOR` through the active vector matrix. If that
+dispatch path ignored the matrix, rotating or scaled model-light setups could
+shade with stale directions even while vertex positions were otherwise correct.
+
+### Coverage added
+
+`test_light_vector_uses_current_vector_matrix_through_gx_command_path` loads a
+position/vector matrix through GX matrix commands, dispatches `LIGHT_VECTOR`,
+and verifies both the transformed light direction and the derived half-vector
+stored in the lighting unit.
+
+The existing implementation already matched this behavior; this change locks
+the command-path state dependency down as part of the lighting-conformance
+sweep.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_light_vector_uses_current_vector_matrix_through_gx_command_path --release
+cargo test --workspace --release
+```
+
+Result:
+
+- LIGHT_VECTOR command-path focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 575 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: MTX_SCALE does not affect light-vector transforms
+
+Status: **Added focused position/vector matrix command-path coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the NDS matrix-stack rule that `MTX_SCALE` in position/vector mode updates
+the position matrix only; the vector matrix used for normals and light vectors
+is intentionally not scaled.
+
+### Why this matters
+
+Commercial games often scale model transforms while keeping lighting in a
+direction-only vector space. If `MTX_SCALE` also scaled the vector matrix, later
+`LIGHT_VECTOR` commands would store scaled light directions and produce wrong
+diffuse/specular intensity on scaled models.
+
+### Coverage added
+
+`test_light_vector_ignores_pos_vector_mtx_scale_command` drives the real GX
+command path: select position/vector mode, issue `MTX_SCALE`, then issue
+`LIGHT_VECTOR`. The stored light direction must remain the raw identity-vector
+result instead of being doubled by the position scale.
+
+The existing implementation already matched this behavior through the matrix
+stack; this change locks the interaction down at the lighting command boundary.
+
+Verification:
+
+```sh
+cargo test -p nds-core light_vector_ --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Light-vector focused tests: `3 passed; 0 failed`.
+- Workspace release tests: `nds-core 576 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: POS_TEST command path transforms and seeds position
+
+Status: **Added focused geometry test-command coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the NDS `POS_TEST` command behavior: it accepts `VTX_16`-style coordinates,
+transforms them by the current clip matrix, writes the four result registers,
+and updates the inherited current vertex position used by following partial
+`VTX_*` commands.
+
+### Why this matters
+
+SDK display lists and visibility probes can use `POS_TEST` in the same command
+stream as regular geometry. If the command path transformed with stale matrix
+state, failed to clear the test-busy bit, or did not seed the inherited vertex
+position, following geometry could differ from hardware even though isolated
+helper-level tests passed.
+
+### Coverage added
+
+`test_pos_test_uses_clip_matrix_and_seeds_last_position_through_gx_command_path`
+drives real GX dispatch: select the position matrix, apply a translation,
+issue `POS_TEST`, and then verify the transformed result registers, the seeded
+`last_pos`, and completion of the test-busy state.
+
+The existing implementation already matched this behavior; this change locks
+the command-path state dependency down as part of the geometry-test sweep.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_pos_test_uses_clip_matrix_and_seeds_last_position_through_gx_command_path --release
+cargo test --workspace --release
+```
+
+Result:
+
+- POS_TEST command-path focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 577 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: VEC_TEST command path uses the vector matrix
+
+Status: **Added focused geometry vector-test command coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the NDS `VEC_TEST` command behavior: the raw 10-bit vector must be
+transformed by the current vector matrix when the command executes, and the
+readback registers expose the wrapped 4.12-format result.
+
+### Why this matters
+
+Commercial SDK code can issue `VEC_TEST` while matrix state is changing. Helper
+coverage proved the formatting helper and mode guard, but not that real GX
+dispatch used the active vector matrix and completed the test-busy state. A
+dispatch mismatch here would make geometry tests and following matrix readback
+behave differently from hardware.
+
+### Coverage added
+
+`test_vec_test_uses_vector_matrix_through_gx_command_path` loads a scaled
+position/vector matrix through GX commands, dispatches `VEC_TEST`, and verifies
+the wrapped vector result plus test-busy completion.
+
+The existing implementation already matched this behavior; this change locks
+the command-path dependency down next to the `POS_TEST` coverage.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_vec_test_uses_vector_matrix_through_gx_command_path --release
+cargo test --workspace --release
+```
+
+Result:
+
+- VEC_TEST command-path focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 578 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: BOX_TEST command path uses the clip matrix
+
+Status: **Added focused geometry box-test command coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the NDS `BOX_TEST` command behavior: the packed origin/size parameters
+describe a box in model coordinates, and the geometry engine tests that box
+against the current clip matrix before exposing the visible bit through
+`GXSTAT`.
+
+### Why this matters
+
+Games can use `BOX_TEST` as a lightweight visibility probe before submitting
+more expensive geometry. Existing tests covered the frustum-helper math and the
+top-level visible bit, but not the real GX command path with live matrix state.
+If the command ignored the current clip matrix, failed to unpack the dimensions
+correctly, or left `test_busy` set, visibility decisions and subsequent matrix
+readback would diverge from hardware.
+
+### Coverage added
+
+`test_box_test_uses_clip_matrix_through_gx_command_path` dispatches an inside
+box through the identity matrix, verifies the visible result, then applies a
+position translation through GX commands and dispatches the same box again. The
+second probe must be rejected after clip transformation. Both paths also verify
+that command completion clears the test-busy state.
+
+The existing implementation already matched this behavior; this change closes
+the remaining command-path gap beside the `POS_TEST` and `VEC_TEST` coverage.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_box_test_uses_clip_matrix_through_gx_command_path --release
+cargo test --workspace --release
+```
+
+Result:
+
+- BOX_TEST command-path focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 579 passed; nds-frontend 5 passed`.
+
+### Follow-up: BOX_TEST rejects boxes enclosing the whole view volume
+
+Status: **Fixed BOX_TEST face-clipping conformance edge case**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from re-checking the documented `BOX_TEST` semantics against the local helper:
+the command clips the cuboid faces against the view volume. If the view volume
+is fully inside the box, no box face intersects the view volume, so the
+hardware-visible result is false.
+
+### Symptom / gap
+
+`box_intersects_view_volume()` previously treated the "box encloses the whole
+view volume" case as visible. That is a reasonable generic frustum-intersection
+answer, but it is not the NDS `BOX_TEST` answer because `BOX_TEST` is a
+face-clipping probe rather than a general solid-volume intersection test.
+
+Before:
+
+```text
+box:     [-2..+2] in X/Y/Z
+frustum: [-1..+1]
+local BOX_TEST result: true
+hardware-facing result: false
+```
+
+### Fix
+
+- Kept the fast reject when all box corners are outside any one frustum plane.
+- Kept the positive result when at least one cuboid face clips into the view
+  volume.
+- Changed the final no-face-intersection case from visible to not visible.
+- Updated the enclosing-view-volume regression from expecting true to expecting
+  false.
+
+Why this matters:
+
+Games can use `BOX_TEST` to decide whether to submit object geometry. Returning
+true for an enclosing box can make CPU-side culling logic disagree with DS
+hardware in edge cases around very large bounds or camera-inside-volume tests.
+
+Verification:
+
+```sh
+cargo test -p nds-core box_test --release
+```
+
+Result:
+
+- BOX_TEST-focused release tests: `5 passed; 0 failed`.
+
+## 2026-06-06 coverage: anti-aliasing preserves same-polygon interiors
+
+Status: **Added focused anti-aliasing conformance coverage and refreshed the 3D carry-over list**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the renderer's own anti-aliasing model and the hardware-visible invariant
+that anti-aliasing should only soften exposed polygon edges, not pixels whose
+four cardinal neighbors belong to the same polygon.
+
+### Why this matters
+
+The current AA implementation is still approximate because it does not store
+true per-pixel coverage during scan conversion. That makes it important to
+guard the invariants it does claim to support. If same-polygon interior pixels
+were softened, large filled polygons could become visibly washed out whenever
+AA is enabled, even away from silhouettes.
+
+### Coverage added
+
+`test_antialias_keeps_same_polygon_interior_pixels_opaque` seeds a center pixel
+and its four neighbors with the same polygon ID, depth, edge eligibility, and
+opaque alpha, then runs the post-effect pass with AA enabled. The center pixel
+must keep its original color and alpha instead of blending toward the rear
+plane.
+
+The existing implementation already matched this behavior; this test narrows
+the remaining AA risk to exact coverage weights and cross-edge neighbor choice.
+
+### Carry-over checklist update
+
+`debug/phase9_carryover.md` was stale: it still described several 3D features
+as stubs/no-effect even though they now have implementations and focused tests.
+The 3D section now records the current status for format-5 textures, AA,
+toon/highlight, shadow mode, W-buffering, display capture, and geometry test
+commands. AA remains explicitly marked approximate rather than complete.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_antialias_keeps_same_polygon_interior_pixels_opaque --release
+cargo test --workspace --release
+```
+
+Result:
+
+- AA same-polygon interior focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 580 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: anti-aliasing respects depth ordering
+
+Status: **Added focused anti-aliasing depth-order coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the same silhouette rule used by edge marking: a different polygon ID only
+exposes a visible edge for the center pixel when the center pixel is closer
+than that neighbor.
+
+### Why this matters
+
+The AA implementation is still an approximation, so the depth predicate is one
+of the important guardrails that keeps it from softening hidden or covered
+edges. If AA blended against a different-ID neighbor that was actually in
+front, overlapping polygons could get softened in the wrong direction, causing
+haloing or washed borders during layered 3D scenes.
+
+### Coverage added
+
+`test_antialias_requires_center_closer_than_neighbor` seeds a center pixel and
+its neighbors directly in the post-effect buffers. With a different-ID neighbor
+that is closer, AA must leave the center pixel unchanged. With the same
+different-ID neighbor farther away, AA must soften the center pixel toward the
+rear plane and lower its alpha to the current approximate coverage value.
+
+The existing implementation already matched this behavior; this test locks down
+the AA depth predicate beside the same-polygon interior invariant.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_antialias_requires_center_closer_than_neighbor --release
+cargo test --workspace --release
+```
+
+Result:
+
+- AA depth-order focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 581 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 fix: anti-aliasing uses the actual rear-plane pixel color
+
+Status: **Fixed rear-plane color selection for anti-aliasing**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from the DS rear-plane model: the rear plane can be either the scalar
+`CLEAR_COLOR` value or the bitmap clear image selected by `DISP3DCNT.Bit14`.
+Anti-aliasing should soften exposed polygon edges toward the rear-plane pixel
+under that edge, not always toward `CLEAR_COLOR`.
+
+### Symptom / gap
+
+The AA post-pass used `rast.clear_color & 0x7FFF` as the blend target for every
+softened pixel. That is correct only when the frame was cleared from
+`CLEAR_COLOR`. When the rear plane comes from texture slots 2/3, the true rear
+color can vary per pixel. In that mode, softened silhouettes could pick up the
+wrong background color, causing visible halos around 3D edges over rear bitmap
+scenes.
+
+### Fix
+
+Added `Rasterizer::rear_color_buffer`, a 256x192 snapshot of the frame's rear
+color plane:
+
+- register clears fill it from `CLEAR_COLOR`;
+- rear-bitmap clears fill it from the bitmap color texels;
+- the AA post-pass blends each softened pixel against
+  `rear_color_buffer[idx] & 0x7FFF`.
+
+The field has a serde default so older save states that do not contain it can
+still deserialize.
+
+### Coverage added
+
+`test_antialias_blends_against_rear_plane_pixel_color` sets `CLEAR_COLOR` to
+white but seeds the rear-plane pixel snapshot to green. AA must blend a blue
+silhouette pixel toward green, proving the post-pass no longer relies only on
+the scalar clear color.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_antialias_blends_against_rear_plane_pixel_color --release
+cargo test --workspace --release
+```
+
+Result:
+
+- AA rear-plane color focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 582 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 coverage: rear-plane color buffer clear paths
+
+Status: **Added focused rear-plane buffer coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This
+continues the AA rear-plane fix by guarding the source data that anti-aliasing
+now consumes.
+
+### Why this matters
+
+`rear_color_buffer` is only useful if every frame clear path populates it with
+the same rear color that the hardware would expose behind 3D pixels. A later
+change to register clear or rear-bitmap clear could otherwise leave AA blending
+against stale or zero data even though the framebuffer itself looked correct
+before post-processing.
+
+### Coverage added
+
+- `test_clear_color_initializes_rear_color_buffer` verifies scalar
+  `CLEAR_COLOR` clears fill the rear-color snapshot, including the alpha bit
+  behavior used by the 3D compositor.
+- `test_rear_bitmap_clear_uses_texture_slots_and_scroll` now also asserts that
+  rear-bitmap color texels populate `rear_color_buffer` for both opaque and
+  transparent rear pixels.
+
+Verification:
+
+```sh
+cargo test -p nds-core rear_color_buffer --release
+cargo test -p nds-core test_rear_bitmap_clear_uses_texture_slots_and_scroll --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Rear-color buffer focused test: `1 passed; 0 failed`.
+- Rear-bitmap clear focused test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 583 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 runtime check: HeartGold title capture after AA/rear-plane fixes
+
+Status: **Captured current target-game frame with rebuilt release frontend**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+local runtime verification against the current worktree and the user's
+HeartGold ROM.
+
+### Why this matters
+
+The recent work changed post-effect behavior and added a serialized rear-plane
+color buffer. Unit tests cover the individual invariants, but the original
+HeartGold problem was visual: black screens, a large screen gap, random
+polygons, and title-scene artifacts. A fresh target-game capture gives a
+coarse but important regression check that the current renderer still produces
+a coherent title frame.
+
+### Commands run
+
+```sh
+cargo build --release -p nds-frontend
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4320 --capture-ppm /private/tmp/heartgold-3d-current.ppm
+sips -s format png /private/tmp/heartgold-3d-current.ppm --out /private/tmp/heartgold-3d-current.png
+```
+
+### Result
+
+- Release frontend rebuilt successfully.
+- Frame 4320 captured to `/private/tmp/heartgold-3d-current.ppm`.
+- The PPM reports `256 x 384`, matching compact stacked DS screens with no
+  extra gap.
+- Visual inspection of `/private/tmp/heartgold-3d-current.png` shows a coherent
+  title frame: Ho-Oh scene on the top screen, Pokemon HeartGold logo on the
+  bottom screen, no black screen, and no random-polygon flashing in this
+  sampled frame.
+
+Remaining risk: this is still a single sampled frame. Exact AA coverage,
+post-effect ordering, and subtle texture/edge correctness still need more
+image-level test ROMs or frame-sequence comparisons before claiming full 3D
+visual conformance.
+
+## 2026-06-06 docs: rasterization concept aligned with current implementation
+
+Status: **Updated concept documentation for current 3D raster state**
+
+Direct reference-emulator implementation use for this check: **0**. This was a
+documentation correction driven by the current code and the recent conformance
+work.
+
+### Why this matters
+
+`docs/concepts/rasterization.md` still mixed older phase-plan language with
+current implementation details. It described display capture as formerly
+stubbed, implied toon/highlight was a separate post-pass, and described AA only
+as ideal hardware coverage. That could point future debugging at already-solved
+work or hide the actual remaining risk.
+
+### Changes made
+
+- Reframed the doc as the current raster model, not a Phase 7 plan.
+- Documented that the emulator's AA path is an approximate edge-only post-pass
+  over polygon/depth/rear-plane buffers, with exact coverage still remaining.
+- Documented toon/highlight as a per-polygon texture/color combine behavior for
+  `POLYGON_ATTR.mode = 2`, not a separate framebuffer post-pass.
+- Updated display capture wording to describe the covered implementation.
+- Replaced the old module plan with the current implementation shape:
+  `engine.rs`, `triangle.rs`, `texture.rs`, `raster/mod.rs`, `postfx.rs`,
+  `gpu2d/compositor.rs`, and `lib.rs`.
+
+Verification:
+
+```sh
+grep -n "stubbed\|will need\|Phase 7 needs\|Phase 7's job\|Current implementation" docs/concepts/rasterization.md
+```
+
+Result:
+
+- Only the intentional `Current implementation shape` heading remains.
+- No code tests were run for this documentation-only change.
+
+## 2026-06-06 fix: fog color mode preserves zero-alpha transparency
+
+Status: **Fixed fog color+alpha framebuffer alpha-bit handling**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from auditing the local fog post-effect path and the renderer's own invariant
+that framebuffer bit 15 follows the 3D alpha buffer.
+
+### Symptom / gap
+
+`apply_fog()` correctly computed the fogged alpha value and cleared framebuffer
+bit 15 when the result became zero. However, in normal color+alpha fog mode, it
+then recomputed the RGB channels and unconditionally wrote bit 15 back into the
+framebuffer. That meant a pixel whose fog alpha faded to zero could still look
+opaque to the later 2D compositor.
+
+### Fix
+
+The color+alpha fog path now writes bit 15 only when the computed fogged alpha
+is nonzero:
+
+- alpha buffer remains the source of truth for 3D alpha;
+- color channels still fog toward `FOG_COLOR`;
+- framebuffer bit 15 no longer gets restored after alpha reaches zero.
+
+### Coverage added
+
+`test_fog_color_mode_preserves_zero_alpha_transparency` seeds a fog-enabled
+opaque white pixel, applies full-density color+alpha fog with `FOG_COLOR` alpha
+0 beyond the first-boundary alpha quirk, and verifies:
+
+- `alpha_buffer` becomes 0;
+- framebuffer bit 15 stays clear;
+- RGB still fogs toward the configured fog color.
+
+### Test adjustment
+
+The first workspace run exposed a stale assumption in
+`test_edge_marking_color_is_not_fogged`: it used full-density fog with fog
+alpha 0 while expecting the polygon to remain visible for edge marking. After
+the fix, that setup correctly makes the pixel transparent before edge marking.
+The test now uses opaque black fog so it continues to verify the intended
+ordering: fog darkens polygon color first, then edge marking replaces that
+fogged color with the edge color.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_fog_color_mode_preserves_zero_alpha_transparency --release
+cargo test -p nds-core test_edge_marking_color_is_not_fogged --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Fog color+alpha focused test: `1 passed; 0 failed`.
+- Edge-marking/fog ordering focused test: `1 passed; 0 failed`.
+- Workspace release tests: initial run failed on the stale edge-marking test;
+  after the test setup correction, `nds-core 584 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 fix: AA uses scanline coverage hints when available
+
+Status: **Improved anti-aliasing coverage model without replacing the post-pass**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from auditing the local rasterizer/post-effect path and tightening the current
+approximation around data the scanline filler already has.
+
+### Symptom / gap
+
+The AA pass detected opaque silhouettes from polygon ID/depth neighbors, but
+every softened pixel used the same fixed 50% blend against the rear plane.
+That preserved major interactions but made all polygon edges equally soft,
+which is visibly too blunt for shallow or subpixel-aligned edges.
+
+### Fix
+
+The rasterizer now keeps an internal `aa_coverage_buffer`:
+
+- frame clear and rear-bitmap clear reset the buffer;
+- opaque scanline pixels on left/right triangle edges get a fractional
+  coverage hint derived from the edge position inside the pixel;
+- the AA post-pass uses that coverage value when present;
+- pixels without a coverage hint keep the old conservative 50% fallback.
+
+This is still not full hardware AA. It improves the left/right edge path while
+leaving top/bottom-edge coverage and exact cross-edge-neighbor selection as
+known conformance work.
+
+### Coverage added
+
+- `test_scanline_pixel_coverage_tracks_fractional_edges` verifies the coverage
+  estimator records half coverage at exact edge-centered pixels and full
+  coverage for interior pixels.
+- `test_antialias_uses_rasterized_coverage_hint` verifies the post-pass prefers
+  a coverage hint over the fixed fallback and writes the matching alpha value.
+- `test_clear_color_initializes_rear_color_buffer` now also verifies clear
+  resets stale AA coverage hints.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_scanline_pixel_coverage_tracks_fractional_edges --release
+cargo test -p nds-core test_antialias_uses_rasterized_coverage_hint --release
+cargo test -p nds-core test_clear_color_initializes_rear_color_buffer --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Focused AA coverage estimator test: `1 passed; 0 failed`.
+- Focused AA post-pass coverage-hint test: `1 passed; 0 failed`.
+- Focused clear/reset regression test: `1 passed; 0 failed`.
+- Workspace release tests: `nds-core 586 passed; nds-frontend 5 passed`.
+
+## 2026-06-06 fix: AA blends visible internal edges toward neighbor color
+
+Status: **Improved anti-aliasing blend target selection**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from reviewing the local AA post-pass against the renderer's own stated
+coverage model: edge pixels should soften toward the color across the exposed
+edge when that color is visible.
+
+### Symptom / gap
+
+After adding AA coverage hints, the post-pass still used the rear-plane color
+as the blend target for every exposed edge. That is reasonable for silhouettes
+against background/rear-plane pixels, but it is wrong for visible internal
+polygon boundaries: a blue edge next to a green polygon should soften toward
+green, not toward the clear color behind both polygons.
+
+### Fix
+
+The AA pass now selects a blend target while checking exposed neighbors:
+
+- if the exposed neighbor has a visible framebuffer pixel, blend toward that
+  neighbor's color;
+- if the exposed neighbor is transparent/background, blend toward the current
+  pixel's rear-plane color;
+- out-of-bounds screen edges also use the current rear-plane fallback;
+- the existing coverage hint/fixed-fallback alpha decision is unchanged.
+
+The first focused run intentionally exposed a fallback nuance:
+`test_antialias_blends_against_rear_plane_pixel_color` failed when transparent
+neighbors used the neighbor's rear-plane color instead of the current pixel's
+rear-plane color. The fallback now uses the current pixel, which preserves the
+uncovered-fragment model for background silhouettes.
+
+### Coverage added / adjusted
+
+- `test_antialias_blends_against_visible_neighbor_color` verifies internal
+  edges blend toward a farther visible neighbor pixel.
+- `test_antialias_requires_center_closer_than_neighbor` now expects the
+  farther visible neighbor color rather than the rear plane.
+- Existing rear-plane and depth-gating AA tests continue to pass.
+
+Verification:
+
+```sh
+cargo test -p nds-core antialias --release
+```
+
+Result:
+
+- AA-focused release tests: `13 passed; 0 failed`.
+
+## 2026-06-06 fix: AA records vertical row coverage for flat top/bottom edges
+
+Status: **Improved anti-aliasing coverage hints for horizontal polygon edges**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from auditing the local scanline rasterizer after the previous AA fixes showed
+that coverage was still only derived from the horizontal span.
+
+### Symptom / gap
+
+The AA coverage buffer only used `scanline_pixel_coverage(x, left_x, right_x)`.
+That captures left/right fractional edge coverage, but a flat top or bottom
+edge can have full horizontal coverage across the row while still covering only
+part of the pixel vertically. Those pixels fell back to the fixed 50% AA blend
+instead of recording a coverage value from scan conversion.
+
+### Fix
+
+`Vert` now preserves the original fixed-point screen Y as `y_fp`. During
+triangle scan conversion, each rasterized row computes a vertical coverage hint
+from the triangle's fixed-point top/bottom bounds and combines it with the
+existing horizontal span coverage. Opaque pixels store the minimum of the two
+coverage values in `aa_coverage_buffer`; translucent and fully covered pixels
+continue to clear the hint.
+
+This improves flat top/bottom AA behavior while keeping the existing
+post-pass fallback for cases where no coverage hint is available.
+
+### Coverage added
+
+- `test_vertical_pixel_coverage_tracks_flat_top_bottom_edges` verifies the
+  vertical coverage helper reports half coverage on exact flat boundaries and
+  full coverage in the interior row.
+- `test_flat_top_triangle_records_vertical_aa_coverage` verifies a normal
+  flat-top polygon records vertical AA coverage during `rasterize_polygon`.
+
+Verification:
+
+```sh
+cargo test -p nds-core coverage --release
+```
+
+Result:
+
+- Coverage-focused release tests: `4 passed; 0 failed`.
+
+## 2026-06-06 fix: AA uses rasterized edge-direction hints
+
+Status: **Improved anti-aliasing neighbor selection for ambiguous edges**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from auditing the local AA post-pass after coverage hints were added: the
+post-pass still fell back to a fixed neighbor scan order when multiple exposed
+neighbors existed.
+
+### Symptom / gap
+
+The AA pass could now choose a better coverage value, but it did not know which
+side of the pixel caused that partial coverage. At corners or near multiple
+farther neighbors, it tried left, right, up, then down. That can pick the wrong
+blend color even when scan conversion knows the coverage-limiting edge was
+vertical or horizontal.
+
+### Fix
+
+The rasterizer now keeps an `aa_edge_hint_buffer` alongside
+`aa_coverage_buffer`:
+
+- horizontal span coverage records `LEFT` or `RIGHT` when that side limited
+  the pixel coverage;
+- vertical row coverage records `UP` or `DOWN` when a flat top/bottom edge
+  limited the row coverage;
+- the primary hint comes from the smaller coverage value;
+- the AA post-pass tries the hinted neighbor first, then falls back to the old
+  conservative scan order;
+- frame clear and rear-bitmap clear reset the hint buffer.
+
+This does not fully solve corner AA yet because a pixel can be limited by more
+than one edge and the current buffer stores one primary hint. It does remove
+the scan-order artifact for the common case where one edge clearly determines
+coverage.
+
+### Coverage added / adjusted
+
+- `test_antialias_prefers_rasterized_edge_direction_hint` creates competing
+  farther left/up neighbors and verifies the `UP` hint chooses the upper
+  neighbor before fallback scan order.
+- `test_scanline_pixel_coverage_tracks_fractional_edges` now verifies left and
+  right coverage directions.
+- `test_vertical_pixel_coverage_tracks_flat_top_bottom_edges` now verifies up
+  and down coverage directions.
+- `test_flat_top_triangle_records_vertical_aa_coverage` now also verifies the
+  stored `UP` hint.
+- `test_clear_color_initializes_rear_color_buffer` now verifies clear resets
+  stale AA edge hints.
+
+Verification:
+
+```sh
+cargo test -p nds-core antialias --release
+cargo test -p nds-core coverage --release
+cargo test -p nds-core clear_color_initializes_rear_color_buffer --release
+```
+
+Result:
+
+- AA-focused release tests: `14 passed; 0 failed`.
+- Coverage-focused release tests: `4 passed; 0 failed`.
+- Clear/reset focused release test: `1 passed; 0 failed`.
+
+## 2026-06-06 fix: AA preserves multi-edge corner hints
+
+Status: **Improved anti-aliasing corner-neighbor selection**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from continuing the local AA edge-hint audit: after adding a direction hint,
+corner pixels could still lose one edge when horizontal and vertical coverage
+were tied.
+
+### Symptom / gap
+
+`aa_edge_hint_buffer` stored enum-like direction values and scan conversion
+selected one primary hint. For a corner pixel where horizontal and vertical
+coverage were equally limiting, one side was discarded. The post-pass could
+then fall back to an unrelated exposed neighbor before trying the other true
+edge direction.
+
+### Fix
+
+AA edge hints are now bitmasks:
+
+- `AA_EDGE_LEFT`, `RIGHT`, `UP`, and `DOWN` are independent bits;
+- scan conversion stores the smaller coverage side as before;
+- if horizontal and vertical coverage tie, their direction hints are ORed
+  together;
+- the AA post-pass tries all hinted directions before the fallback scan order.
+
+The remaining conformance risk is now the coverage model itself: values are
+still derived from the emulator's scanline span/row approximation rather than
+validated hardware edge equations.
+
+### Coverage added / adjusted
+
+- `test_equal_xy_coverage_preserves_corner_edge_hints` verifies tied horizontal
+  and vertical coverage stores a combined left+up hint.
+- `test_antialias_multi_edge_hint_ignores_unhinted_neighbors` verifies a
+  multi-edge hint ignores an unrelated exposed left neighbor before trying the
+  hinted right/up neighbors.
+- Existing direction helper tests now run with bitmask constants.
+
+Verification:
+
+```sh
+cargo test -p nds-core antialias --release
+cargo test -p nds-core coverage --release
+cargo test -p nds-core equal_xy_coverage --release
+```
+
+Result:
+
+- AA-focused release tests: `15 passed; 0 failed`.
+- Coverage-focused release tests: `5 passed; 0 failed`.
+- Equal-coverage focused test: `1 passed; 0 failed`.
+
+## 2026-06-06 fix: AA coverage uses clipped triangle area
+
+Status: **Replaced runtime span/row AA coverage with per-pixel triangle area**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from auditing the remaining AA conformance gap after edge-direction hints were
+added: coverage strength was still based on the minimum of horizontal span
+coverage and vertical row coverage, not the actual triangle area inside the
+pixel.
+
+### Symptom / gap
+
+The previous AA coverage approximation handled flat top/bottom edges and
+left/right edges, but it could not model diagonal edges and corner pixels as a
+real clipped triangle area. A pixel centered exactly on a right-triangle corner
+should have roughly one-quarter coverage; the old model could only infer that
+from separate span/row heuristics.
+
+### Fix
+
+When AA is enabled, `rasterize_triangle()` now passes the triangle's fixed-point
+screen coordinates into `rasterize_scanline()`. For each written pixel, the AA
+path clips the pixel square against the triangle's three edge half-planes and
+computes the clipped polygon area. That area is converted to the 0..31 coverage
+value consumed by the post-pass. The same helper also derives an edge-direction
+bitmask from adjacent pixel-center tests, so corner pixels keep the
+multi-direction behavior from the previous fix.
+
+The old span/row helpers remain as fallback/test scaffolding for manual
+scanline tests where no triangle geometry is supplied.
+
+### Coverage added
+
+- `test_triangle_pixel_coverage_uses_clipped_area` verifies a pixel centered on
+  a two-pixel right-triangle corner records one-quarter coverage (`8/31`) and
+  left+up edge hints.
+- `test_area_coverage_drives_rasterized_aa_hint` verifies normal
+  `rasterize_polygon()` writes the clipped-area coverage/hints into the AA
+  buffers.
+
+Verification:
+
+```sh
+cargo test -p nds-core coverage --release
+cargo test -p nds-core antialias --release
+```
+
+Result:
+
+- Coverage-focused release tests: `7 passed; 0 failed`.
+- AA-focused release tests: `15 passed; 0 failed`.
+
+## 2026-06-06 fix: AA transparent rear-plane exposure is alpha-only
+
+Status: **Fixed HeartGold title-screen black diagonal stipple with AA enabled**
+
+Direct reference-emulator implementation use for this check: **0**. This was
+debugged by comparing captures from the local renderer with AA enabled versus a
+hidden diagnostic run that skipped only the AA post-pass.
+
+### Symptom
+
+Frame 4320 of `Pokemon-HeartGoldVersionUSA.nds` had become coherent enough to
+show the title scene, but the top screen still showed black diagonal/stipple
+artifacts across the sky and ground. Capturing the same frame with the AA
+post-pass disabled removed those artifacts while leaving the base 3D scene
+intact. That isolated the issue to post-AA compositing, not texture decode,
+geometry, clipping, or base triangle fill.
+
+### Cause
+
+The AA post-pass treated every exposed transparent neighbor as a color target
+and pre-blended the 3D edge pixel against the rasterizer's rear-plane color.
+For HeartGold, those exposed pixels are composited over 2D layers later. The
+3D rear plane is transparent there, so pre-blending to its stored color
+effectively baked the wrong background into the 3D pixel before the 2D
+compositor saw it. The visible result was dark/black stippling along many
+AA edges.
+
+### Fix
+
+AA target selection now distinguishes:
+
+- visible 3D neighbor pixels: pre-blend the edge color toward that neighbor;
+- opaque rear-plane pixels: pre-blend toward the rear-plane color;
+- transparent rear-plane exposure: leave the 3D color unchanged and lower only
+  the 3D alpha buffer to the AA coverage value.
+
+That lets the 2D compositor receive an antialiased 3D pixel without baking in a
+wrong transparent-rear color.
+
+### Diagnostic support
+
+Added a hidden frontend flag for capture/debug isolation:
+
+```sh
+./target/release/nds-frontend --rom /path/to/game.nds --no-audio --debug-disable-3d-aa
+```
+
+The flag skips only the 3D AA post-pass. It does not change normal runs and was
+used to confirm that the base HeartGold title render was clean before the AA
+fix.
+
+### Coverage added / adjusted
+
+- `test_antialias_transparent_rear_plane_preserves_color_and_lowers_alpha`
+  verifies transparent rear-plane exposure does not pre-blend 3D color against
+  `CLEAR_COLOR`.
+- Rear-plane AA tests now put the rear color on the exposed neighboring pixel,
+  matching the post-pass neighborhood lookup.
+- `test_sloped_quad_fan_has_continuous_interior_coverage` exhaustively checks a
+  sloped split quad for simple internal fan holes; it passed, ruling out a
+  basic quad fan gap as the cause of the HeartGold stipple.
+
+Verification:
+
+```sh
+cargo test -p nds-core antialias --release
+cargo test -p nds-core test_sloped_quad_fan_has_continuous_interior_coverage --release
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4320 --capture-ppm /private/tmp/heartgold-aa-fixed.ppm
+```
+
+Result:
+
+- AA-focused release tests: `16 passed; 0 failed`.
+- Sloped-quad focused release test: `1 passed; 0 failed`.
+- HeartGold frame 4320 with AA enabled no longer shows the black diagonal
+  stipple pattern; the top and bottom title screens are coherent.
+
+## 2026-06-06 validation: HeartGold AA title sweep and 3D-to-2D handoff
+
+Status: **Broadened HeartGold title validation after the AA transparent-rear fix**
+
+Direct reference-emulator implementation use for this check: **0**. This was a
+local capture sweep and regression-test pass over the BG0-from-3D handoff that
+GBATEK describes for 3D final output.
+
+### Visual validation
+
+Captured a short HeartGold title sequence with AA enabled:
+
+```sh
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 5400 --capture-interval 540 --capture-dir /private/tmp/heartgold-aa-sweep
+```
+
+Representative frames inspected:
+
+- `/private/tmp/heartgold-aa-sweep/frame-002700.png`
+- `/private/tmp/heartgold-aa-sweep/frame-004320.png`
+- `/private/tmp/heartgold-aa-sweep/frame-005400.png`
+
+Result: the sampled title/animation frames are coherent, with no return of the
+previous random polygon flashes or black AA stipple pattern.
+
+### Regression added
+
+Added `test_3d_bg0_antialias_alpha_composes_over_2d_second_target` in the 2D
+compositor tests. It models the AA handoff directly: the 3D framebuffer keeps
+the edge pixel's color, the 3D alpha buffer carries AA coverage, and Engine A
+composes BG0-from-3D over a BG1 second target using that 3D alpha instead of
+pre-baking a rear-plane color.
+
+Verification:
+
+```sh
+cargo test -p nds-core antialias --release
+cargo test -p nds-core 3d_bg0 --release
+```
+
+Result:
+
+- AA-focused release tests: `17 passed; 0 failed`.
+- BG0-from-3D focused release tests: `7 passed; 0 failed`.
+
+## 2026-06-06 fix: visible shadows require a set stencil bit
+
+Status: **Corrected shadow polygon stencil semantics**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from re-auditing the shadow-mode notes while working through remaining 3D
+conformance risks. The earlier local implementation followed the older wording
+that visible shadows render where the stencil bit is clear. The GBATEK addendum
+notes the corrected behavior: the shadow mask pass sets stencil bits, and the
+visible shadow pass draws where those bits are set, provided the destination
+polygon ID differs.
+
+### Symptom / risk
+
+The old helper let visible shadow polygons draw even when no shadow mask had
+been written, and skipped drawing where a mask was present. That inverts the
+two-pass shadow-volume model and would make commercial shadow volumes appear in
+the wrong places or disappear where the game actually prepared a mask.
+
+### Fix
+
+`shadow_fragment_is_hidden_or_masked()` now uses this order:
+
+- polygon ID `0`: write the shadow stencil bit and skip color;
+- nonzero visible shadow with same destination polygon ID: reject without
+  consuming the mask;
+- nonzero visible shadow with no stencil bit: reject;
+- nonzero visible shadow with a set stencil bit and different destination ID:
+  clear/consume the stencil bit and draw/blend the shadow pixel.
+
+The same helper is still shared by filled polygons, lines, and zero-dot paths.
+
+### Coverage adjusted
+
+- `test_visible_shadow_draws_only_where_mask_is_set`
+- `test_visible_shadow_line_draws_only_where_mask_is_set`
+- `test_visible_shadow_zero_dot_draws_only_where_mask_is_set`
+- `test_visible_shadow_uses_polygon_alpha_as_intensity`
+- `test_visible_shadow_same_id_reject_preserves_mask`
+
+Verification:
+
+```sh
+cargo test -p nds-core shadow --release
+cargo test --workspace --release
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4320 --capture-ppm /private/tmp/heartgold-shadow-fix-smoke.ppm
+```
+
+Result:
+
+- Shadow-focused release tests: `9 passed; 0 failed`.
+- Full release workspace suite: `nds-core` `597 passed; 0 failed`,
+  `nds-frontend` `5 passed; 0 failed`.
+- HeartGold frame 4320 smoke capture remains coherent after the shadow
+  semantic change.
+
+## 2026-06-06 fix: display capture 128x128 uses compact output stride
+
+Status: **Corrected `DISPCAPCNT` output layout for 128-wide captures**
+
+Direct reference-emulator implementation use for this check: **0**. This came
+from auditing the remaining display-capture conformance risk against GBATEK's
+capture-size notes. Source reads still use screen coordinates, but the captured
+destination bitmap is packed according to the selected capture width.
+
+### Symptom / risk
+
+The capture writer used `(line * 256 + x) * 2` for every capture size. That is
+correct for the 256-wide capture modes, but it leaves a 128-pixel gap after
+each row in 128x128 capture mode. Games that capture a 128x128 image and later
+sample it as a compact texture would see every row after the first at the wrong
+VRAM address.
+
+### Fix
+
+Added `capture_output_byte_pos(width, line, x)`. The writer now uses:
+
+- stride 128 when `DISPCAPCNT[21:20]` selects 128x128;
+- stride 256 for the 256-wide modes.
+
+Source-A framebuffer reads and source-B VRAM reads remain screen-strided at
+256 pixels, matching the existing source-coordinate behavior.
+
+### Coverage added
+
+- `test_display_capture_128_width_uses_compact_output_stride` captures two
+  128-wide rows and verifies row 1 starts immediately after row 0 at byte
+  offset `0x100`, not at `0x200`.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_display_capture_128_width_uses_compact_output_stride --release
+cargo test -p nds-core display_capture --release
+cargo test --workspace --release
+```
+
+Result:
+
+- Focused 128-wide capture stride test: `1 passed; 0 failed`.
+- Display-capture focused release tests: `8 passed; 0 failed`.
+- Full release workspace suite: `nds-core` `598 passed; 0 failed`,
+  `nds-frontend` `5 passed; 0 failed`.
+
+## 2026-06-06 coverage: edge-marked zero-dot AA is exact
+
+Status: **Tightened the edge-marking plus anti-aliasing zero-dot regression**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+test hardening pass based on our existing model: opaque zero-dot polygons are
+hidden when AA is enabled alone, but the edge-marking quirk keeps them visible
+when both AA and edge marking are enabled.
+
+### Why this mattered
+
+The previous regression only asserted that the pixel remained visible and had
+nonzero alpha. That left too much room for a false pass: the pixel could remain
+visible without proving that the edge-mark post-pass selected the polygon's
+edge-color group and that AA left behind the expected coverage alpha.
+
+### Tightened fixture
+
+- The clear plane now has a different polygon ID from the test point.
+- The zero-dot polygon uses ID `8`, which maps to edge-color group `1`.
+- `EDGE_COLOR[1]` is set to green.
+
+The assertion now checks:
+
+- framebuffer color is exactly the selected edge color;
+- the alpha/visible bit is still set;
+- AA coverage alpha is exactly the fallback `16`.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_edge_marking_keeps_antialiased_zero_dot_polygon_visible --release
+cargo test -p nds-core edge_marking --release
+```
+
+Result:
+
+- Focused zero-dot edge-mark/AA test: `1 passed; 0 failed`.
+- Edge-marking focused release tests: `11 passed; 0 failed`.
+
+## 2026-06-06 coverage: W-buffer equal-depth draw path
+
+Status: **Added W-buffer integration coverage for equal-depth tolerance**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around the existing depth model, not a behavior change. The
+helper-level `depth_test_passes()` boundary test already checked the inclusive
+`+/-0x200` depth tolerance, but it did not prove that W-buffer conversion and
+polygon rasterization preserved the same behavior in an actual draw.
+
+### Coverage added
+
+- `test_w_buffering_depth_equal_allows_later_polygon_within_tolerance`
+  draws two overlapping opaque polygons in W-buffer mode. The later polygon has
+  `POLYGON_ATTR` bit 14 set and is one W-depth step farther away, which expands
+  to the inclusive tolerance boundary. It must overwrite the first polygon.
+- `test_w_buffering_depth_equal_rejects_later_polygon_outside_tolerance`
+  repeats the same setup with the later polygon two W-depth steps farther away.
+  It must be rejected, leaving the first polygon visible.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_w_buffering_depth_equal --release
+cargo test -p nds-core w_buffering --release
+```
+
+Result:
+
+- Focused W-buffer equal-depth tests: `2 passed; 0 failed`.
+- W-buffer focused release tests: `3 passed; 0 failed`.
+
+## 2026-06-06 smoke: HeartGold title frame remains coherent
+
+Status: **Captured a fresh HeartGold title frame after the latest raster coverage work**
+
+Command:
+
+```sh
+cargo run --release -p nds-frontend -- --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4320 --capture-ppm /private/tmp/heartgold-20260606-current.ppm
+```
+
+Result:
+
+- Capture completed successfully and wrote
+  `/private/tmp/heartgold-20260606-current.ppm`.
+- Converted inspection copy:
+  `/private/tmp/heartgold-20260606-current.png`.
+- The frame is coherent: Ho-Oh, the title prompt, the HeartGold logo, and
+  the Game Freak text are visible. The old random polygon flashing seen in the
+  earlier failing screenshots did not reproduce in this capture.
+
+## 2026-06-06 coverage: compressed texture palette base and short capture height
+
+Status: **Added two focused commercial-visual conformance fixtures**
+
+Direct reference-emulator implementation use for this check: **0**. Both checks
+are local invariants from the emulator's implemented hardware model.
+
+### 4x4 compressed texture palette base
+
+The existing compressed-texture tests covered mode decoding, transparent index
+behavior, interpolation, weighted colors, and slot-2 parameter-table routing,
+but they all sampled with `PLTT_BASE = 0`. Added
+`test_4x4_compressed_palette_base_offsets_palette_lookup`, which places a red
+color at palette base 0 and a green color at `PLTT_BASE = 1`; the sample must
+return green. This catches accidental base-zero compressed-texture sampling.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_4x4_compressed_palette_base_offsets_palette_lookup --release
+cargo test -p nds-core compressed --release
+```
+
+Result:
+
+- Focused compressed palette-base test: `1 passed; 0 failed`.
+- Compressed-texture focused release tests: `6 passed; 0 failed`.
+
+### Display capture 256x64 stride and height cutoff
+
+The previous capture stride fix proved 128x128 uses compact 128-pixel rows.
+Added `test_display_capture_256x64_uses_screen_stride_and_stops_at_height` to
+prove the 256-wide short capture mode keeps a 256-pixel destination stride and
+does not write line 64. The test also documents the current busy-bit behavior:
+short captures stop writing after their height, but the capture busy bit remains
+set until the visible frame ends.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_display_capture_256x64_uses_screen_stride_and_stops_at_height --release
+cargo test -p nds-core display_capture --release
+```
+
+Result:
+
+- Focused 256x64 capture test: `1 passed; 0 failed`.
+- Display-capture focused release tests: `9 passed; 0 failed`.
+
+## 2026-06-06 coverage: edge marking preserves fogged alpha
+
+Status: **Tightened fog and edge-marking post-effect ordering coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+local ordering invariant from the existing post-effect pipeline: fog runs before
+edge marking, and edge marking replaces only the color with `EDGE_COLOR`.
+
+### Why this mattered
+
+`test_edge_marking_color_is_not_fogged` already proved that an edge-marked
+pixel uses the configured edge color rather than the fog-blended polygon color.
+It did not prove what happens to the alpha channel after fog has already
+modified it. A regression there would keep edge colors looking plausible while
+changing how the pixel composes over 2D layers or into capture targets.
+
+### Coverage added
+
+Added `test_edge_marking_keeps_fogged_alpha`. The fixture:
+
+- enables fog and edge marking together;
+- lets fog lower the center pixel alpha from `31` to `16`;
+- creates a depth/ID edge against the neighboring pixel;
+- verifies edge marking changes the color to `EDGE_COLOR`;
+- verifies the alpha buffer remains the fogged value `16`.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_edge_marking_keeps_fogged_alpha --release
+cargo test -p nds-core edge_marking --release
+cargo test -p nds-core fog --release
+```
+
+Result:
+
+- Focused edge/fog alpha test: `1 passed; 0 failed`.
+- Edge-marking focused release tests: `12 passed; 0 failed`.
+- Fog focused release tests: `19 passed; 0 failed`.
+
+## 2026-06-06 coverage: same-ID translucent reject preserves state
+
+Status: **Tightened translucent same-polygon-ID rejection coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around the existing NDS translucent-ID rule: a translucent
+fragment rejects only when a previous translucent fragment with the same polygon
+ID already contributed to that pixel.
+
+### Why this mattered
+
+`test_same_id_translucent_overlap_does_not_blend_twice` already proved that the
+second same-ID translucent polygon does not blend into the framebuffer again.
+It did not prove that the rejected fragment leaves all per-pixel side state
+alone. If a rejected fragment still changed alpha, fog, or translucent-ID state,
+later fog/edge/overlap behavior could diverge even when the immediate color
+looked correct.
+
+### Coverage added
+
+Added `test_same_id_translucent_reject_preserves_fragment_state`. The fixture:
+
+- draws an opaque fog-enabled base;
+- draws a first translucent same-ID overlay that blends once and keeps fog
+  state;
+- submits a second same-ID translucent polygon with a different color, different
+  alpha, and fog disabled;
+- verifies the second polygon does not change color, alpha, fog enable state,
+  or the recorded translucent polygon ID.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_same_id_translucent_reject_preserves_fragment_state --release
+cargo test -p nds-core translucent --release
+```
+
+Result:
+
+- Focused same-ID reject state test: `1 passed; 0 failed`.
+- Translucent focused release tests: `32 passed; 0 failed`.
+
+## 2026-06-06 coverage: translucent depth update occludes later translucent fragments
+
+Status: **Tightened translucent depth-update draw-path coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around `POLYGON_ATTR` bit 11, which lets translucent fragments
+write depth.
+
+### Why this mattered
+
+`test_translucent_polygon_updates_depth_with_attr_bit11` already proved that a
+translucent fragment with bit 11 set writes the converted depth value. It did
+not prove that the updated depth participates in subsequent translucent depth
+tests. A renderer could pass the buffer-value assertion while still letting a
+later behind-the-front translucent fragment blend when it should be occluded.
+
+### Coverage added
+
+Added `test_translucent_depth_update_occludes_later_translucent_fragment`. The
+fixture:
+
+- draws an opaque base polygon;
+- draws a front translucent polygon with depth-update enabled;
+- draws a second translucent polygon behind that front translucent depth but
+  still in front of the opaque base;
+- verifies only the first translucent overlay contributes to the framebuffer;
+- verifies the depth buffer remains at the front translucent depth.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_translucent_depth_update_occludes_later_translucent_fragment --release
+cargo test -p nds-core translucent --release
+```
+
+Result:
+
+- Focused translucent depth-update occlusion test: `1 passed; 0 failed`.
+- Translucent focused release tests: `33 passed; 0 failed`.
+
+## 2026-06-06 coverage: alpha-test reject preserves fragment state
+
+Status: **Tightened alpha-test rejection coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around the existing alpha-test rule: a fragment whose effective
+alpha is less than or equal to `ALPHA_TEST_REF` is discarded before it can write
+color or side buffers.
+
+### Why this mattered
+
+`test_alpha_test_requires_alpha_greater_than_ref` already proved rejected
+fragments do not become visible. It did not prove that rejection leaves the
+existing pixel's state untouched. Commercial games commonly use alpha-tested
+texture cutouts; if a rejected texel changed depth, polygon ID, fog, alpha, or
+translucent bookkeeping, later edge marking, fog, AA, or overlap behavior could
+diverge even though the rejected texel itself was invisible.
+
+### Coverage added
+
+Added `test_alpha_test_reject_preserves_existing_fragment_state`. The fixture:
+
+- draws an opaque, fog-enabled base polygon;
+- submits a nearer translucent polygon with alpha equal to `ALPHA_TEST_REF`;
+- verifies the rejected fragment leaves color, alpha, depth, polygon ID, fog
+  enable state, and translucent-ID state unchanged.
+
+Verification:
+
+```sh
+cargo test -p nds-core test_alpha_test_reject_preserves_existing_fragment_state --release
+cargo test -p nds-core alpha_test --release
+```
+
+Result:
+
+- Focused alpha-test reject state test: `1 passed; 0 failed`.
+- Alpha-test focused release tests: `4 passed; 0 failed`.
+
+## 2026-06-06 validation: latest HeartGold title smoke after renderer coverage
+
+Status: **Re-ran current HeartGold frame capture after the latest raster-state tests**
+
+This is an image-level smoke check, not a new implementation change and not a
+claim of full visual conformance. It verifies that the recent depth,
+translucency, alpha-test, fog, edge-marking, and capture coverage additions did
+not regress the commercial title scene that motivated this 3D pass.
+
+Command:
+
+```sh
+cargo run --release -p nds-frontend -- --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 4320 --capture-ppm /private/tmp/heartgold-20260606-latest.ppm
+```
+
+Result:
+
+- Capture completed successfully and wrote
+  `/private/tmp/heartgold-20260606-latest.ppm`.
+- Converted inspection copy:
+  `/private/tmp/heartgold-20260606-latest.png`.
+- The capture is `256 x 384`, matching the compact two-screen layout with no
+  artificial gap.
+- Visual inspection shows a coherent title frame: Ho-Oh and the "TOUCH TO
+  START" prompt on the top screen, the HeartGold logo and Game Freak text on
+  the bottom screen, and no recurrence of the earlier random polygon flashing.
+
+## 2026-06-06 validation: HeartGold title-loop sequence sweep
+
+Status: **Extended the current validation from one still frame to a short title-loop sweep**
+
+This was a runtime/image-level check only. No reference-emulator code was used
+for this pass, and this is still not a claim of full 3D conformance.
+
+Command:
+
+```sh
+cargo run --release -p nds-frontend -- --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 5400 --capture-interval 540 --capture-dir /private/tmp/heartgold-20260606-sweep
+```
+
+Result:
+
+- Capture completed through frame 5400.
+- Wrote ten native `256 x 384` PPM frames:
+  `/private/tmp/heartgold-20260606-sweep/frame-000540.ppm` through
+  `/private/tmp/heartgold-20260606-sweep/frame-005400.ppm`.
+- Converted and inspected representative samples:
+  - frame 540: expected Game Freak splash.
+  - frame 2700: coherent transition/title artwork.
+  - frame 4320: clean Ho-Oh title frame with "TOUCH TO START".
+  - frame 5400: clean later Ho-Oh title frame.
+- The sequence preserves the compact top/bottom screen layout with no large
+  artificial gap.
+- The sampled frames did not reproduce the earlier random-polygon flashing.
+
+Remaining limitation:
+
+- This confirms that the current build no longer reproduces the visible failure
+  in this sampled HeartGold title sequence. It does not prove pixel-level
+  accuracy against DS hardware or a trusted reference capture, and intermittent
+  visual bugs outside these sampled frames remain possible.
+
+## 2026-06-06 coverage: 256x128 display-capture height cutoff
+
+Status: **Tightened display-capture size coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+straightforward invariant from the `DISPCAPCNT` size field: 256x128 capture uses
+the normal 256-pixel row stride, but it must stop writing after line 127.
+
+### Why this mattered
+
+The 128x128 compact-stride and 256x64 short-height cases were already covered.
+The remaining short 256-wide size, 256x128, should follow the same stride rule
+as 256x64 and the same height-cutoff behavior at a different boundary. Without
+a focused test, a future cleanup could accidentally treat all short captures as
+128-wide, or write line 128 into the next capture row.
+
+### Coverage added
+
+Added `test_display_capture_256x128_uses_screen_stride_and_stops_at_height`.
+The fixture:
+
+- configures source-A capture to VRAM B with capture size 256x128;
+- writes distinct source pixels at lines 127 and 128;
+- verifies line 127 lands at the 256-wide row offset;
+- verifies line 128 is not written;
+- verifies the capture busy/active state remains set until the visible frame
+  ends, matching the existing short-capture behavior.
+
+Verification:
+
+```sh
+cargo test -p nds-core display_capture --release
+```
+
+Result:
+
+- Display-capture focused release tests: `10 passed; 0 failed`.
+
+## 2026-06-06 coverage: alpha-test reject preserves line and zero-dot state
+
+Status: **Tightened alpha-test rejection coverage for special primitives**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around an existing hardware-facing rule: with alpha test enabled,
+fragments whose effective alpha is less than or equal to `ALPHA_TEST_REF` must
+be discarded before they update color, depth, polygon ID, fog state, edge/AA
+bookkeeping, or translucent-overlap state.
+
+### Why this mattered
+
+Normal filled triangles already had state-preservation coverage for alpha-test
+rejection. The rasterizer has separate draw paths for degenerate line segments
+and zero-dot polygons, both of which are observable in DS 3D because the
+hardware supports one-dot/wire/degenerate output cases. If those paths skipped
+the visible color write but still changed side buffers, later fog, edge marking,
+AA, or translucent same-ID rejection could diverge in commercial scenes that use
+alpha-tested cutouts or tiny geometry.
+
+### Coverage added
+
+Added:
+
+- `test_alpha_test_reject_line_preserves_existing_fragment_state`
+- `test_alpha_test_reject_zero_dot_preserves_existing_fragment_state`
+
+Both fixtures:
+
+- draw an opaque, fog-enabled base polygon;
+- submit a nearer alpha-tested special primitive with alpha equal to
+  `ALPHA_TEST_REF`;
+- verify the rejected primitive leaves framebuffer color, alpha, depth, polygon
+  ID, fog enable state, and translucent-ID state unchanged.
+
+Verification:
+
+```sh
+cargo test -p nds-core alpha_test --release
+```
+
+Result:
+
+- Alpha-test focused release tests: `6 passed; 0 failed`.
+
+## 2026-06-06 coverage: same-ID translucent reject preserves line and zero-dot state
+
+Status: **Tightened translucent same-ID rejection coverage for special primitives**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around the DS translucent-overlap rule already implemented in the
+rasterizer: a translucent fragment with the same polygon ID as a previous
+translucent fragment at the same pixel must be rejected so it does not blend
+twice.
+
+### Why this mattered
+
+The filled-triangle path already proved rejected same-ID translucent fragments
+leave the existing fragment state untouched. Degenerate line segments and
+zero-dot polygons go through separate draw paths. If those paths rejected color
+but still changed alpha, fog, or translucent-ID bookkeeping, later edge marking,
+fog, AA, or additional translucent overlap could diverge from hardware in small
+geometry and wire/one-dot cases.
+
+### Coverage added
+
+Added:
+
+- `test_same_id_translucent_line_reject_preserves_fragment_state`
+- `test_same_id_translucent_zero_dot_reject_preserves_fragment_state`
+
+Both fixtures:
+
+- draw an opaque, fog-enabled base polygon;
+- draw one translucent special primitive with polygon ID 7;
+- draw a second translucent special primitive with the same polygon ID but a
+  different color and fog-disabled state;
+- verify the second primitive is rejected and leaves framebuffer color, alpha,
+  fog enable state, and translucent-ID state from the first translucent fragment.
+
+Verification:
+
+```sh
+cargo test -p nds-core translucent --release
+```
+
+Result:
+
+- Translucent focused release tests: `35 passed; 0 failed`.
+
+## 2026-06-06 coverage: translucent depth update for line and zero-dot primitives
+
+Status: **Tightened translucent depth-update coverage for special primitives**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around `POLYGON_ATTR` bit 11, which allows translucent fragments
+to update the depth buffer. The normal filled-triangle path already had coverage
+showing that a depth-updating translucent fragment can occlude a later
+translucent fragment behind it.
+
+### Why this mattered
+
+Degenerate lines and zero-dot polygons go through separate draw paths from
+filled triangles. If those paths blended color but failed to update depth when
+bit 11 is set, a later translucent polygon behind them could blend through small
+wire/one-dot geometry even though hardware should reject it by depth. This kind
+of error is visually subtle but can show up as flickering or halos around tiny
+3D details.
+
+### Coverage added
+
+Added:
+
+- `test_translucent_line_depth_update_occludes_later_translucent_fragment`
+- `test_translucent_zero_dot_depth_update_occludes_later_translucent_fragment`
+
+Both fixtures:
+
+- draw an opaque base polygon;
+- draw a nearer translucent line/zero-dot primitive with depth-update enabled;
+- draw a later translucent polygon behind that primitive;
+- verify the later polygon does not blend through the depth-updating special
+  primitive;
+- verify the depth buffer stores the special primitive's front depth.
+
+Verification:
+
+```sh
+cargo test -p nds-core translucent --release
+```
+
+Result:
+
+- Translucent focused release tests: `37 passed; 0 failed`.
+
+## 2026-06-06 coverage: zero-dot AA state is cleared by later real geometry
+
+Status: **Tightened anti-alias zero-dot side-buffer coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+side-state regression around the internal `zero_dot_buffer`, which marks opaque
+one-dot polygons so the AA pass can hide them unless edge marking is also
+enabled.
+
+### Why this mattered
+
+Zero-dot polygons are special: with AA enabled and edge marking disabled, the
+post-pass hides opaque one-dot pixels. That decision is based on side-buffer
+state captured during rasterization. If a later line or filled triangle
+overwrites the same pixel but fails to clear the stale zero-dot marker, AA can
+incorrectly hide real geometry. This would show up as missing pixels or
+flickering gaps in tiny wire/edge details.
+
+### Coverage added
+
+Added:
+
+- `test_line_over_zero_dot_clears_zero_dot_antialias_state`
+- `test_triangle_over_zero_dot_clears_zero_dot_antialias_state`
+
+Both fixtures:
+
+- draw an opaque zero-dot polygon behind the target pixel;
+- draw nearer real geometry over that same pixel;
+- run with AA enabled;
+- verify the later line/triangle remains visible;
+- verify `zero_dot_buffer` is cleared at the overwritten pixel.
+
+Verification:
+
+```sh
+cargo test -p nds-core antialias --release
+```
+
+Result:
+
+- Anti-alias focused release tests: `19 passed; 0 failed`.
+
+## 2026-06-06 fix: line and zero-dot writes clear stale AA coverage hints
+
+Status: **Fixed stale anti-alias coverage metadata when special primitives overwrite triangle pixels**
+
+Direct reference-emulator implementation use for this fix: **0**. The issue was
+found by auditing the local draw paths: filled triangles update
+`aa_coverage_buffer` / `aa_edge_hint_buffer`, but line and zero-dot writes
+previously did not clear those buffers when they overwrote the same pixel.
+
+### Symptom
+
+A line or edge-marked zero-dot primitive drawn over a partially covered triangle
+pixel could inherit the triangle's old AA coverage value. In the focused
+regression, a line overwrote a triangle pixel with stale coverage `8`; the AA
+post-pass then used alpha `8` instead of the fallback line coverage `16`.
+
+This is visible-risky because stale coverage can make later real geometry too
+transparent or blend toward the wrong edge, creating small gaps or shimmering
+around wire/one-dot details.
+
+### Root cause
+
+The filled-triangle scanline path calls `update_aa_coverage(...)`, which either
+records fresh coverage/hints for opaque fractional pixels or clears the buffers.
+The line and zero-dot paths updated color, alpha, depth, ID, edge, fog, and
+zero-dot state, but left previous AA coverage/hint bytes untouched.
+
+### Fix
+
+Added `clear_aa_coverage(...)` and call it from:
+
+- the line write path;
+- the zero-dot write path.
+
+Filled triangle pixels still use `update_aa_coverage(...)` because they can
+carry real fractional coverage. Special primitives now fall back to the AA
+post-pass default instead of inheriting stale triangle metadata.
+
+### Regression coverage
+
+Added:
+
+- `test_line_over_triangle_clears_stale_antialias_coverage`
+- `test_zero_dot_over_triangle_clears_stale_antialias_coverage`
+
+Verification:
+
+```sh
+cargo test -p nds-core test_line_over_triangle_clears_stale_antialias_coverage --release
+cargo test -p nds-core antialias --release
+```
+
+Result:
+
+- Focused stale-coverage regression: first failed with stale alpha `8`, then
+  passed after the fix.
+- Anti-alias focused release tests: `21 passed; 0 failed`.
+
+## 2026-06-06 fix: invalid packed GX command bytes do not terminate the packed word
+
+Status: **Fixed GXFIFO packed-command decoder conformance**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from checking the local packed-command decoder against GBATEK's GXFIFO command
+byte rule: command byte `00h` is padding/terminator, but invalid nonzero
+command bytes are simply ignored and do not fetch parameters.
+
+### Symptom / gap
+
+The packed decoder previously treated an invalid command byte like `00h`. That
+terminated the rest of the packed command word, so later valid command bytes in
+the same word were dropped.
+
+Example:
+
+```text
+packed word bytes, LSB first:
+11 FF 15 12
+
+old local decode:
+MTX_PUSH
+
+hardware-facing decode:
+MTX_PUSH
+ignore FF
+MTX_IDENTITY
+MTX_POP param follows
+```
+
+### Fix
+
+- Kept `00h` as the packed-word terminator/padding byte.
+- Changed invalid nonzero command bytes to `continue` instead of `break`.
+- Invalid command bytes do not add FIFO entries and do not consume parameter
+  words.
+
+Why this matters:
+
+Games and command-list generators normally emit valid bytes, but FIFO
+conformance matters for DMA-fed command streams, malformed padding, and test
+ROMs that probe command decoder behavior. Dropping valid later command bytes can
+change matrix/vertex state for the rest of the frame.
+
+Regression coverage:
+
+```text
+test_packed_word_invalid_command_byte_is_ignored_without_terminating
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core packed_word_invalid --release
+```
+
+Result:
+
+- Focused invalid packed-command release test: `1 passed; 0 failed`.
+
+## 2026-06-06 fix: GXSTAT high readback reports GXFIFO full
+
+Status: **Fixed GXFIFO status readback conformance**
+
+Direct reference-emulator implementation use for this fix: **0**. This came
+from auditing the two local FIFO status helpers against the documented GXSTAT
+high bits. `stat_high()` already exposed the full bit, but the engine's actual
+`gxstat_high()` path uses `gxstat_high_bits(...)`, which omitted it.
+
+### Symptom / gap
+
+When the emulated FIFO had at least `256` entries, the visible count saturated
+to `256`, but `GXSTAT[24]` was not explicitly set through the engine readback
+path. Software polling the full bit could therefore see an impossible status:
+a saturated FIFO count without the full flag.
+
+### Fix
+
+- `GxFifo::gxstat_high_bits(...)` now sets bit 8 of the high halfword when
+  `entries >= FIFO_CAPACITY`.
+- The existing over-capacity preservation behavior is unchanged: the emulator
+  keeps command words instead of modeling ARM9 write stalls, while still
+  capping the hardware-visible count.
+
+Why this matters:
+
+Games poll `GXSTAT` to pace command submission and DMA command-list feeding.
+Accurate full/half/empty flags keep those loops aligned with DS hardware even
+when the emulator preserves over-capacity writes internally.
+
+Regression coverage:
+
+```text
+test_direct_port_write_past_full_preserves_command_stream
+```
+
+Verification:
+
+```sh
+cargo test -p nds-core direct_port_write_past_full --release
+```
+
+Result:
+
+- Focused full-FIFO status release test: `1 passed; 0 failed`.
+
+## 2026-06-06 coverage: W-buffer ordering for line and zero-dot primitives
+
+Status: **Tightened W-buffer depth coverage for special primitives**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around the existing W-buffer depth path. Filled triangles already
+had coverage proving that, in W-buffer mode, depth ordering must use clip W
+rather than Z.
+
+### Why this mattered
+
+Degenerate line segments and zero-dot polygons use separate draw paths from
+filled triangles. If those paths accidentally used Z depth while filled
+triangles used W depth, small wire/one-dot details could draw in front of or
+behind the wrong polygons in scenes that enable W-buffering. That kind of error
+would be visible as tiny depth pops or flickering outlines.
+
+### Coverage added
+
+Added:
+
+- `test_w_buffering_orders_degenerate_line_by_w`
+- `test_w_buffering_orders_zero_dot_by_w`
+
+Both fixtures:
+
+- enable W-buffering;
+- draw a Z-near/W-far special primitive first;
+- draw a Z-far/W-near special primitive second at the same pixel;
+- verify the W-near primitive wins, proving ordering follows W rather than Z.
+
+Verification:
+
+```sh
+cargo test -p nds-core w_buffering --release
+```
+
+Result:
+
+- W-buffer focused release tests: `5 passed; 0 failed`.
+
+## 2026-06-06 coverage: W-buffer equal-depth tolerance for line and zero-dot primitives
+
+Status: **Tightened W-buffer equal-depth coverage for special primitives**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around `POLYGON_ATTR` bit 14, the equal-depth mode that accepts
+incoming fragments within the hardware depth tolerance window.
+
+### Why this mattered
+
+Filled triangles already had W-buffer equal-depth coverage for the inclusive
+tolerance boundary and the rejection just outside it. Degenerate line segments
+and zero-dot polygons use separate draw paths. If those paths ignored the
+equal-depth tolerance, small wire/one-dot details could disappear when drawn at
+nearly the same W depth as the surface they are meant to decorate.
+
+### Coverage added
+
+Added:
+
+- `test_w_buffering_depth_equal_allows_later_line_within_tolerance`
+- `test_w_buffering_depth_equal_allows_later_zero_dot_within_tolerance`
+
+Both fixtures:
+
+- enable W-buffering;
+- draw a base special primitive at W=4096;
+- draw a later same-pixel special primitive at W=4608 with equal-depth mode
+  enabled;
+- verify the later primitive wins, proving the inclusive tolerance path applies
+  to line and zero-dot rasterization too.
+
+Verification:
+
+```sh
+cargo test -p nds-core w_buffering --release
+```
+
+Result:
+
+- W-buffer focused release tests: `7 passed; 0 failed`.
+
+## 2026-06-06 coverage: opaque line and zero-dot writes clear stale fog state
+
+Status: **Tightened fog side-buffer coverage for special primitives**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+coverage pass around `fog_enable_buffer`, which controls whether the fog
+post-pass modifies a rendered pixel.
+
+### Why this mattered
+
+Translucent line and zero-dot paths already had coverage proving they AND their
+fog flag with the existing framebuffer fog flag. The opaque overwrite case was
+not explicitly covered. If an opaque line or zero-dot polygon without fog
+overwrote a fog-enabled base pixel but failed to clear the stale fog flag, the
+post-pass would incorrectly fog the new geometry. That can produce darkened
+wire/one-dot details or small alpha/color artifacts.
+
+### Coverage added
+
+Added:
+
+- `test_opaque_line_clears_stale_fog_flag`
+- `test_opaque_zero_dot_clears_stale_fog_flag`
+
+Both fixtures:
+
+- enable fog with full-density black fog;
+- draw a fog-enabled base polygon;
+- draw a nearer opaque special primitive with fog disabled;
+- verify the final special-primitive color remains unfogged;
+- verify `fog_enable_buffer` is cleared at the overwritten pixel.
+
+Verification:
+
+```sh
+cargo test -p nds-core fog --release
+```
+
+Result:
+
+- Fog focused release tests: `21 passed; 0 failed`.
+
+## 2026-06-06 coverage: alpha-zero texel skips preserve side buffers
+
+Status: **Tightened transparent-texture skip coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+local invariants pass around the rasterizer's own side buffers, not a port from
+a reference implementation.
+
+### Why this mattered
+
+The rasterizer already skipped fragments whose texture/color combine resolved
+to effective alpha `0`. The previous wireframe A5I3 alpha-zero regression only
+checked that the visible framebuffer bit stayed clear. That left a blind spot:
+a skipped fragment must also leave the hidden metadata untouched. If the skip
+path mutated depth, polygon ID, translucent ID, edge/fog flags, AA coverage
+hints, or zero-dot state, later post-effects could still see a "ghost" fragment
+even though no visible color was written.
+
+That class of bug is especially relevant to the HeartGold title investigation
+because the failures have shown up as intermittent edge/fog/AA-style artifacts,
+not as simple solid-color geometry errors.
+
+### Coverage added
+
+Added a small `PixelState` snapshot helper and three direct rasterizer tests:
+
+- `test_filled_a5i3_alpha_zero_texel_preserves_existing_fragment_state`
+- `test_wireframe_a5i3_alpha_zero_texel_preserves_existing_fragment_state`
+- `test_zero_dot_a5i3_alpha_zero_texel_preserves_existing_fragment_state`
+
+Each fixture:
+
+- enables texture mapping;
+- seeds all per-pixel color/depth/ID/post-effect side buffers at the target
+  pixel;
+- rasterizes a nearer A5I3 alpha-zero fragment through one raster path;
+- verifies the full seeded state is unchanged.
+
+Verification:
+
+```sh
+cargo test -p nds-core alpha_zero --release
+```
+
+Result:
+
+- Alpha-zero focused release tests: `6 passed; 0 failed`.
+
+## 2026-06-06 coverage: T-axis repeat+flip raster texture sampling
+
+Status: **Tightened vertical texture-addressing coverage**
+
+Direct reference-emulator implementation use for this check: **0**. This is a
+local coverage pass derived from the documented `TEXIMAGE_PARAM` repeat/flip
+bits and the existing S-axis raster test.
+
+### Why this mattered
+
+The texture sampler already had unit coverage for repeat+flip coordinate
+wrapping and the raster path already had an S-axis repeat+flip marker test.
+That still left a raster-path asymmetry: a regression could apply repeat+flip
+correctly to S while mishandling T after perspective-correct coordinate
+recovery. Vertical texture-addressing bugs would show up as distorted title
+art/backgrounds even if horizontal marker tests stayed green.
+
+### Coverage added
+
+Added:
+
+- `test_texture_t_repeat_flip_bits_are_applied_during_raster_sampling`
+
+The fixture:
+
+- creates an 8x8 direct-color marker texture;
+- places different colors at row 1, row 6, and row 7;
+- rasterizes a scanline whose recovered T coordinate is `9`;
+- enables T repeat+flip only;
+- verifies the sample mirrors to row `6`, not row `1` from plain repeat or row
+  `7` from clamp.
+
+Verification:
+
+```sh
+cargo test -p nds-core repeat_flip --release
+```
+
+Result:
+
+- Repeat/flip focused release tests: `3 passed; 0 failed`.
+
+## 2026-06-06 validation: current HeartGold 5400-frame title sweep
+
+Status: **Revalidated visible title-loop stability from the current release binary**
+
+Direct reference-emulator implementation use for this check: **0**. This was a
+local runtime capture from the current `./target/release/nds-frontend` binary.
+
+### Why this mattered
+
+The remaining conformance gap is not only unit-test coverage. We also need
+periodic image-level validation against the real commercial title that exposed
+the 3D failures. Earlier symptoms included a black screen, a very tall frontend
+layout gap, and intermittent random polygon flashing around the title scene.
+
+### Validation run
+
+Command:
+
+```sh
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 5400 --capture-interval 540 --capture-dir /private/tmp/heartgold-20260606-current-verify
+```
+
+Output:
+
+- ten PPM frames from `frame-000540.ppm` through `frame-005400.ppm`;
+- each frame is `256 x 384`;
+- representative frames were converted to PNG with `sips` for inspection.
+
+Observed frames:
+
+- `frame-000540`: expected Game Freak splash.
+- `frame-002700`: coherent title-animation character art.
+- `frame-004320`: Ho-Oh title scene with bottom HeartGold logo and `TOUCH TO
+  START`.
+- `frame-005400`: later Ho-Oh title scene with bottom HeartGold logo and
+  `TOUCH TO START`.
+
+Result:
+
+- No black-screen regression in the sampled sequence.
+- No oversized frontend screen gap; output is the compact two-screen stack.
+- No random polygon flashing in the inspected sampled frames.
+- This is supporting image evidence only. It does not prove full 3D visual
+  conformance without reference/hardware image comparison.
+
+## 2026-06-06 tool: PPM capture comparator
+
+Status: **Added repeatable image-diff utility**
+
+Direct reference-emulator implementation use for this tool: **0**. This is a
+local validation utility for comparing emulator captures against separately
+produced reference images.
+
+### Why this mattered
+
+The project already had deterministic PPM capture, and the latest HeartGold
+sequence was inspected manually. Manual inspection is useful for gross failures
+like black screens or random polygon flashing, but it cannot prove visual
+conformance. The next step is a mechanical comparison path that reports how
+far a current capture is from a reference capture and produces a diff image
+for inspection.
+
+### Tool added
+
+Added:
+
+```text
+tools/compare_ppm.py
+```
+
+The tool:
+
+- reads binary `P6` PPM captures without third-party dependencies;
+- verifies matching dimensions;
+- reports changed pixels, changed channels, max channel delta, and RMSE;
+- compares either one PPM file pair or two `--capture-dir` directories by
+  matching `frame-000000.ppm` style filenames;
+- supports `--pixel-threshold`, `--max-changed-pixels`, and
+  `--max-channel-delta` failure gates;
+- can write an amplified diff PPM with `--write-diff`, or a directory of diff
+  PPMs when comparing capture directories.
+
+The test file uses only Python's standard `unittest` module and covers:
+
+- identical file comparisons;
+- different file comparisons plus diff output;
+- directory sequence comparisons that ignore non-sequence diff artifacts;
+- missing-frame errors.
+
+The manifest runner accepts JSON cases so reference comparisons can be encoded
+as named checks instead of hand-written command lines:
+
+```json
+{
+  "cases": [
+    {
+      "name": "heartgold-title",
+      "actual": "/tmp/current-heartgold-seq",
+      "reference": "/tmp/reference-heartgold-seq",
+      "pixel_threshold": 0,
+      "max_changed_pixels": 0,
+      "max_channel_delta": 0,
+      "write_diff": "/tmp/heartgold-title-diff",
+      "ignore_metadata": false
+    }
+  ]
+}
+```
+
+Run with:
+
+```sh
+python3 tools/run_visual_manifest.py /tmp/visual-manifest.json
+```
+
+`tools/visual_manifest.example.json` contains a checked-in template for both
+sequence and single-frame visual comparisons.
+
+By default the runner validates capture sidecars before comparing pixels:
+
+- single captures use `<capture>.json`;
+- sequence captures use `capture-metadata.json`;
+- metadata format, kind, ROM identity, frame window, interval, screen gap,
+  output dimensions, and listed sequence files must match.
+
+Legacy captures made before metadata sidecars can still be compared by setting
+`"ignore_metadata": true` in the manifest case.
+
+Added Python cache ignores to `.gitignore`:
+
+```text
+__pycache__/
+*.py[cod]
+```
+
+### Verification
+
+Identical-frame check:
+
+```sh
+python3 tools/compare_ppm.py /private/tmp/heartgold-20260606-current-verify/frame-004320.ppm /private/tmp/heartgold-20260606-current-verify/frame-004320.ppm
+```
+
+Result:
+
+- `changed_pixels: 0`
+- `changed_channels: 0`
+- `max_channel_delta: 0`
+- `rmse: 0.0000`
+- exit code `0`
+
+Different-frame check:
+
+```sh
+python3 tools/compare_ppm.py /private/tmp/heartgold-20260606-current-verify/frame-005400.ppm /private/tmp/heartgold-20260606-current-verify/frame-004320.ppm --write-diff /private/tmp/heartgold-20260606-current-verify/frame-005400-vs-004320-diff.ppm
+```
+
+Result:
+
+- `changed_pixels: 80888 (82.2835%)`
+- `changed_channels: 212304`
+- `max_channel_delta: 255`
+- `rmse: 71.8376`
+- exit code `1`
+- generated diff file is a valid `256 x 384` PPM.
+
+Directory self-check:
+
+```sh
+python3 tools/compare_ppm.py /private/tmp/heartgold-20260606-current-verify /private/tmp/heartgold-20260606-current-verify
+```
+
+Result:
+
+- matched ten capture files from `frame-000540.ppm` through
+  `frame-005400.ppm`;
+- all per-frame deltas were zero;
+- summary `changed_pixels: 0`, `max_channel_delta: 0`, `rmse: 0.0000`;
+- exit code `0`.
+
+Directory mismatch check:
+
+```sh
+python3 tools/compare_ppm.py /private/tmp/heartgold-20260606-current-verify /private/tmp/heartgold-20260606-shifted-verify --write-diff /private/tmp/heartgold-20260606-seq-diff
+```
+
+Result:
+
+- nine frames matched exactly;
+- `frame-005400.ppm` reported `80888` changed pixels, max channel delta `255`,
+  and RMSE `71.8376`;
+- summary RMSE was `22.7170`;
+- exit code `1`;
+- generated per-frame diff PPMs, including a valid `256 x 384`
+  `frame-005400.ppm` diff.
+
+Unit test check:
+
+```sh
+python3 -m unittest tools/compare_ppm_test.py
+python3 -m unittest tools/run_visual_manifest_test.py
+```
+
+Result:
+
+- Comparator tests: `4` passed.
+- Manifest-runner tests: `6` passed.
+
+Independent capture determinism check:
+
+```sh
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 2160 --capture-interval 540 --capture-dir /private/tmp/heartgold-20260606-determinism-a
+./target/release/nds-frontend --rom /Users/lijunzhang/Documents/Pokemon-HeartGoldVersionUSA.nds --no-audio --capture-frames 2160 --capture-interval 540 --capture-dir /private/tmp/heartgold-20260606-determinism-b
+python3 tools/compare_ppm.py /private/tmp/heartgold-20260606-determinism-a /private/tmp/heartgold-20260606-determinism-b
+```
+
+Result:
+
+- both captures produced `frame-000540.ppm`, `frame-001080.ppm`,
+  `frame-001620.ppm`, and `frame-002160.ppm`;
+- all four independent capture pairs matched exactly;
+- summary `changed_pixels: 0`, `changed_channels: 0`,
+  `max_channel_delta: 0`, `rmse: 0.0000`;
+- exit code `0`.
+
+This means the current direct-boot capture path is deterministic for this
+HeartGold ROM/save/frame window. With controlled inputs, future reference
+captures can use strict zero-delta gates before relaxing thresholds for
+known-timing or reference-source differences.
+
+Manifest runner check:
+
+```sh
+python3 tools/run_visual_manifest.py /private/tmp/heartgold-20260606-determinism-manifest.json
+```
+
+Result:
+
+- `PASS heartgold-determinism`;
+- `frames=4`;
+- `changed_pixels=0`;
+- `changed_channels=0`;
+- `max_channel_delta=0`;
+- `worst_rmse=0.0000`;
+- generated four valid `256 x 384` per-frame diff PPMs in
+  `/private/tmp/heartgold-20260606-determinism-manifest-diff`.
+
+Metadata-aware manifest checks:
+
+```sh
+python3 tools/run_visual_manifest.py /private/tmp/heartgold-20260606-metadata-smoke-manifest.json
+python3 tools/run_visual_manifest.py /private/tmp/heartgold-20260606-determinism-legacy-manifest.json
+python3 tools/run_visual_manifest.py /private/tmp/heartgold-20260606-identity-metadata-manifest.json
+```
+
+Result:
+
+- metadata-enabled smoke capture self-comparison passed with `frames=2` and
+  zero deltas after sidecar validation;
+- older determinism captures passed with explicit `"ignore_metadata": true`,
+  `frames=4`, and zero deltas.
+- ROM identity metadata self-comparison passed with `frames=2`, zero deltas,
+  `rom_size=134217728`, `rom_title=POKEMON HG`, `gamecode=IPKE`, and
+  `header_crc_valid=true`.
+
+Full tool and workspace verification after the metadata identity fields:
+
+```sh
+python3 -m unittest tools/compare_ppm_test.py tools/run_visual_manifest_test.py
+cargo test --workspace --release
+```
+
+Result:
+
+- Python visual tooling tests: `10` passed.
+- Rust workspace release tests: `nds-core` `627` passed,
+  `nds-frontend` `7` passed, doctests `0` passed.
+
+This does not finish visual conformance. It gives the repo the missing
+mechanical gate needed once trusted reference captures are available.
+
+## 2026-06-06 indoor OBJ shadow corruption
+
+Latest Desktop screenshots inspected:
+
+```text
+Screenshot 2026-06-06 at 5.01.08 PM.png
+Screenshot 2026-06-06 at 5.01.19 PM.png
+Screenshot 2026-06-06 at 5.02.23 PM.png
+```
+
+Observed behavior:
+
+- Outdoor player/map screenshot looked normal.
+- Indoor screenshots showed a black striped block or solid black block around
+  the player/stair area.
+- The indoor room background rendered mostly correctly, which made this look
+  like an OBJ-layer problem rather than a BG tilemap or 3D geometry problem.
+
+Root cause:
+
+- NDS OBJ `gfx_mode = 3` is bitmap OBJ mode.
+- The renderer documented that mode, but still decoded those sprites through
+  the indexed/tiled 4bpp/8bpp path.
+- That treats direct-color bitmap data as palette indices, so transparent
+  bitmap pixels can become black OBJ pixels and bitmap shadow/fade sprites can
+  become solid black blocks.
+- Bitmap OBJ attr2 bits `12-15` are an OAM alpha value, not an indexed OBJ
+  palette bank.
+
+Fix:
+
+- `gpu2d::obj` now decodes bitmap OBJs as direct-color pixels from OBJ VRAM.
+- Bitmap pixels with bit 15 clear are transparent.
+- Visible bitmap pixels output `color & 0x7FFF`.
+- Bitmap OBJ alpha from attr2 bits `12-15` is carried into the compositor.
+- Bitmap OBJ addressing now follows the separate bitmap mapping controls from
+  `DISPCNT` bits `6`, `5`, and `22` instead of reusing tile OBJ mapping bit
+  `4`.
+- `gpu2d::compositor` blends bitmap OBJ pixels with their second target using
+  the bitmap OAM alpha coefficient.
+
+Focused coverage:
+
+- `test_bitmap_obj_reads_direct_color_and_alpha` verifies direct-color bitmap
+  OBJ reads, bit15 transparency, and attr2 alpha extraction.
+- `test_bitmap_obj_2d_256_mapping_uses_dispcnt5_source_width` verifies
+  bitmap 2D/256-dot source-width addressing.
+- `test_bitmap_obj_1d_256_mapping_uses_dispcnt22_boundary` verifies bitmap
+  1D/256-byte boundary addressing.
+- `test_bitmap_obj_uses_oam_alpha_over_second_target` verifies compositor
+  blending through the bitmap OBJ alpha path.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core gpu2d --release
+```
+
+Result:
+
+- Initial direct-color/alpha coverage: `13` GPU2D-focused tests passed.
+- After correcting bitmap mapping bits: `15` GPU2D-focused tests passed.
+
+### Follow-up: DS OBJ priority ordering
+
+While reviewing GBATEK's DS OBJ rules for bitmap OBJs, another visible sprite
+ordering issue turned up. DS mode combines the 2-bit OBJ priority field with
+the OAM entry number. Our renderer was using the first nontransparent OBJ pixel
+encountered, so a later sprite with a higher visual priority could be hidden
+behind an earlier lower-priority sprite.
+
+Fix:
+
+- `ObjPixel` now records the source OAM index.
+- OBJ pixels now replace an existing pixel when they have a lower numeric OBJ
+  priority.
+- Equal priority keeps the lower OAM index, matching DS tie behavior.
+
+Focused coverage:
+
+- `test_later_obj_with_higher_priority_replaces_earlier_obj_pixel` verifies
+  that later high-priority sprites can appear above earlier low-priority ones.
+- `test_equal_obj_priority_keeps_lower_oam_index` verifies the OAM-index
+  tie-breaker.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core gpu2d --release
+```
+
+Result:
+
+- After OBJ priority ordering coverage: `17` GPU2D-focused tests passed.
+
+### Follow-up: DS OBJ vertical wrap
+
+GBATEK also calls out a DS-specific OBJ vertical wrap difference from GBA mode:
+large OBJs near the bottom of the OBJ coordinate space can appear in both the
+bottom and top visible portions when their box crosses the 256-line boundary.
+The renderer previously converted Y values `>= 192` to negative coordinates and
+then used a simple visible-line subtraction. That handled some negative-style
+placements but did not model the DS 256-line OBJ coordinate wrap directly.
+
+Fix:
+
+- OBJ source row selection now computes `(visible_line - obj_y) mod 256`.
+- A sprite draws on the visible line when that wrapped row is inside the
+  normal or affine/double-size OBJ box height.
+- This preserves ordinary in-bounds OBJs while allowing DS-style top wrapping
+  for boxes crossing the 256-line boundary.
+
+Focused coverage:
+
+- `test_obj_row_in_box_wraps_across_256_line_boundary` verifies bottom and top
+  row selection for a large wrapped OBJ box.
+- `test_obj_y_wrap_draws_top_screen_portion` verifies the renderer samples the
+  wrapped top-screen source row for an OBJ starting at Y=252.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core gpu2d --release
+```
+
+Result:
+
+- After OBJ vertical-wrap coverage: `19` GPU2D-focused tests passed.
+
+### Follow-up: OBJ mosaic
+
+The OBJ renderer parsed attr0 bit 12 but ignored it. DS/GBA OBJ mosaic uses
+the OBJ horizontal and vertical sizes in the `MOSAIC` register to reuse the
+source pixel at the top-left of each mosaic cell. Ignoring this can make sprite
+effects too sharp or misaligned when games use OBJ mosaic for transitions,
+shadows, or visual effects.
+
+Fix:
+
+- Regular OBJs now snap source `x` and `y` coordinates to the current OBJ
+  mosaic cell when attr0 mosaic is enabled.
+- Affine OBJs now snap the box-space sample coordinate before applying the
+  affine matrix.
+- Non-mosaic OBJs keep the previous sampling path.
+
+Focused coverage:
+
+- `test_obj_mosaic_reuses_left_cell_pixel` verifies horizontal OBJ mosaic.
+- `test_obj_mosaic_reuses_top_cell_row` verifies vertical OBJ mosaic.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core gpu2d --release
+```
+
+Result:
+
+- After OBJ mosaic coverage: `21` GPU2D-focused tests passed.
+
+### Follow-up: forced first-target effects for semi-transparent and bitmap OBJs
+
+GBATEK notes that semi-transparent OBJs are always selected as a first target,
+regardless of `BLDCNT` bit 4, and always use alpha blending when they overlap a
+valid second target. The previous compositor handled the overlap case, but when
+there was no second target it fell back to the normal first-target check. That
+meant brightness-up/down effects could be skipped for semi-transparent OBJ
+pixels unless the game also set `BLDCNT`'s OBJ first-target bit.
+
+Bitmap OBJ mode uses direct-color pixels plus an OAM alpha coefficient in attr2
+bits 12-15. The compositor already used that coefficient for valid second
+targets. The same top-OBJ forced-first-target rule now also lets bitmap OBJ
+pixels receive brightness effects when they do not overlap a second target.
+
+Fix:
+
+- Semi-transparent OBJ pixels still alpha-blend over a selected second target
+  before brightness is considered.
+- Bitmap OBJ pixels still use their OAM alpha coefficient over a selected
+  second target.
+- If no valid second target is present, semi-transparent and bitmap OBJ pixels
+  are treated as forced first targets for `BLDCNT` brightness effects.
+- Normal OBJ/BG first-target behavior is unchanged.
+
+Focused coverage:
+
+- `test_semitransparent_obj_brightness_is_forced_first_target_without_bldcnt_obj_bit`
+  verifies semi-transparent OBJ brightness even when `BLDCNT` bit 4 is clear.
+- `test_bitmap_obj_brightness_is_forced_first_target_without_second_target`
+  verifies the same no-second-target brightness path for bitmap OBJs.
+- `test_bitmap_obj_uses_oam_alpha_over_second_target` verifies the existing
+  bitmap-alpha blend path still takes priority when a second target exists.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core obj_brightness --release
+cargo test -p nds-core bitmap_obj_uses_oam_alpha --release
+cargo test -p nds-core gpu2d --release
+cargo test -p nds-core gpu3d --release
+```
+
+Result:
+
+- OBJ brightness focused tests: `2` passed.
+- Bitmap OBJ alpha focused test: `1` passed.
+- GPU2D focused tests: `23` passed.
+- GPU3D focused tests: `322` passed.
+
+### Follow-up: window color-effects gate blocks forced OBJ blending
+
+GBATEK's window feature lets each window region independently enable BG/OBJ
+layers and color special effects. Semi-transparent OBJ and bitmap OBJ alpha are
+special-effect paths, so they must not bypass a window region whose effects bit
+is clear.
+
+The previous compositor still allowed semi-transparent OBJ alpha blending and
+bitmap OBJ alpha blending in the `effects_enable = false` branch. That could
+make windowed UI or room overlays blend when the game intended those pixels to
+draw as normal top OBJ color.
+
+Fix:
+
+- When the active window region disables color effects, the compositor now
+  returns the top pixel color directly.
+- Forced first-target handling for semi-transparent and bitmap OBJs remains
+  active only when the active window region enables effects.
+
+Focused coverage:
+
+- `test_window_effects_disable_blocks_semitransparent_obj_blend` verifies that
+  a semi-transparent OBJ over a selected second target does not blend inside a
+  window with effects disabled.
+- `test_window_effects_disable_blocks_bitmap_obj_alpha_blend` verifies the
+  same gate for bitmap OBJ OAM-alpha blending.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core window_effects_disable --release
+cargo test -p nds-core obj_brightness --release
+cargo test -p nds-core gpu2d --release
+cargo test -p nds-core gpu3d --release
+```
+
+Result:
+
+- Window effects focused tests: `2` passed.
+- OBJ brightness focused tests: `2` passed.
+- GPU2D focused tests: `25` passed.
+- GPU3D focused tests: `322` passed.
+
+### Follow-up: 8bpp OBJ 2D mapping ignores the base tile low bit
+
+Latest screenshots inspected:
+
+```text
+Screenshot 2026-06-07 at 12.52.50 AM.png
+Screenshot 2026-06-07 at 12.53.38 AM.png
+```
+
+Observed behavior:
+
+- The corruption is still on the bottom 2D scene, not the top 3D scene.
+- The artifact is black, horizontally striped, and sprite-shaped near the
+  player/stairs/furniture area.
+- That shape is consistent with OBJ tile data being read half a tile out of
+  phase, rather than a 3D polygon raster failure.
+
+GBATEK notes that in 256-color OBJ mode only every second tile may be used; in
+2D mapping mode the low bit of the tile number is ignored. The previous OBJ
+renderer used the raw OAM tile number in 2D 8bpp mode:
+
+```text
+addr = tile_num * 32 + tile_offset * 64
+```
+
+For an odd tile number, that starts the sprite at byte `+32`, the middle of an
+8bpp 8x8 tile. That can turn transparent or unrelated tile bytes into visible
+black garbage rows.
+
+Fix:
+
+- In 2D OBJ mapping with 256-color/8bpp OBJs, mask `tile_num & !1` before
+  calculating the base tile address.
+- Leave 1D mapping unchanged; GBATEK says odd tile numbers should not be used
+  there, while 2D mapping explicitly ignores the low bit.
+
+Focused coverage:
+
+- `test_8bpp_2d_mapping_ignores_base_tile_low_bit` sets an odd tile base and
+  proves the renderer samples byte `0` from the even-aligned 8bpp tile, not byte
+  `32` from the old half-tile offset.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core 8bpp_2d_mapping --release
+cargo test -p nds-core gpu2d::obj --release
+cargo test -p nds-core gpu2d --release
+cargo test -p nds-core gpu3d --release
+```
+
+Result:
+
+- 8bpp OBJ mapping focused test: `1` passed.
+- OBJ focused tests: `11` passed.
+- GPU2D focused tests: `26` passed.
+- GPU3D focused tests: `322` passed.
+
+### Follow-up: edge-marking must find a real edge to preserve opaque zero-dot AA
+
+Status: **Tightened the anti-aliasing plus edge-marking zero-dot quirk**
+
+GBATEK notes that anti-aliasing is accidentally applied to opaque 1-dot
+polygons, line segments, and wireframes, making opaque 1-dot polygons disappear.
+It also notes the edge-marking workaround only works when those primitives are
+actually edge-marked, meaning their polygon ID differs from the framebuffer or
+rear-plane ID at the pixel.
+
+The previous AA pass kept opaque zero-dot pixels visible whenever global edge
+marking was enabled. That was too broad: if the zero-dot polygon had the same
+polygon ID as the rear plane, edge marking found no exposed edge, but the pixel
+still survived the AA pass. This could leave small speckles in scenes that rely
+on matching polygon IDs to suppress edge treatment.
+
+Fix:
+
+- Keep the existing behavior for globally-disabled edge marking: opaque
+  zero-dot pixels are hidden by the AA quirk.
+- When edge marking is enabled, preserve the zero-dot only if AA finds an
+  exposed cross-edge neighbor.
+- If no such edge exists, clear the pixel alpha bit and alpha buffer just like
+  the non-edge-marked zero-dot path.
+
+Focused coverage:
+
+- `test_antialias_hides_zero_dot_when_edge_marking_finds_no_edge` renders an
+  opaque zero-dot polygon whose ID matches the rear-plane ID with both AA and
+  edge marking enabled, and verifies the pixel is hidden.
+- Existing zero-dot coverage still verifies the opposite cases: a genuinely
+  edge-marked zero-dot remains visible, and a translucent zero-dot remains
+  visible because the opaque-AA quirk does not apply.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core test_antialias_hides_zero_dot_when_edge_marking_finds_no_edge --release
+cargo test -p nds-core antialias --release
+cargo test -p nds-core gpu3d --release
+```
+
+Result:
+
+- Zero-dot edge-mark regression test: `1` passed.
+- Anti-alias focused tests: `22` passed.
+- GPU3D focused tests: `323` passed.
+
+### Follow-up: translucent fog depth follows the depth-update bit
+
+Status: **Added focused fog/depth conformance coverage**
+
+GBATEK says fog depth follows the value stored in the framebuffer depth buffer,
+and for translucent polygons that value depends on `POLYGON_ATTR.Bit11`: when
+the bit is clear the old depth remains, and when set the translucent fragment
+writes its own depth. That means a translucent overlay can blend with the same
+RGB color but fog differently depending on whether it updates depth.
+
+The implementation already matched this behavior, but it was only indirectly
+covered by separate depth-update and fog tests. This left a visual-conformance
+regression risk for foggy translucent overlays: a future refactor could make
+the color blend look right while applying fog from the wrong layer depth.
+
+Focused coverage:
+
+- `test_translucent_fog_depth_follows_depth_update_bit` draws a far,
+  fog-enabled opaque base and a near, fog-enabled translucent overlay.
+- With translucent depth update disabled, fog uses the far base depth and
+  darkens the final pixel.
+- With translucent depth update enabled, fog uses the near translucent depth
+  and leaves the blended red pixel bright.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core test_translucent_fog_depth_follows_depth_update_bit --release
+```
+
+Result:
+
+- Translucent fog/depth focused test: `1` passed.
+
+### Follow-up: edge marking uses the current post-translucent depth buffer
+
+Status: **Added focused edge-marking/depth conformance coverage**
+
+GBATEK notes that edge marking is applied after opaque and translucent polygons
+have been rendered. That means a translucent polygon that updates depth can
+change the depth values later used by the edge-marking post-pass. GBATEK calls
+this a source of edge-marking problems, but the hardware-visible invariant is
+clear: edge marking compares against the current depth buffer, not a saved
+opaque-only depth snapshot.
+
+The implementation already used the current depth buffer. The risk was that
+future cleanup could make edge marking use stale opaque depth while preserving
+the existing edge flag through a translucent overlay.
+
+Focused coverage:
+
+- `test_edge_marking_uses_current_depth_after_translucent_depth_update` seeds a
+  flagged opaque edge beside a different-ID neighbor.
+- With the old farther center depth, edge marking rejects the edge because the
+  center is behind the neighbor.
+- With a nearer center depth, modeling a depth-updating translucent overlay,
+  the same flagged edge is marked with `EDGE_COLOR`.
+
+Targeted verification:
+
+```sh
+cargo test -p nds-core test_edge_marking_uses_current_depth_after_translucent_depth_update --release
+```
+
+Result:
+
+- Edge-marking current-depth focused test: `1` passed.

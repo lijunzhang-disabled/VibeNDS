@@ -320,18 +320,55 @@ impl<'a> CpuBus for Bus7<'a> {
     fn write32(&mut self, addr: u32, val: u32) {
         if addr >> 24 == 0x04 {
             let effect = super::io_arm7::write_io32(self.shared, addr, val);
-            if let super::io_arm7::Write32Effect::RunDma7(ch) = effect {
-                let irq = self.run_dma(ch);
-                if irq {
-                    use crate::interrupt::Irq;
-                    let irq_bit = match ch {
-                        0 => Irq::Dma0,
-                        1 => Irq::Dma1,
-                        2 => Irq::Dma2,
-                        _ => Irq::Dma3,
-                    };
-                    self.shared.irq7.request(irq_bit);
+            match effect {
+                super::io_arm7::Write32Effect::RunDma7(ch) => {
+                    let irq = self.run_dma(ch);
+                    if irq {
+                        use crate::interrupt::Irq;
+                        let irq_bit = match ch {
+                            0 => Irq::Dma0,
+                            1 => Irq::Dma1,
+                            2 => Irq::Dma2,
+                            _ => Irq::Dma3,
+                        };
+                        self.shared.irq7.request(irq_bit);
+                    }
                 }
+                super::io_arm7::Write32Effect::FireSlot1Dma => {
+                    let channels = self
+                        .shared
+                        .dma7
+                        .channels_for_timing(crate::dma::DmaTiming::Slot1);
+                    for ch in channels {
+                        while self.shared.dma7.channels[ch].active
+                            && self.shared.dma7.timing(ch) == crate::dma::DmaTiming::Slot1
+                            && !self.shared.slot1_data.is_empty()
+                        {
+                            let before = self.shared.slot1_data.len();
+                            let irq = self.run_dma(ch);
+                            if irq {
+                                use crate::interrupt::Irq;
+                                let irq_bit = match ch {
+                                    0 => Irq::Dma0,
+                                    1 => Irq::Dma1,
+                                    2 => Irq::Dma2,
+                                    _ => Irq::Dma3,
+                                };
+                                self.shared.irq7.request(irq_bit);
+                            }
+                            if self.shared.slot1_data.len() >= before {
+                                break;
+                            }
+                        }
+                        if self.shared.slot1_data.is_empty()
+                            && self.shared.dma7.timing(ch) == crate::dma::DmaTiming::Slot1
+                        {
+                            self.shared.dma7.channels[ch].active = false;
+                            self.shared.dma7.channels[ch].control &= !(1 << 31);
+                        }
+                    }
+                }
+                super::io_arm7::Write32Effect::None => {}
             }
             return;
         }

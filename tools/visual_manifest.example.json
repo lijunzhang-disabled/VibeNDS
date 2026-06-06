@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "name": "heartgold-title-sequence",
+      "actual": "/tmp/nds-current/heartgold-title",
+      "reference": "/tmp/nds-reference/heartgold-title",
+      "pixel_threshold": 0,
+      "max_changed_pixels": 0,
+      "max_channel_delta": 0,
+      "write_diff": "/tmp/nds-diff/heartgold-title"
+    },
+    {
+      "name": "single-frame-smoke",
+      "actual": "/tmp/nds-current/frame.ppm",
+      "reference": "/tmp/nds-reference/frame.ppm",
+      "pixel_threshold": 1,
+      "max_changed_pixels": 32,
+      "max_channel_delta": 2,
+      "write_diff": "/tmp/nds-diff/frame.ppm"
+    }
+  ]
+}

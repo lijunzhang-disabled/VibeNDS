@@ -366,7 +366,7 @@ fn update_gxfifo_irq(shared: &mut SharedState) {
     }
 }
 
-fn slot1_romctrl_status(shared: &SharedState) -> u32 {
+pub(super) fn slot1_romctrl_status(shared: &SharedState) -> u32 {
     let mut v = shared.slot1_romctrl & !((1 << 31) | (1 << 23));
     if !shared.slot1_data.is_empty() {
         v |= (1 << 31) | (1 << 23);
@@ -374,7 +374,7 @@ fn slot1_romctrl_status(shared: &SharedState) -> u32 {
     v
 }
 
-fn slot1_romctrl_status_mut(shared: &mut SharedState) -> u32 {
+pub(super) fn slot1_romctrl_status_mut(shared: &mut SharedState) -> u32 {
     if !shared.slot1_data.is_empty() && shared.slot1_romctrl & (1 << 31) != 0 {
         shared.slot1_busy_polls = shared.slot1_busy_polls.saturating_add(1);
         if shared.slot1_busy_polls >= 8 {
@@ -386,7 +386,7 @@ fn slot1_romctrl_status_mut(shared: &mut SharedState) -> u32 {
     slot1_romctrl_status(shared)
 }
 
-fn read_slot1_data(shared: &mut SharedState) -> u32 {
+pub(super) fn read_slot1_data(shared: &mut SharedState) -> u32 {
     let v = shared.slot1_data.pop_front().unwrap_or(0xFFFF_FFFF);
     shared.slot1_busy_polls = 0;
     if shared.slot1_data.is_empty() {
@@ -395,7 +395,7 @@ fn read_slot1_data(shared: &mut SharedState) -> u32 {
     v
 }
 
-fn start_slot1_transfer(shared: &mut SharedState, val: u32) {
+pub(super) fn start_slot1_transfer(shared: &mut SharedState, val: u32, irq_to_arm7: bool) {
     shared.slot1_romctrl = val;
     shared.slot1_data.clear();
     shared.slot1_busy_polls = 0;
@@ -423,7 +423,11 @@ fn start_slot1_transfer(shared: &mut SharedState, val: u32) {
     if !shared.slot1_data.is_empty() {
         shared.slot1_romctrl |= (1 << 31) | (1 << 23);
         if val & (1 << 14) != 0 {
-            shared.irq9.request(Irq::Slot1Data);
+            if irq_to_arm7 {
+                shared.irq7.request(Irq::Slot1Data);
+            } else {
+                shared.irq9.request(Irq::Slot1Data);
+            }
         }
     } else {
         shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
@@ -483,7 +487,8 @@ fn write_fifocnt(shared: &mut SharedState, val: u16) {
 
 pub fn write_io8(shared: &mut SharedState, addr: u32, val: u8) {
     use crate::vram::BankId;
-    match addr & 0x00FF_FFFF {
+    let local = addr & 0x00FF_FFFF;
+    match local {
         0x0240 => shared.vram.write_cnt(BankId::A, val),
         0x0241 => shared.vram.write_cnt(BankId::B, val),
         0x0242 => shared.vram.write_cnt(BankId::C, val),
@@ -496,6 +501,64 @@ pub fn write_io8(shared: &mut SharedState, addr: u32, val: u8) {
         0x0249 => shared.vram.write_cnt(BankId::I, val),
         0x01A8..=0x01AF => {
             shared.slot1_command[(addr as usize) & 7] = val;
+        }
+        0x0330..=0x033F => {
+            let idx = ((local - 0x0330) / 2) as usize;
+            let entry = &mut shared.gpu3d.rasterizer.edge_color[idx];
+            if local & 1 == 0 {
+                *entry = (*entry & 0x7F00) | val as u16;
+            } else {
+                *entry = (*entry & 0x00FF) | (((val & 0x7F) as u16) << 8);
+            }
+        }
+        0x0340 => shared.gpu3d.rasterizer.alpha_test_ref = val & 0x1F,
+        0x0341 => {}
+        0x0350..=0x0353 => {
+            let shift = (local - 0x0350) * 8;
+            let mask = !(0xFFu32 << shift);
+            shared.gpu3d.rasterizer.clear_color =
+                (shared.gpu3d.rasterizer.clear_color & mask) | ((val as u32) << shift);
+            shared.gpu3d.rasterizer.clear_color &= 0x3F1F_FFFF;
+        }
+        0x0354..=0x0355 => {
+            let shift = ((local - 0x0354) * 8) as u16;
+            let mask = !(0xFFu16 << shift);
+            shared.gpu3d.rasterizer.clear_depth =
+                (shared.gpu3d.rasterizer.clear_depth & mask) | ((val as u16) << shift);
+            shared.gpu3d.rasterizer.clear_depth &= 0x7FFF;
+        }
+        0x0356..=0x0357 => {
+            let shift = ((local - 0x0356) * 8) as u16;
+            let mask = !(0xFFu16 << shift);
+            shared.gpu3d.rasterizer.clear_image_offset =
+                (shared.gpu3d.rasterizer.clear_image_offset & mask) | ((val as u16) << shift);
+        }
+        0x0358..=0x035B => {
+            let shift = (local - 0x0358) * 8;
+            let mask = !(0xFFu32 << shift);
+            shared.gpu3d.rasterizer.fog_color =
+                (shared.gpu3d.rasterizer.fog_color & mask) | ((val as u32) << shift);
+            shared.gpu3d.rasterizer.fog_color &= 0x001F_7FFF;
+        }
+        0x035C..=0x035D => {
+            let shift = ((local - 0x035C) * 8) as u16;
+            let mask = !(0xFFu16 << shift);
+            shared.gpu3d.rasterizer.fog_offset =
+                (shared.gpu3d.rasterizer.fog_offset & mask) | ((val as u16) << shift);
+            shared.gpu3d.rasterizer.fog_offset &= 0x7FFF;
+        }
+        0x0360..=0x037F => {
+            let idx = (local - 0x0360) as usize;
+            shared.gpu3d.rasterizer.fog_table[idx] = val & 0x7F;
+        }
+        0x0380..=0x03BF => {
+            let idx = ((local - 0x0380) / 2) as usize;
+            let entry = &mut shared.gpu3d.rasterizer.toon_table[idx];
+            if local & 1 == 0 {
+                *entry = (*entry & 0x7F00) | val as u16;
+            } else {
+                *entry = (*entry & 0x00FF) | (((val & 0x7F) as u16) << 8);
+            }
         }
         _ => {
             // 8-bit write of an unrecognized register: read-modify-write the
@@ -560,7 +623,7 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         }
         0x01A6 => {
             let new = (shared.slot1_romctrl & 0x0000_FFFF) | ((val as u32) << 16);
-            start_slot1_transfer(shared, new);
+            start_slot1_transfer(shared, new, false);
         }
         0x0180 => write_sync(shared, val),
         0x0184 => write_fifocnt(shared, val),
@@ -593,29 +656,31 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0340 => shared.gpu3d.rasterizer.alpha_test_ref = (val & 0x1F) as u8,
         0x0350 => {
             shared.gpu3d.rasterizer.clear_color =
-                (shared.gpu3d.rasterizer.clear_color & 0xFFFF_0000) | val as u32
+                ((shared.gpu3d.rasterizer.clear_color & 0xFFFF_0000) | val as u32) & 0x3F1F_FFFF
         }
         0x0352 => {
             shared.gpu3d.rasterizer.clear_color =
-                (shared.gpu3d.rasterizer.clear_color & 0x0000_FFFF) | ((val as u32) << 16)
+                ((shared.gpu3d.rasterizer.clear_color & 0x0000_FFFF) | ((val as u32) << 16))
+                    & 0x3F1F_FFFF
         }
-        0x0354 => shared.gpu3d.rasterizer.clear_depth = val,
+        0x0354 => shared.gpu3d.rasterizer.clear_depth = val & 0x7FFF,
         0x0356 => shared.gpu3d.rasterizer.clear_image_offset = val,
         0x0358 => {
             shared.gpu3d.rasterizer.fog_color =
-                (shared.gpu3d.rasterizer.fog_color & 0xFFFF_0000) | (val as u32)
+                ((shared.gpu3d.rasterizer.fog_color & 0xFFFF_0000) | (val as u32)) & 0x001F_7FFF
         }
         0x035A => {
-            shared.gpu3d.rasterizer.fog_color =
-                (shared.gpu3d.rasterizer.fog_color & 0x0000_FFFF) | ((val as u32) << 16)
+            shared.gpu3d.rasterizer.fog_color = ((shared.gpu3d.rasterizer.fog_color & 0x0000_FFFF)
+                | ((val as u32) << 16))
+                & 0x001F_7FFF
         }
-        0x035C => shared.gpu3d.rasterizer.fog_offset = val,
+        0x035C => shared.gpu3d.rasterizer.fog_offset = val & 0x7FFF,
         0x0360..=0x037F => {
             // 32-byte FOG_TABLE — one byte per entry, packed in u16 writes.
             let base = (local - 0x0360) as usize;
             if base + 1 < 32 {
-                shared.gpu3d.rasterizer.fog_table[base] = val as u8;
-                shared.gpu3d.rasterizer.fog_table[base + 1] = (val >> 8) as u8;
+                shared.gpu3d.rasterizer.fog_table[base] = (val as u8) & 0x7F;
+                shared.gpu3d.rasterizer.fog_table[base + 1] = ((val >> 8) as u8) & 0x7F;
             }
         }
         0x0380..=0x03BF => {
@@ -707,7 +772,7 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
             Write32Effect::None
         }
         0x01A4 => {
-            start_slot1_transfer(shared, val);
+            start_slot1_transfer(shared, val, false);
             Write32Effect::FireSlot1Dma
         }
         0x01A8 | 0x01AC => {

@@ -10,10 +10,9 @@ use sdl2::video::{Window, WindowContext};
 
 /// Default vertical gap between the two screens, measured in NDS pixels.
 ///
-/// A physical DS-style gap is roughly 90 native pixels, but that is bulky on a
-/// desktop monitor at 2x/3x scale. Keep the default tight and let callers opt
-/// into a larger bezel with `--screen-gap`.
-pub const DEFAULT_SCREEN_GAP: u32 = 8;
+/// Keep the default compact for debugging and captures. Callers can still opt
+/// into a DS-style bezel with `--screen-gap`.
+pub const DEFAULT_SCREEN_GAP: u32 = 0;
 
 fn expand_bgr555_to_rgb888(c: u16) -> (u8, u8, u8) {
     let expand = |v: u16| -> u8 {

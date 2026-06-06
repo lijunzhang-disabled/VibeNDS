@@ -8,3 +8,5 @@ test-roms/
 .DS_Store
 .claude/
 .antigravitycli/
+__pycache__/
+*.py[cod]

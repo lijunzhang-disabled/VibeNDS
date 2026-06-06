@@ -567,6 +567,37 @@ mod tests {
     }
 
     #[test]
+    fn test_texcoord_transform_mode_0_ignores_texture_matrix() {
+        let mut v = VertexState::new();
+        let mut s = ident_stacks();
+        s.set_mode(MtxMode::Texture);
+        s.load(Matrix::identity().mul_translate(4 * ONE, -2 * ONE, 0));
+
+        v.set_tex_image_param(0);
+        v.set_texcoord(0x0020_0010u32, &s);
+
+        assert_eq!(v.current_tex, [0x10, 0x20]);
+    }
+
+    #[test]
+    fn test_texcoord_transform_mode_1_uses_one_sixteenth_matrix_terms() {
+        let mut v = VertexState::new();
+        let mut s = ident_stacks();
+        let mut m = Matrix::identity();
+        // GBATEK mode 1 uses (S, T, 1/16, 1/16) times the left two matrix
+        // columns, so m[8]/m[9] contribute one texcoord unit when set to 1.0.
+        m.m[8] = ONE;
+        m.m[9] = -2 * ONE;
+        s.set_mode(MtxMode::Texture);
+        s.load(m);
+
+        v.set_tex_image_param(1 << 30);
+        v.set_texcoord(0x0020_0010u32, &s);
+
+        assert_eq!(v.current_tex, [0x11, 0x1E]);
+    }
+
+    #[test]
     fn test_texcoord_transform_mode_2_uses_normal_source() {
         let mut v = VertexState::new();
         let mut s = ident_stacks();

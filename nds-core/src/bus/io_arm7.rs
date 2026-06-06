@@ -54,6 +54,8 @@ pub fn read_io16(shared: &SharedState, addr: u32) -> u16 {
         0x0184 => shared.ipc.read_fifocnt(Side::Arm7),
         0x01A0 => shared.auxspi.read_cnt(),
         0x01A2 => shared.auxspi.read_data() as u16,
+        0x01A4 => shared.slot1_romctrl as u16,
+        0x01A6 => (super::io_arm9::slot1_romctrl_status(shared) >> 16) as u16,
         0x01C0 => shared.spi.read_cnt(),
         0x01C2 => shared.spi.read_data() as u16,
         0x0204 => shared.exmemcnt,
@@ -100,6 +102,8 @@ pub fn read_io32_mut(shared: &mut SharedState, addr: u32) -> u32 {
             }
             val
         }
+        0x0010_0010..=0x0010_001C => super::io_arm9::read_slot1_data(shared),
+        0x01A4 => super::io_arm9::slot1_romctrl_status_mut(shared),
         _ => read_io32(shared, addr),
     }
 }
@@ -119,6 +123,7 @@ fn decode_dma_reg(local: u32) -> Option<(usize, u32)> {
 pub enum Write32Effect {
     None,
     RunDma7(usize),
+    FireSlot1Dma,
 }
 
 fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Write32Effect {
@@ -140,6 +145,11 @@ fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Wr
             let effect = shared.dma7.write_control(ch, val);
             match effect {
                 WriteControlEffect::RunNow => Write32Effect::RunDma7(ch),
+                WriteControlEffect::Armed(crate::dma::DmaTiming::Slot1)
+                    if !shared.slot1_data.is_empty() =>
+                {
+                    Write32Effect::FireSlot1Dma
+                }
                 _ => Write32Effect::None,
             }
         }
@@ -217,12 +227,17 @@ fn write_audio_channel_u16(shared: &mut SharedState, ch: usize, reg: u32, val: u
 }
 
 pub fn write_io8(shared: &mut SharedState, addr: u32, val: u8) {
-    if (addr & 0x00FF_FFFF) == 0x0301 {
+    let local = addr & 0x00FF_FFFF;
+    if local == 0x0301 {
         // HALTCNT: bit 7 enters low-power halt until an enabled IRQ wakes ARM7.
         // Sleep/POSTFLG details are outside the current direct-boot scope.
         if val & 0x80 != 0 {
             shared.halt7_requested = true;
         }
+        return;
+    }
+    if (0x01A8..=0x01AF).contains(&local) {
+        shared.slot1_command[(addr as usize) & 7] = val;
         return;
     }
 
@@ -280,6 +295,13 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
                 shared.irq7.request(Irq::Slot1Data);
             }
         }
+        0x01A4 => {
+            shared.slot1_romctrl = (shared.slot1_romctrl & 0xFFFF_0000) | val as u32;
+        }
+        0x01A6 => {
+            let new = (shared.slot1_romctrl & 0x0000_FFFF) | ((val as u32) << 16);
+            super::io_arm9::start_slot1_transfer(shared, new, true);
+        }
         0x01C0 => shared.spi.write_cnt(val),
         0x01C2 => {
             if shared.spi.write_data(val as u8) {
@@ -318,6 +340,16 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
     match local {
         0x0188 => {
             write_fifosend(shared, val);
+            Write32Effect::None
+        }
+        0x01A4 => {
+            super::io_arm9::start_slot1_transfer(shared, val, true);
+            Write32Effect::FireSlot1Dma
+        }
+        0x01A8 | 0x01AC => {
+            for i in 0..4 {
+                shared.slot1_command[(local - 0x01A8) as usize + i] = (val >> (i * 8)) as u8;
+            }
             Write32Effect::None
         }
         0x0208 => {

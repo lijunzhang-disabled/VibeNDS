@@ -32,6 +32,8 @@ struct PixelCandidate {
     layer: u8,
     /// Semi-transparent OBJ marker — forces alpha blend regardless of BLDCNT.
     semi_transparent: bool,
+    /// NDS bitmap OBJ alpha from OAM attr2 bits 12-15.
+    bitmap_obj_alpha: Option<u8>,
     /// Per-pixel alpha supplied by the 3D renderer when it is mapped as BG0.
     alpha_3d: Option<u8>,
 }
@@ -76,6 +78,7 @@ pub fn compose_scanline(
                         priority: p.priority,
                         layer: p.bg_index,
                         semi_transparent: false,
+                        bitmap_obj_alpha: None,
                         alpha_3d: p.alpha_3d,
                     });
                     len += 1;
@@ -89,6 +92,7 @@ pub fn compose_scanline(
                     priority: o.priority,
                     layer: LAYER_OBJ,
                     semi_transparent: o.gfx_mode == 1,
+                    bitmap_obj_alpha: o.bitmap_alpha,
                     alpha_3d: None,
                 });
                 len += 1;
@@ -109,6 +113,7 @@ pub fn compose_scanline(
             priority: 4,
             layer: LAYER_BACKDROP,
             semi_transparent: false,
+            bitmap_obj_alpha: None,
             alpha_3d: None,
         };
         let (top, second) = match len {
@@ -119,9 +124,6 @@ pub fn compose_scanline(
 
         let final_color = if win.effects_enable {
             apply_blend(engine, top, second)
-        } else if top.semi_transparent && is_second_target(engine, second.layer) {
-            // Semi-transparent OBJ always blends with a valid 2nd target.
-            alpha_blend(top.color, second.color, engine.bldalpha)
         } else {
             top.color
         };
@@ -262,9 +264,15 @@ fn apply_blend(engine: &Engine2d, top: PixelCandidate, second: PixelCandidate) -
     if top.semi_transparent && is_second_target(engine, second.layer) {
         return alpha_blend(top.color, second.color, engine.bldalpha);
     }
+    if let Some(alpha) = top.bitmap_obj_alpha {
+        if is_second_target(engine, second.layer) {
+            return bitmap_obj_blend(engine, top.color, second, alpha);
+        }
+    }
 
     let mode = (engine.bldcnt >> 6) & 0x3;
-    if !is_first_target(engine, top.layer) {
+    let forced_obj_first_target = top.semi_transparent || top.bitmap_obj_alpha.is_some();
+    if !forced_obj_first_target && !is_first_target(engine, top.layer) {
         return top.color;
     }
     match mode {
@@ -278,6 +286,11 @@ fn apply_blend(engine: &Engine2d, top: PixelCandidate, second: PixelCandidate) -
         3 => brightness_decrease(top.color, engine.bldy),
         _ => top.color,
     }
+}
+
+fn bitmap_obj_blend(_engine: &Engine2d, top_color: u16, second: PixelCandidate, alpha: u8) -> u16 {
+    let eva = alpha.min(16);
+    alpha_blend_coeff(top_color, second.color, eva, 16 - eva)
 }
 
 fn alpha_blend_3d(top: u16, bot: u16, alpha: u8) -> u16 {
@@ -294,8 +307,14 @@ fn alpha_blend_3d(top: u16, bot: u16, alpha: u8) -> u16 {
 }
 
 fn alpha_blend(top: u16, bot: u16, bldalpha: u16) -> u16 {
-    let eva = (bldalpha & 0x1F).min(16) as u32;
-    let evb = ((bldalpha >> 8) & 0x1F).min(16) as u32;
+    let eva = (bldalpha & 0x1F).min(16) as u8;
+    let evb = ((bldalpha >> 8) & 0x1F).min(16) as u8;
+    alpha_blend_coeff(top, bot, eva, evb)
+}
+
+fn alpha_blend_coeff(top: u16, bot: u16, eva: u8, evb: u8) -> u16 {
+    let eva = eva as u32;
+    let evb = evb as u32;
     let blend_chan = |t: u32, b: u32| -> u16 { ((t * eva + b * evb) / 16).min(31) as u16 };
     let tr = (top & 0x1F) as u32;
     let tg = ((top >> 5) & 0x1F) as u32;
@@ -339,6 +358,206 @@ mod tests {
         let color = framebuffer[0];
         assert_eq!(color & 0x1F, 7);
         assert_eq!((color >> 10) & 0x1F, 23);
+    }
+
+    #[test]
+    fn test_3d_bg0_antialias_alpha_composes_over_2d_second_target() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.bldcnt = (1 << LAYER_BG0) | (1 << (LAYER_BG1 + 8)) | (1 << 6);
+        engine.bldalpha = 16;
+
+        let mut bg0 = [None; SCREEN_WIDTH];
+        let mut bg1 = [None; SCREEN_WIDTH];
+        // This models an AA edge pixel after transparent rear-plane exposure:
+        // the 3D color stays red, while the 3D alpha buffer carries coverage.
+        bg0[0] = Some(bg_pixel(0x001F, 0, LAYER_BG0, Some(8)));
+        bg1[0] = Some(bg_pixel(0x03E0, 1, LAYER_BG1, None));
+        let layers = [Some(bg0), Some(bg1), None, None];
+        let obj_line = ObjLine::default();
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        assert_eq!(framebuffer[0], alpha_blend_3d(0x001F, 0x03E0, 8));
+    }
+
+    #[test]
+    fn test_bitmap_obj_uses_oam_alpha_over_second_target() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.bldcnt = 1 << (LAYER_BG0 + 8);
+
+        let mut bg0 = [None; SCREEN_WIDTH];
+        bg0[0] = Some(bg_pixel(0x03E0, 1, LAYER_BG0, None));
+        let layers = [Some(bg0), None, None, None];
+        let mut obj_line = ObjLine::default();
+        obj_line.pixel[0] = Some(super::super::obj::ObjPixel {
+            color: 0x001F,
+            priority: 0,
+            oam_index: 0,
+            gfx_mode: 3,
+            bitmap_alpha: Some(7),
+        });
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        assert_eq!(framebuffer[0], alpha_blend_coeff(0x001F, 0x03E0, 7, 9));
+    }
+
+    #[test]
+    fn test_semitransparent_obj_brightness_is_forced_first_target_without_bldcnt_obj_bit() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.bldcnt = 2 << 6; // brightness increase, OBJ first-target bit clear.
+        engine.bldy = 8;
+
+        let layers = [None, None, None, None];
+        let mut obj_line = ObjLine::default();
+        obj_line.pixel[0] = Some(super::super::obj::ObjPixel {
+            color: 0x4210,
+            priority: 0,
+            oam_index: 0,
+            gfx_mode: 1,
+            bitmap_alpha: None,
+        });
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        assert_eq!(framebuffer[0], brightness_increase(0x4210, 8));
+    }
+
+    #[test]
+    fn test_bitmap_obj_brightness_is_forced_first_target_without_second_target() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.bldcnt = 3 << 6; // brightness decrease, OBJ first-target bit clear.
+        engine.bldy = 8;
+
+        let layers = [None, None, None, None];
+        let mut obj_line = ObjLine::default();
+        obj_line.pixel[0] = Some(super::super::obj::ObjPixel {
+            color: 0x4210,
+            priority: 0,
+            oam_index: 0,
+            gfx_mode: 3,
+            bitmap_alpha: Some(7),
+        });
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        assert_eq!(framebuffer[0], brightness_decrease(0x4210, 8));
+    }
+
+    #[test]
+    fn test_window_effects_disable_blocks_semitransparent_obj_blend() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.dispcnt = 1 << 13; // WIN0 enabled.
+        engine.win0h = 1; // x=0 only.
+        engine.win0v = 1; // y=0 only.
+        engine.winin = (1 << LAYER_BG0) | (1 << LAYER_OBJ); // effects bit clear.
+        engine.bldcnt = 1 << (LAYER_BG0 + 8);
+        engine.bldalpha = 8 | (8 << 8);
+
+        let mut bg0 = [None; SCREEN_WIDTH];
+        bg0[0] = Some(bg_pixel(0x03E0, 1, LAYER_BG0, None));
+        let layers = [Some(bg0), None, None, None];
+        let mut obj_line = ObjLine::default();
+        obj_line.pixel[0] = Some(super::super::obj::ObjPixel {
+            color: 0x001F,
+            priority: 0,
+            oam_index: 0,
+            gfx_mode: 1,
+            bitmap_alpha: None,
+        });
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        assert_eq!(framebuffer[0], 0x001F);
+    }
+
+    #[test]
+    fn test_window_effects_disable_blocks_bitmap_obj_alpha_blend() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.dispcnt = 1 << 13; // WIN0 enabled.
+        engine.win0h = 1; // x=0 only.
+        engine.win0v = 1; // y=0 only.
+        engine.winin = (1 << LAYER_BG0) | (1 << LAYER_OBJ); // effects bit clear.
+        engine.bldcnt = 1 << (LAYER_BG0 + 8);
+
+        let mut bg0 = [None; SCREEN_WIDTH];
+        bg0[0] = Some(bg_pixel(0x03E0, 1, LAYER_BG0, None));
+        let layers = [Some(bg0), None, None, None];
+        let mut obj_line = ObjLine::default();
+        obj_line.pixel[0] = Some(super::super::obj::ObjPixel {
+            color: 0x001F,
+            priority: 0,
+            oam_index: 0,
+            gfx_mode: 3,
+            bitmap_alpha: Some(7),
+        });
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        assert_eq!(framebuffer[0], 0x001F);
+    }
+
+    #[test]
+    fn test_3d_bg0_second_target_uses_bldalpha_not_3d_alpha() {
+        let mut engine = Engine2d::new(super::super::Which::A);
+        engine.bldcnt = (1 << LAYER_BG1) | (1 << (LAYER_BG0 + 8)) | (1 << 6);
+        engine.bldalpha = 8 | (8 << 8);
+
+        let mut bg0 = [None; SCREEN_WIDTH];
+        let mut bg1 = [None; SCREEN_WIDTH];
+        bg0[0] = Some(bg_pixel(0x7C00, 1, LAYER_BG0, Some(31)));
+        bg1[0] = Some(bg_pixel(0x001F, 0, LAYER_BG1, None));
+        let layers = [Some(bg0), Some(bg1), None, None];
+        let obj_line = ObjLine::default();
+        let palette = [0u8; 0x400];
+        let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+        compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+
+        let color = framebuffer[0];
+        assert_eq!(color & 0x1F, 15);
+        assert_eq!((color >> 10) & 0x1F, 15);
+    }
+
+    #[test]
+    fn test_3d_bg0_first_target_supports_brightness_effects() {
+        fn render_3d_bg0_with_effect(effect: u16) -> u16 {
+            let mut engine = Engine2d::new(super::super::Which::A);
+            engine.bldcnt = (1 << LAYER_BG0) | (effect << 6);
+            engine.bldy = 8;
+
+            let mut bg0 = [None; SCREEN_WIDTH];
+            bg0[0] = Some(bg_pixel(0x4210, 0, LAYER_BG0, Some(31)));
+            let layers = [Some(bg0), None, None, None];
+            let obj_line = ObjLine::default();
+            let palette = [0u8; 0x400];
+            let mut framebuffer = [0u16; SCREEN_WIDTH];
+
+            compose_scanline(&engine, 0, &palette, &layers, &obj_line, &mut framebuffer);
+            framebuffer[0]
+        }
+
+        let brighter = render_3d_bg0_with_effect(2);
+        assert_eq!(brighter & 0x1F, 23);
+        assert_eq!((brighter >> 5) & 0x1F, 23);
+        assert_eq!((brighter >> 10) & 0x1F, 23);
+
+        let darker = render_3d_bg0_with_effect(3);
+        assert_eq!(darker & 0x1F, 8);
+        assert_eq!((darker >> 5) & 0x1F, 8);
+        assert_eq!((darker >> 10) & 0x1F, 8);
     }
 }
 

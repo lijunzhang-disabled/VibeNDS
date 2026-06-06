@@ -293,6 +293,29 @@ mod tests {
     }
 
     #[test]
+    fn test_shininess_table_enabled_scales_specular_level() {
+        let mut plain = LightingState::new();
+        plain.set_spe_emi(0x7FFF);
+        plain.set_light_vector(light_vector_param(0, 0, 0, -512), &Matrix::identity());
+        plain.lights[0].color = 0x7FFF;
+
+        let mut tabled = plain.clone();
+        tabled.set_spe_emi((1 << 15) | 0x7FFF);
+        tabled.shininess_table.fill(0);
+
+        let normal = [0, 0, ONE];
+        let plain_color = compute_vertex_color(&plain, normal, &Matrix::identity(), 1);
+        let tabled_color = compute_vertex_color(&tabled, normal, &Matrix::identity(), 1);
+
+        assert_eq!(unpack_bgr555(plain_color), (31, 31, 31));
+        assert_eq!(
+            unpack_bgr555(tabled_color),
+            (0, 0, 0),
+            "enabled shininess table must replace the raw specular level"
+        );
+    }
+
+    #[test]
     fn test_disabled_lights_contribute_nothing() {
         let mut s = LightingState::new();
         // Bright white light pointed at +Z. Default material is black,
