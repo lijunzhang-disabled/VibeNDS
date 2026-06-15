@@ -4,6 +4,7 @@
 //! steps the core.
 
 mod audio;
+mod harness;
 mod video;
 
 use clap::Parser;
@@ -74,6 +75,18 @@ struct Args {
     /// Diagnostic: skip the 3D anti-alias post-pass.
     #[arg(long, hide = true)]
     debug_disable_3d_aa: bool,
+
+    /// Run EHP harness mode for emu-agent over stdin/stdout.
+    #[arg(long, hide = true)]
+    harness: bool,
+
+    /// Diagnostic: disable 2D OBJ rendering on both engines.
+    #[arg(long, hide = true)]
+    debug_disable_2d_obj: bool,
+
+    /// Diagnostic: disable one 2D BG layer on both engines. Repeatable, values 0-3.
+    #[arg(long, hide = true, value_name = "N")]
+    debug_disable_2d_bg: Vec<u8>,
 }
 
 fn save_state_path(rom: Option<&Path>) -> Option<PathBuf> {
@@ -325,6 +338,14 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
 
+    if args.harness {
+        if let Err(e) = harness::run() {
+            eprintln!("harness error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let bios9 = read_optional(args.bios_arm9);
     let bios7 = read_optional(args.bios_arm7);
 
@@ -408,6 +429,12 @@ fn main() {
     }
 
     nds.shared.gpu3d.rasterizer.debug_disable_antialiasing = args.debug_disable_3d_aa;
+    nds.debug_disable_2d_obj = args.debug_disable_2d_obj;
+    for bg in args.debug_disable_2d_bg {
+        if bg < 4 {
+            nds.debug_disable_2d_bg[bg as usize] = true;
+        }
+    }
 
     if args.capture_ppm.is_some() || args.capture_dir.is_some() {
         if let Some(dir) = &args.capture_dir {

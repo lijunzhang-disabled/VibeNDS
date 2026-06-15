@@ -59,6 +59,11 @@ pub struct Nds {
     /// True when the loaded ROM is being run via direct boot (no real BIOS).
     /// Drives whether SWIs go through HLE or jump to the BIOS vector.
     pub direct_boot: bool,
+
+    #[serde(default)]
+    pub debug_disable_2d_obj: bool,
+    #[serde(default)]
+    pub debug_disable_2d_bg: [bool; 4],
 }
 
 impl Nds {
@@ -74,6 +79,8 @@ impl Nds {
             framebuffer_top: vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT],
             framebuffer_bot: vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT],
             direct_boot: false,
+            debug_disable_2d_obj: false,
+            debug_disable_2d_bg: [false; 4],
         };
         nds.schedule_initial_events();
         nds
@@ -536,6 +543,12 @@ impl Nds {
                         } else {
                             &mut self.framebuffer_bot
                         };
+                        let saved_dispcnt = self.shared.engine_a.dispcnt;
+                        self.shared.engine_a.dispcnt = apply_2d_debug_disable(
+                            saved_dispcnt,
+                            self.debug_disable_2d_obj,
+                            self.debug_disable_2d_bg,
+                        );
                         gpu2d::render_scanline(
                             &mut self.shared.engine_a,
                             line,
@@ -547,6 +560,7 @@ impl Nds {
                             Some(alpha_3d),
                             Some(&mut self.shared.disp_mmem_fifo),
                         );
+                        self.shared.engine_a.dispcnt = saved_dispcnt;
                     }
                     let engine_a_framebuffer = if top_engine_a {
                         &self.framebuffer_top
@@ -563,6 +577,12 @@ impl Nds {
                         } else {
                             &mut self.framebuffer_bot
                         };
+                        let saved_dispcnt = self.shared.engine_b.dispcnt;
+                        self.shared.engine_b.dispcnt = apply_2d_debug_disable(
+                            saved_dispcnt,
+                            self.debug_disable_2d_obj,
+                            self.debug_disable_2d_bg,
+                        );
                         gpu2d::render_scanline(
                             &mut self.shared.engine_b,
                             line,
@@ -574,6 +594,7 @@ impl Nds {
                             None,
                             None,
                         );
+                        self.shared.engine_b.dispcnt = saved_dispcnt;
                     }
                 }
 
@@ -647,6 +668,18 @@ impl Nds {
             }
         }
     }
+}
+
+fn apply_2d_debug_disable(mut dispcnt: u32, disable_obj: bool, disable_bg: [bool; 4]) -> u32 {
+    if disable_obj {
+        dispcnt &= !(1 << 12);
+    }
+    for (bg, disabled) in disable_bg.iter().enumerate() {
+        if *disabled {
+            dispcnt &= !(1 << (8 + bg));
+        }
+    }
+    dispcnt
 }
 
 fn capture_display_scanline(shared: &mut SharedState, line: u16, engine_a_framebuffer: &[u16]) {

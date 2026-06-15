@@ -331,16 +331,16 @@ fn emit_obj_pixel(
     let _ = h;
 
     let bytes_per_tile: u32 = if bpp_8 { 64 } else { 32 };
-    // 1D mapping uses (boundary)-byte stride per "tile_num" unit; 2D mapping
-    // uses 32-byte stride. The "tile_num" in OAM is in units of the engine's
-    // boundary.
+    // 1D mapping uses DISPCNT's boundary as the byte stride for each OBJ
+    // tile-number unit. 2D mapping keeps the GBA-style 32-byte character grid.
     let base_tile_num = if !one_d_mapping && bpp_8 {
         tile_num & !1
     } else {
         tile_num
     };
     let tile_byte_offset = if one_d_mapping {
-        base_tile_num * boundary + tile_offset_in_chars * bytes_per_tile
+        let tile_num_stride = if bpp_8 && boundary == 32 { 2 } else { 1 };
+        (base_tile_num + tile_offset_in_chars * tile_num_stride) * boundary
     } else {
         base_tile_num * 32 + tile_offset_in_chars * bytes_per_tile
     };
@@ -549,6 +549,84 @@ mod tests {
         render_objs(&engine, 0, &palette, &oam, &vram, &mut out);
 
         assert_eq!(out.pixel[0].expect("8bpp obj pixel").color, red);
+    }
+
+    #[test]
+    fn test_4bpp_1d_mapping_advances_tiles_by_boundary() {
+        let mut engine = Engine2d::new(Which::B);
+        engine.dispcnt = (1 << 12) | (1 << 4) | (1 << 20); // OBJ enabled, 1D, 64-byte boundary.
+        let mut vram = VramRouter::new();
+        vram.write_cnt(BankId::D, 0x80 | 4);
+
+        vram.banks[BankId::D as usize].data[0] = 0x11;
+        vram.banks[BankId::D as usize].data[32] = 0x22;
+        vram.banks[BankId::D as usize].data[64] = 0x33;
+
+        let red = 0x001F_u16;
+        let green = 0x03E0_u16;
+        let blue = 0x7C00_u16;
+        let mut palette = [0u8; 0x400];
+        palette[0x200 + 2..0x200 + 4].copy_from_slice(&red.to_le_bytes());
+        palette[0x200 + 4..0x200 + 6].copy_from_slice(&green.to_le_bytes());
+        palette[0x200 + 6..0x200 + 8].copy_from_slice(&blue.to_le_bytes());
+
+        let mut oam = [0u8; 0x400];
+        let attr1 = 1u16 << 14; // 16x16 square.
+        oam[2..4].copy_from_slice(&attr1.to_le_bytes());
+        for sprite in 1..128 {
+            let off = sprite * 8;
+            oam[off..off + 2].copy_from_slice(&(1u16 << 9).to_le_bytes());
+        }
+
+        let mut out = ObjLine::default();
+        render_objs(&engine, 0, &palette, &oam, &vram, &mut out);
+
+        assert_eq!(out.pixel[0].expect("first tile").color, red);
+        assert_eq!(
+            out.pixel[8].expect("second tile").color,
+            blue,
+            "with a 64-byte OBJ boundary, tile x=1 must read tile number 1 at byte 64, not byte 32"
+        );
+    }
+
+    #[test]
+    fn test_8bpp_1d_32_byte_boundary_advances_by_two_tile_numbers() {
+        let mut engine = Engine2d::new(Which::B);
+        engine.dispcnt = (1 << 12) | (1 << 4); // OBJ enabled, 1D, 32-byte boundary.
+        let mut vram = VramRouter::new();
+        vram.write_cnt(BankId::D, 0x80 | 4);
+
+        vram.banks[BankId::D as usize].data[0] = 1;
+        vram.banks[BankId::D as usize].data[32] = 2;
+        vram.banks[BankId::D as usize].data[64] = 3;
+
+        let red = 0x001F_u16;
+        let green = 0x03E0_u16;
+        let blue = 0x7C00_u16;
+        let mut palette = [0u8; 0x400];
+        palette[0x200 + 2..0x200 + 4].copy_from_slice(&red.to_le_bytes());
+        palette[0x200 + 4..0x200 + 6].copy_from_slice(&green.to_le_bytes());
+        palette[0x200 + 6..0x200 + 8].copy_from_slice(&blue.to_le_bytes());
+
+        let mut oam = [0u8; 0x400];
+        let attr0 = 1u16 << 13; // 256-color OBJ.
+        let attr1 = 1u16 << 14; // 16x16 square.
+        oam[0..2].copy_from_slice(&attr0.to_le_bytes());
+        oam[2..4].copy_from_slice(&attr1.to_le_bytes());
+        for sprite in 1..128 {
+            let off = sprite * 8;
+            oam[off..off + 2].copy_from_slice(&(1u16 << 9).to_le_bytes());
+        }
+
+        let mut out = ObjLine::default();
+        render_objs(&engine, 0, &palette, &oam, &vram, &mut out);
+
+        assert_eq!(out.pixel[0].expect("first 8bpp tile").color, red);
+        assert_eq!(
+            out.pixel[8].expect("second 8bpp tile").color,
+            blue,
+            "256-color OBJs with a 32-byte boundary consume two tile-number units per 8x8 tile"
+        );
     }
 
     #[test]
