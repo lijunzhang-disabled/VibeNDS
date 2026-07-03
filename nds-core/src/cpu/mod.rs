@@ -15,6 +15,7 @@ pub mod cp15;
 pub mod thumb;
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 pub use bus::CpuBus;
 
@@ -269,6 +270,8 @@ impl Cpu {
         if self.pipeline_flushed {
             self.refill_pipeline(bus);
         }
+
+        trace_arm9_exec(self);
 
         if self.cpsr.thumb() {
             self.step_thumb(bus)
@@ -605,6 +608,105 @@ impl Cpu {
         } else {
             self.regs[r_idx] = val;
         }
+    }
+}
+
+fn trace_arm9_exec(cpu: &Cpu) {
+    if !cpu.is_arm9 {
+        return;
+    }
+    let pc = if cpu.cpsr.thumb() {
+        cpu.regs[15].wrapping_sub(4) & !1
+    } else {
+        cpu.regs[15].wrapping_sub(8) & !3
+    };
+    if let Some(pcs) = trace_arm9_exec_pcs() {
+        if !pcs.contains(&pc) {
+            return;
+        }
+    } else {
+        let Some((start, end)) = trace_arm9_exec_range() else {
+            return;
+        };
+        if pc < start || pc >= end {
+            return;
+        }
+    }
+    if let Some((start, end)) = trace_arm9_exec_reg_range() {
+        if !cpu.regs.iter().any(|reg| *reg >= start && *reg < end) {
+            return;
+        }
+    }
+    if let Some(want) = trace_arm9_exec_r2_value() {
+        if cpu.regs[2] != want {
+            return;
+        }
+    }
+
+    eprint!(
+        "arm9 exec pc=0x{pc:08X} thumb={} op=0x{:08X} cpsr=0x{:08X}",
+        cpu.cpsr.thumb(),
+        cpu.pipeline[0],
+        cpu.cpsr.bits
+    );
+    for (i, reg) in cpu.regs.iter().enumerate() {
+        eprint!(" r{i}=0x{reg:08X}");
+    }
+    eprintln!();
+}
+
+fn trace_arm9_exec_range() -> Option<(u32, u32)> {
+    static RANGE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range_env("NDS_TRACE_ARM9_EXEC_RANGE"))
+}
+
+fn trace_arm9_exec_reg_range() -> Option<(u32, u32)> {
+    static RANGE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range_env("NDS_TRACE_ARM9_EXEC_REG_RANGE"))
+}
+
+fn trace_arm9_exec_pcs() -> Option<&'static [u32]> {
+    static PCS: OnceLock<Option<Vec<u32>>> = OnceLock::new();
+    PCS.get_or_init(|| parse_trace_pc_list_env("NDS_TRACE_ARM9_EXEC_PCS"))
+        .as_deref()
+}
+
+fn trace_arm9_exec_r2_value() -> Option<u32> {
+    static VALUE: OnceLock<Option<u32>> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        let spec = std::env::var_os("NDS_TRACE_ARM9_EXEC_R2_VALUE")?;
+        let spec = spec.to_str()?;
+        u32::from_str_radix(spec.trim_start_matches("0x"), 16).ok()
+    })
+}
+
+fn parse_trace_range_env(env: &str) -> Option<(u32, u32)> {
+    let spec = std::env::var_os(env)?;
+    let spec = spec.to_str()?;
+    let (start, end) = spec.split_once("..")?;
+    let start = u32::from_str_radix(start.trim_start_matches("0x"), 16).ok()?;
+    let end = u32::from_str_radix(end.trim_start_matches("0x"), 16).ok()?;
+    Some((start, end))
+}
+
+fn parse_trace_pc_list_env(env: &str) -> Option<Vec<u32>> {
+    let spec = std::env::var_os(env)?;
+    let spec = spec.to_str()?;
+    let pcs: Vec<u32> = spec
+        .split([',', ' ', '\t', '\n'])
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                None
+            } else {
+                u32::from_str_radix(part.trim_start_matches("0x"), 16).ok()
+            }
+        })
+        .collect();
+    if pcs.is_empty() {
+        None
+    } else {
+        Some(pcs)
     }
 }
 

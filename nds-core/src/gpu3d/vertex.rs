@@ -148,6 +148,13 @@ impl VertexState {
         if let Some(attr) = self.pending_polygon_attr.take() {
             self.polygon_attr = attr;
         }
+        trace_gx_state(
+            self.polygon_buffer.len(),
+            format_args!(
+                "begin prim={primitive:?} tex=0x{:08X} pal={} attr=0x{:08X}",
+                self.tex_image_param, self.palette_base, self.polygon_attr
+            ),
+        );
         self.primitive = Some(primitive);
         self.list_active = true;
         self.vertex_buffer.clear();
@@ -211,11 +218,22 @@ impl VertexState {
 
     /// `TEXIMAGE_PARAM`.
     pub fn set_tex_image_param(&mut self, param: u32) {
+        trace_gx_state(
+            self.polygon_buffer.len(),
+            format_args!(
+                "tex_image_param 0x{:08X} -> 0x{param:08X}",
+                self.tex_image_param
+            ),
+        );
         self.tex_image_param = param;
     }
 
     /// `PLTT_BASE` — texture palette base address (low 13 bits).
     pub fn set_palette_base(&mut self, param: u32) {
+        trace_gx_state(
+            self.polygon_buffer.len(),
+            format_args!("palette_base {} -> {}", self.palette_base, param & 0x1FFF),
+        );
         self.palette_base = (param & 0x1FFF) as u16;
     }
 
@@ -247,15 +265,13 @@ impl VertexState {
             PrimitiveType::Triangles => {
                 if self.vertex_buffer.len() == n {
                     let verts = self.vertex_buffer.drain(..).collect::<Vec<_>>();
-                    self.polygon_buffer
-                        .push(make_polygon(verts, self, primitive, true));
+                    self.push_polygon(verts, primitive, true);
                 }
             }
             PrimitiveType::Quads => {
                 if self.vertex_buffer.len() == n {
                     let verts = self.vertex_buffer.drain(..).collect::<Vec<_>>();
-                    self.polygon_buffer
-                        .push(make_polygon(verts, self, primitive, true));
+                    self.push_polygon(verts, primitive, true);
                 }
             }
             PrimitiveType::TriangleStrip => {
@@ -273,12 +289,7 @@ impl VertexState {
                         self.vertex_buffer[i1],
                         self.vertex_buffer[i2],
                     ];
-                    self.polygon_buffer.push(make_polygon(
-                        verts,
-                        self,
-                        primitive,
-                        front_area_negative,
-                    ));
+                    self.push_polygon(verts, primitive, front_area_negative);
                 }
             }
             PrimitiveType::QuadStrip => {
@@ -297,11 +308,35 @@ impl VertexState {
                         self.vertex_buffer[i2],
                         self.vertex_buffer[i3],
                     ];
-                    self.polygon_buffer
-                        .push(make_polygon(verts, self, primitive, true));
+                    self.push_polygon(verts, primitive, true);
                 }
             }
         }
+    }
+
+    fn push_polygon(
+        &mut self,
+        verts: Vec<Vertex>,
+        primitive: PrimitiveType,
+        front_area_negative: bool,
+    ) {
+        let poly = make_polygon(verts, self, primitive, front_area_negative);
+        let index = self.polygon_buffer.len();
+        trace_gx_state(
+            index,
+            format_args!(
+                "poly prim={primitive:?} attr=0x{:08X} tex=0x{:08X} pal={} current_tex=0x{:08X} current_pal={} strip_tex=0x{:08X} strip_pal={} verts={} front_neg={front_area_negative}",
+                poly.attr,
+                poly.tex_image_param,
+                poly.palette_base,
+                self.tex_image_param,
+                self.palette_base,
+                self.strip_tex_image_param,
+                self.strip_palette_base,
+                poly.vertices.len()
+            ),
+        );
+        self.polygon_buffer.push(poly);
     }
 
     /// Apply texture-coordinate transform mode 2. The normal components are
@@ -429,6 +464,32 @@ pub enum VtxAxisPair {
     XY,
     XZ,
     YZ,
+}
+
+fn trace_gx_state(index: usize, args: std::fmt::Arguments<'_>) {
+    if std::env::var_os("NDS_TRACE_GX_STATE").is_none() || !trace_gx_poly_index_matches(index) {
+        return;
+    }
+    eprintln!("gx state poly_index={index} {args}");
+}
+
+fn trace_gx_poly_index_matches(index: usize) -> bool {
+    let Some(spec) = std::env::var_os("NDS_TRACE_GX_POLY_RANGE") else {
+        return true;
+    };
+    let Some(spec) = spec.to_str() else {
+        return true;
+    };
+    let Some((start, end)) = spec.split_once("..") else {
+        return true;
+    };
+    let Ok(start) = start.parse::<usize>() else {
+        return true;
+    };
+    let Ok(end) = end.parse::<usize>() else {
+        return true;
+    };
+    index >= start && index < end
 }
 
 #[cfg(test)]

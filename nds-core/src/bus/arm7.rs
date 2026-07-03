@@ -92,6 +92,42 @@ impl<'a> Bus7<'a> {
         self.shared.dma7.finish_transfer(id);
         irq_on_complete
     }
+
+    /// Drain slot-1 card data into any DMA channel armed with Slot1 timing.
+    pub(crate) fn run_slot1_dmas(&mut self) {
+        let channels = self
+            .shared
+            .dma7
+            .channels_for_timing(crate::dma::DmaTiming::Slot1);
+        for ch in channels {
+            while self.shared.dma7.channels[ch].active
+                && self.shared.dma7.timing(ch) == crate::dma::DmaTiming::Slot1
+                && !self.shared.slot1_data.is_empty()
+            {
+                let before = self.shared.slot1_data.len();
+                let irq = self.run_dma(ch);
+                if irq {
+                    use crate::interrupt::Irq;
+                    let irq_bit = match ch {
+                        0 => Irq::Dma0,
+                        1 => Irq::Dma1,
+                        2 => Irq::Dma2,
+                        _ => Irq::Dma3,
+                    };
+                    self.shared.irq7.request(irq_bit);
+                }
+                if self.shared.slot1_data.len() >= before {
+                    break;
+                }
+            }
+            if self.shared.slot1_data.is_empty()
+                && self.shared.dma7.timing(ch) == crate::dma::DmaTiming::Slot1
+            {
+                self.shared.dma7.channels[ch].active = false;
+                self.shared.dma7.channels[ch].control &= !(1 << 31);
+            }
+        }
+    }
 }
 
 #[inline]
@@ -335,38 +371,7 @@ impl<'a> CpuBus for Bus7<'a> {
                     }
                 }
                 super::io_arm7::Write32Effect::FireSlot1Dma => {
-                    let channels = self
-                        .shared
-                        .dma7
-                        .channels_for_timing(crate::dma::DmaTiming::Slot1);
-                    for ch in channels {
-                        while self.shared.dma7.channels[ch].active
-                            && self.shared.dma7.timing(ch) == crate::dma::DmaTiming::Slot1
-                            && !self.shared.slot1_data.is_empty()
-                        {
-                            let before = self.shared.slot1_data.len();
-                            let irq = self.run_dma(ch);
-                            if irq {
-                                use crate::interrupt::Irq;
-                                let irq_bit = match ch {
-                                    0 => Irq::Dma0,
-                                    1 => Irq::Dma1,
-                                    2 => Irq::Dma2,
-                                    _ => Irq::Dma3,
-                                };
-                                self.shared.irq7.request(irq_bit);
-                            }
-                            if self.shared.slot1_data.len() >= before {
-                                break;
-                            }
-                        }
-                        if self.shared.slot1_data.is_empty()
-                            && self.shared.dma7.timing(ch) == crate::dma::DmaTiming::Slot1
-                        {
-                            self.shared.dma7.channels[ch].active = false;
-                            self.shared.dma7.channels[ch].control &= !(1 << 31);
-                        }
-                    }
+                    self.run_slot1_dmas();
                 }
                 super::io_arm7::Write32Effect::None => {}
             }

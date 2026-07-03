@@ -162,6 +162,7 @@ pub struct Bus9<'a> {
     pub shared: &'a mut SharedState,
     pub itcm_region: TcmRegion,
     pub dtcm_region: TcmRegion,
+    pub trace_pc: u32,
 }
 
 impl<'a> Bus9<'a> {
@@ -178,6 +179,7 @@ impl<'a> Bus9<'a> {
             shared,
             itcm_region,
             dtcm_region,
+            trace_pc: 0,
         }
     }
 
@@ -211,6 +213,7 @@ impl<'a> Bus9<'a> {
             };
             if word_size == 4 {
                 let v = self.read32(sad);
+                trace_dma9_store(id, timing, sad, dad, word_size, v);
                 if timing == DmaTiming::GxFifo && is_gxfifo_packed_addr(dad) {
                     let _ = super::io_arm9::write_io32(self.shared, dad, v);
                 } else if timing == DmaTiming::MainMemDisplayFifo && is_disp_mmem_fifo_addr(dad) {
@@ -220,6 +223,7 @@ impl<'a> Bus9<'a> {
                 }
             } else {
                 let v = self.read16(sad);
+                trace_dma9_store(id, timing, sad, dad, word_size, v as u32);
                 self.write16(dad, v);
             }
             advance(
@@ -238,7 +242,7 @@ impl<'a> Bus9<'a> {
         completed && irq_on_complete
     }
 
-    fn run_gxfifo_dmas(&mut self) {
+    pub(crate) fn run_gxfifo_dmas(&mut self) {
         let channels = self.shared.dma9.channels_for_timing(DmaTiming::GxFifo);
         for ch in channels {
             while self.shared.dma9.channels[ch].active
@@ -266,6 +270,92 @@ impl<'a> Bus9<'a> {
             }
         }
     }
+
+    /// Drain slot-1 card data into any DMA channel armed with Slot1 timing.
+    /// Called when a transfer starts producing data (`Slot1Done` event) and
+    /// when a Slot1-timed channel is armed while data is already queued.
+    pub(crate) fn run_slot1_dmas(&mut self) {
+        let channels = self
+            .shared
+            .dma9
+            .channels_for_timing(crate::dma::DmaTiming::Slot1);
+        for ch in channels {
+            if std::env::var_os("NDS_TRACE_SLOT1").is_some() {
+                let c = &self.shared.dma9.channels[ch];
+                eprintln!(
+                    "slot1 dma9 ch={ch} start sad=0x{:08X} dad=0x{:08X} count={} ctrl=0x{:08X} queued_words={}",
+                    c.internal_sad,
+                    c.internal_dad,
+                    c.internal_count,
+                    c.control,
+                    self.shared.slot1_data.len()
+                );
+            }
+            while self.shared.dma9.channels[ch].active
+                && self.shared.dma9.timing(ch) == crate::dma::DmaTiming::Slot1
+                && !self.shared.slot1_data.is_empty()
+            {
+                let before = self.shared.slot1_data.len();
+                let irq = self.run_dma(ch);
+                if irq {
+                    use crate::interrupt::Irq;
+                    let irq_bit = match ch {
+                        0 => Irq::Dma0,
+                        1 => Irq::Dma1,
+                        2 => Irq::Dma2,
+                        _ => Irq::Dma3,
+                    };
+                    self.shared.irq9.request(irq_bit);
+                }
+                if self.shared.slot1_data.len() >= before {
+                    break;
+                }
+            }
+            if std::env::var_os("NDS_TRACE_SLOT1").is_some() {
+                let c = &self.shared.dma9.channels[ch];
+                eprintln!(
+                    "slot1 dma9 ch={ch} end active={} sad=0x{:08X} dad=0x{:08X} count={} ctrl=0x{:08X} queued_words={}",
+                    c.active,
+                    c.internal_sad,
+                    c.internal_dad,
+                    c.internal_count,
+                    c.control,
+                    self.shared.slot1_data.len()
+                );
+            }
+            if self.shared.slot1_data.is_empty()
+                && self.shared.dma9.timing(ch) == crate::dma::DmaTiming::Slot1
+            {
+                self.shared.dma9.channels[ch].active = false;
+                self.shared.dma9.channels[ch].control &= !(1 << 31);
+            }
+        }
+    }
+
+    fn handle_io_write_effect(&mut self, effect: super::io_arm9::Write32Effect) {
+        match effect {
+            super::io_arm9::Write32Effect::RunDma9(ch) => {
+                let irq = self.run_dma(ch);
+                if irq {
+                    use crate::interrupt::Irq;
+                    let irq_bit = match ch {
+                        0 => Irq::Dma0,
+                        1 => Irq::Dma1,
+                        2 => Irq::Dma2,
+                        _ => Irq::Dma3,
+                    };
+                    self.shared.irq9.request(irq_bit);
+                }
+            }
+            super::io_arm9::Write32Effect::FireSlot1Dma => {
+                self.run_slot1_dmas();
+            }
+            super::io_arm9::Write32Effect::FireGxFifoDma => {
+                self.run_gxfifo_dmas();
+            }
+            super::io_arm9::Write32Effect::None => {}
+        }
+    }
 }
 
 fn is_gxfifo_packed_addr(addr: u32) -> bool {
@@ -282,6 +372,181 @@ fn advance(addr: &mut u32, ctrl: AddrControl, word: u32) {
         AddrControl::Increment | AddrControl::IncrementReload => *addr = addr.wrapping_add(word),
         AddrControl::Decrement => *addr = addr.wrapping_sub(word),
         AddrControl::Fixed => {}
+    }
+}
+
+fn trace_arm9_vram_store(kind: &str, pc: u32, addr: u32, len: u32, val: u32) {
+    let Some(spec) = std::env::var_os("NDS_TRACE_BUS9_VRAM_RANGE") else {
+        return;
+    };
+    let Some(spec) = spec.to_str() else {
+        return;
+    };
+    let Some((start, end)) = spec.split_once("..") else {
+        return;
+    };
+    let Ok(start) = u32::from_str_radix(start.trim_start_matches("0x"), 16) else {
+        return;
+    };
+    let Ok(end) = u32::from_str_radix(end.trim_start_matches("0x"), 16) else {
+        return;
+    };
+    if addr < end && addr.saturating_add(len) > start {
+        eprintln!("{kind} pc=0x{pc:08X} addr=0x{addr:08X} len={len} val=0x{val:08X}");
+    }
+}
+
+fn trace_dma9_store(ch: usize, timing: DmaTiming, sad: u32, dad: u32, len: u32, val: u32) {
+    let dest_match = trace_range_matches(trace_dma9_dest_range(), dad, len);
+    let source_match = trace_range_matches(trace_dma9_source_range(), sad, len);
+    let value_match = trace_dma9_value_matches(val);
+    if dest_match || source_match || value_match {
+        eprintln!(
+            "dma9 ch={ch} timing={timing:?} sad=0x{sad:08X} dad=0x{dad:08X} len={len} val=0x{val:08X}"
+        );
+    }
+}
+
+fn trace_dma9_dest_range() -> Option<(u32, u32)> {
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range("NDS_TRACE_DMA9_DEST_RANGE"))
+}
+
+fn trace_dma9_source_range() -> Option<(u32, u32)> {
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range("NDS_TRACE_DMA9_SOURCE_RANGE"))
+}
+
+fn trace_dma9_value_matches(val: u32) -> bool {
+    let Some(spec) = std::env::var_os("NDS_TRACE_DMA9_VALUE") else {
+        return false;
+    };
+    let Some(spec) = spec.to_str() else {
+        return false;
+    };
+    let Ok(want) = u32::from_str_radix(spec.trim_start_matches("0x"), 16) else {
+        return false;
+    };
+    val == want
+}
+
+fn parse_trace_range(env: &str) -> Option<(u32, u32)> {
+    let Some(spec) = std::env::var_os(env) else {
+        return None;
+    };
+    let Some(spec) = spec.to_str() else {
+        return None;
+    };
+    let Some((start, end)) = spec.split_once("..") else {
+        return None;
+    };
+    let Ok(start) = u32::from_str_radix(start.trim_start_matches("0x"), 16) else {
+        return None;
+    };
+    let Ok(end) = u32::from_str_radix(end.trim_start_matches("0x"), 16) else {
+        return None;
+    };
+    Some((start, end))
+}
+
+fn trace_range_matches(range: Option<(u32, u32)>, addr: u32, len: u32) -> bool {
+    let Some((start, end)) = range else {
+        return false;
+    };
+    addr < end && addr.saturating_add(len) > start
+}
+
+fn trace_arm9_main_store(kind: &str, pc: u32, addr: u32, len: u32, val: u32) {
+    let Some((start, end)) = trace_bus9_main_write_range() else {
+        return;
+    };
+    if addr < end && addr.saturating_add(len) > start {
+        eprintln!("main {kind} pc=0x{pc:08X} addr=0x{addr:08X} len={len} val=0x{val:08X}");
+    }
+}
+
+fn trace_arm9_dtcm_store(kind: &str, pc: u32, addr: u32, len: u32, val: u32) {
+    let Some((start, end)) = trace_bus9_dtcm_write_range() else {
+        return;
+    };
+    if addr < end && addr.saturating_add(len) > start {
+        eprintln!("dtcm {kind} pc=0x{pc:08X} addr=0x{addr:08X} len={len} val=0x{val:08X}");
+    }
+}
+
+fn trace_bus9_main_write_range() -> Option<(u32, u32)> {
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range("NDS_TRACE_BUS9_MAIN_RANGE"))
+}
+
+fn trace_bus9_dtcm_write_range() -> Option<(u32, u32)> {
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range("NDS_TRACE_BUS9_DTCM_RANGE"))
+}
+
+fn trace_arm9_main_load_range(kind: &str, pc: u32, addr: u32, len: u32, val: u32) {
+    let Some((start, end)) = trace_bus9_main_read_range() else {
+        return;
+    };
+    if addr < end && addr.saturating_add(len) > start {
+        eprintln!("main {kind} pc=0x{pc:08X} addr=0x{addr:08X} len={len} val=0x{val:08X}");
+    }
+}
+
+fn trace_arm9_main_read_value(kind: &str, pc: u32, addr: u32, val: u32) {
+    let Some(spec) = std::env::var_os("NDS_TRACE_BUS9_MAIN_READ_VALUE") else {
+        return;
+    };
+    let Some(spec) = spec.to_str() else {
+        return;
+    };
+    let Ok(want) = u32::from_str_radix(spec.trim_start_matches("0x"), 16) else {
+        return;
+    };
+    if val == want {
+        eprintln!("{kind} pc=0x{pc:08X} addr=0x{addr:08X} val=0x{val:08X}");
+    }
+}
+
+fn trace_arm9_main_read_pc(kind: &str, pc: u32, addr: u32, len: u32, val: u32) {
+    let Some((start, end)) = trace_bus9_pc_range() else {
+        return;
+    };
+    if pc >= start && pc < end {
+        eprintln!("{kind} pc=0x{pc:08X} addr=0x{addr:08X} len={len} val=0x{val:08X}");
+    }
+}
+
+fn trace_arm9_io_read_pc(kind: &str, pc: u32, addr: u32, len: u32, val: u32) {
+    let Some((start, end)) = trace_bus9_pc_range() else {
+        return;
+    };
+    if pc >= start && pc < end {
+        eprintln!("{kind} pc=0x{pc:08X} addr=0x{addr:08X} len={len} val=0x{val:08X}");
+    }
+}
+
+fn trace_bus9_main_read_range() -> Option<(u32, u32)> {
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range("NDS_TRACE_BUS9_MAIN_READ_RANGE"))
+}
+
+fn trace_bus9_pc_range() -> Option<(u32, u32)> {
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range("NDS_TRACE_BUS9_PC_RANGE"))
+}
+
+fn trace_arm9_io_write(kind: &str, pc: u32, addr: u32, val: u32) {
+    static VALUE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let Some(want) = *VALUE.get_or_init(|| {
+        let spec = std::env::var_os("NDS_TRACE_BUS9_IO_VALUE")?;
+        let spec = spec.to_str()?;
+        u32::from_str_radix(spec.trim_start_matches("0x"), 16).ok()
+    }) else {
+        return;
+    };
+    if val == want {
+        eprintln!("{kind} pc=0x{pc:08X} addr=0x{addr:08X} val=0x{val:08X}");
     }
 }
 
@@ -311,7 +576,12 @@ impl<'a> CpuBus for Bus9<'a> {
         }
 
         match addr >> 24 {
-            0x02 => self.shared.main_ram[(addr as usize) & 0x3F_FFFF],
+            0x02 => {
+                let val = self.shared.main_ram[(addr as usize) & 0x3F_FFFF];
+                trace_arm9_main_load_range("read8", self.trace_pc, addr, 1, val as u32);
+                trace_arm9_main_read_pc("main read8", self.trace_pc, addr, 1, val as u32);
+                val
+            }
             0x03 => {
                 if let Some((view, _)) = self.shared.arm9_wram_view() {
                     let off = wram_addr_in_view(view.len(), addr);
@@ -337,7 +607,9 @@ impl<'a> CpuBus for Bus9<'a> {
 
     fn read16(&mut self, addr: u32) -> u16 {
         if addr >> 24 == 0x04 {
-            return super::io_arm9::read_io16(self.shared, addr);
+            let val = super::io_arm9::read_io16(self.shared, addr);
+            trace_arm9_io_read_pc("io read16", self.trace_pc, addr & !1, 2, val as u32);
+            return val;
         }
         let lo = self.read8(addr) as u16;
         let hi = self.read8(addr.wrapping_add(1)) as u16;
@@ -364,12 +636,16 @@ impl<'a> CpuBus for Bus9<'a> {
         match addr >> 24 {
             0x02 => {
                 let off = (addr as usize) & 0x3F_FFFC;
-                u32::from_le_bytes([
+                let val = u32::from_le_bytes([
                     self.shared.main_ram[off],
                     self.shared.main_ram[off + 1],
                     self.shared.main_ram[off + 2],
                     self.shared.main_ram[off + 3],
-                ])
+                ]);
+                trace_arm9_main_load_range("read32", self.trace_pc, addr & !3, 4, val);
+                trace_arm9_main_read_value("main read32", self.trace_pc, addr & !3, val);
+                trace_arm9_main_read_pc("main read32", self.trace_pc, addr & !3, 4, val);
+                val
             }
             0x03 => {
                 let view = match self.shared.arm9_wram_view() {
@@ -379,7 +655,11 @@ impl<'a> CpuBus for Bus9<'a> {
                 let off = wram_addr_in_view(view.len(), addr) & !3;
                 u32::from_le_bytes([view[off], view[off + 1], view[off + 2], view[off + 3]])
             }
-            0x04 => super::io_arm9::read_io32_mut(self.shared, addr),
+            0x04 => {
+                let val = super::io_arm9::read_io32_mut(self.shared, addr);
+                trace_arm9_io_read_pc("io read32", self.trace_pc, addr & !3, 4, val);
+                val
+            }
             0x05 => {
                 let off = (addr as usize) & 0x7FC;
                 u32::from_le_bytes([
@@ -439,6 +719,7 @@ impl<'a> CpuBus for Bus9<'a> {
     fn write8(&mut self, addr: u32, val: u8) {
         if self.dtcm_region.contains(addr) {
             let off = addr.wrapping_sub(self.dtcm_region.base) as usize % DTCM_SIZE;
+            trace_arm9_dtcm_store("write8", self.trace_pc, addr, 1, val as u32);
             self.mem.dtcm[off] = val;
             return;
         }
@@ -449,7 +730,10 @@ impl<'a> CpuBus for Bus9<'a> {
         }
 
         match addr >> 24 {
-            0x02 => self.shared.main_ram[(addr as usize) & 0x3F_FFFF] = val,
+            0x02 => {
+                trace_arm9_main_store("write8", self.trace_pc, addr, 1, val as u32);
+                self.shared.main_ram[(addr as usize) & 0x3F_FFFF] = val
+            }
             0x03 => {
                 if let Some(view) = self.shared.arm9_wram_view_mut() {
                     let off = wram_addr_in_view(view.len(), addr);
@@ -457,17 +741,20 @@ impl<'a> CpuBus for Bus9<'a> {
                 }
             }
             0x04 => super::io_arm9::write_io8(self.shared, addr, val),
-            // Palette / OAM byte writes are dropped. VRAM byte writes are
-            // valid and are used by small homebrew framebuffer renderers.
-            0x05 | 0x07 => {}
-            0x06 => self.shared.vram.cpu_write_arm9(addr, val),
+            // ARM9 palette, VRAM, and OAM STRB byte writes are ignored.
+            // ARM7 byte writes to banks mapped as plain ARM7 VRAM remain
+            // handled by Bus7.
+            0x05 | 0x06 | 0x07 => {}
             _ => {}
         }
     }
 
     fn write16(&mut self, addr: u32, val: u16) {
         match addr >> 24 {
-            0x04 => super::io_arm9::write_io16(self.shared, addr, val),
+            0x04 => {
+                let effect = super::io_arm9::write_io16_effect(self.shared, addr, val);
+                self.handle_io_write_effect(effect);
+            }
             0x05 => {
                 let off = (addr as usize) & 0x7FE;
                 let b = val.to_le_bytes();
@@ -477,6 +764,7 @@ impl<'a> CpuBus for Bus9<'a> {
             0x06 => {
                 let a = addr & !1;
                 let b = val.to_le_bytes();
+                trace_arm9_vram_store("write16", self.trace_pc, a, 2, val as u32);
                 self.shared.vram.cpu_write_arm9(a, b[0]);
                 self.shared.vram.cpu_write_arm9(a + 1, b[1]);
             }
@@ -499,6 +787,7 @@ impl<'a> CpuBus for Bus9<'a> {
             let off = addr.wrapping_sub(self.dtcm_region.base) as usize & !3;
             let off = off % DTCM_SIZE;
             let b = val.to_le_bytes();
+            trace_arm9_dtcm_store("write32", self.trace_pc, addr & !3, 4, val);
             self.mem.dtcm[off] = b[0];
             self.mem.dtcm[off + 1] = b[1];
             self.mem.dtcm[off + 2] = b[2];
@@ -520,6 +809,7 @@ impl<'a> CpuBus for Bus9<'a> {
             0x02 => {
                 let off = (addr as usize) & 0x3F_FFFC;
                 let b = val.to_le_bytes();
+                trace_arm9_main_store("write32", self.trace_pc, addr & !3, 4, val);
                 self.shared.main_ram[off] = b[0];
                 self.shared.main_ram[off + 1] = b[1];
                 self.shared.main_ram[off + 2] = b[2];
@@ -536,60 +826,9 @@ impl<'a> CpuBus for Bus9<'a> {
                 }
             }
             0x04 => {
+                trace_arm9_io_write("io write32", self.trace_pc, addr & !3, val);
                 let effect = super::io_arm9::write_io32(self.shared, addr, val);
-                match effect {
-                    super::io_arm9::Write32Effect::RunDma9(ch) => {
-                        let irq = self.run_dma(ch);
-                        if irq {
-                            use crate::interrupt::Irq;
-                            let irq_bit = match ch {
-                                0 => Irq::Dma0,
-                                1 => Irq::Dma1,
-                                2 => Irq::Dma2,
-                                _ => Irq::Dma3,
-                            };
-                            self.shared.irq9.request(irq_bit);
-                        }
-                    }
-                    super::io_arm9::Write32Effect::FireSlot1Dma => {
-                        let channels = self
-                            .shared
-                            .dma9
-                            .channels_for_timing(crate::dma::DmaTiming::Slot1);
-                        for ch in channels {
-                            while self.shared.dma9.channels[ch].active
-                                && self.shared.dma9.timing(ch) == crate::dma::DmaTiming::Slot1
-                                && !self.shared.slot1_data.is_empty()
-                            {
-                                let before = self.shared.slot1_data.len();
-                                let irq = self.run_dma(ch);
-                                if irq {
-                                    use crate::interrupt::Irq;
-                                    let irq_bit = match ch {
-                                        0 => Irq::Dma0,
-                                        1 => Irq::Dma1,
-                                        2 => Irq::Dma2,
-                                        _ => Irq::Dma3,
-                                    };
-                                    self.shared.irq9.request(irq_bit);
-                                }
-                                if self.shared.slot1_data.len() >= before {
-                                    break;
-                                }
-                            }
-                            if self.shared.slot1_data.is_empty()
-                                && self.shared.dma9.timing(ch) == crate::dma::DmaTiming::Slot1
-                            {
-                                self.shared.dma9.channels[ch].active = false;
-                                self.shared.dma9.channels[ch].control &= !(1 << 31);
-                            }
-                        }
-                    }
-                    super::io_arm9::Write32Effect::FireGxFifoDma => {
-                        self.run_gxfifo_dmas();
-                    }
-                    super::io_arm9::Write32Effect::None => {}
-                }
+                self.handle_io_write_effect(effect);
             }
             0x05 => {
                 let off = (addr as usize) & 0x7FC;
@@ -601,6 +840,7 @@ impl<'a> CpuBus for Bus9<'a> {
             0x06 => {
                 let a = addr & !3;
                 let b = val.to_le_bytes();
+                trace_arm9_vram_store("write32", self.trace_pc, a, 4, val);
                 for i in 0..4 {
                     self.shared.vram.cpu_write_arm9(a + i as u32, b[i]);
                 }
@@ -733,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vram_byte_write_updates_lcdc_bank() {
+    fn test_arm9_vram_byte_write_ignored() {
         let (mut mem, mut shared) = fresh();
         shared.vram.write_cnt(crate::vram::BankId::A, 0x80);
         let mut bus = Bus9::new(
@@ -745,7 +985,7 @@ mod tests {
 
         bus.write8(0x0680_0080, 0x7B);
 
-        assert_eq!(bus.shared.vram.read_lcdc(0x80), 0x7B);
+        assert_eq!(bus.shared.vram.read_lcdc(0x80), 0);
     }
 
     #[test]

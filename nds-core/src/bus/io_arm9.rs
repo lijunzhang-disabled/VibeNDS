@@ -10,6 +10,7 @@ use crate::gpu2d::Engine2d;
 use crate::gpu3d::GxCmd;
 use crate::interrupt::Irq;
 use crate::ipc::{self, Side};
+use std::sync::{Mutex, OnceLock};
 
 /// Returns Some((engine, local_offset)) if `offset` falls within an engine's
 /// register page **and** is not a shared register (DISPSTAT, VCOUNT live at
@@ -341,6 +342,16 @@ fn decode_dma_reg(local: u32) -> Option<(usize, u32)> {
     Some((ch, kind))
 }
 
+fn decode_dma_reg16(local: u32) -> Option<(usize, u32)> {
+    if !(0xB0..0xE0).contains(&local) {
+        return None;
+    }
+    let off = local - 0xB0;
+    let ch = (off / 0xC) as usize;
+    let half = (off % 0xC) / 2;
+    Some((ch, half))
+}
+
 /// FIFOSEND (32-bit write at 0x04000188).
 fn write_fifosend(shared: &mut SharedState, val: u32) {
     let raise_arm7 = shared.ipc.write_send(Side::Arm9, val);
@@ -367,9 +378,9 @@ fn update_gxfifo_irq(shared: &mut SharedState) {
 }
 
 pub(super) fn slot1_romctrl_status(shared: &SharedState) -> u32 {
-    let mut v = shared.slot1_romctrl & !((1 << 31) | (1 << 23));
+    let mut v = shared.slot1_romctrl & !(1 << 23);
     if !shared.slot1_data.is_empty() {
-        v |= (1 << 31) | (1 << 23);
+        v |= 1 << 23;
     }
     v
 }
@@ -378,8 +389,7 @@ pub(super) fn slot1_romctrl_status_mut(shared: &mut SharedState) -> u32 {
     if !shared.slot1_data.is_empty() && shared.slot1_romctrl & (1 << 31) != 0 {
         shared.slot1_busy_polls = shared.slot1_busy_polls.saturating_add(1);
         if shared.slot1_busy_polls >= 8 {
-            shared.slot1_data.clear();
-            shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
+            shared.slot1_romctrl &= !(1 << 31);
             shared.slot1_busy_polls = 0;
         }
     }
@@ -388,6 +398,9 @@ pub(super) fn slot1_romctrl_status_mut(shared: &mut SharedState) -> u32 {
 
 pub(super) fn read_slot1_data(shared: &mut SharedState) -> u32 {
     let v = shared.slot1_data.pop_front().unwrap_or(0xFFFF_FFFF);
+    if std::env::var_os("NDS_TRACE_SLOT1_READS").is_some() {
+        trace_slot1_read(v, shared.slot1_data.len());
+    }
     shared.slot1_busy_polls = 0;
     if shared.slot1_data.is_empty() {
         shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
@@ -398,7 +411,9 @@ pub(super) fn read_slot1_data(shared: &mut SharedState) -> u32 {
 pub(super) fn start_slot1_transfer(shared: &mut SharedState, val: u32, irq_to_arm7: bool) {
     shared.slot1_romctrl = val;
     shared.slot1_data.clear();
+    shared.slot1_pending.clear();
     shared.slot1_busy_polls = 0;
+    shared.slot1_complete_irq = false;
 
     if val & (1 << 31) == 0 {
         return;
@@ -420,18 +435,38 @@ pub(super) fn start_slot1_transfer(shared: &mut SharedState, val: u32, irq_to_ar
         _ => queue_repeat(shared, 0xFFFF_FFFF, bytes),
     }
 
-    if !shared.slot1_data.is_empty() {
-        shared.slot1_romctrl |= (1 << 31) | (1 << 23);
-        if val & (1 << 14) != 0 {
-            if irq_to_arm7 {
-                shared.irq7.request(Irq::Slot1Data);
-            } else {
-                shared.irq9.request(Irq::Slot1Data);
-            }
-        }
+    if std::env::var_os("NDS_TRACE_SLOT1").is_some() {
+        eprintln!(
+            "slot1 start cmd=0x{cmd:02X} param=0x{param:08X} bytes=0x{bytes:X} romctrl=0x{val:08X} words={}",
+            shared.slot1_pending.len()
+        );
+    }
+    trace_slot1_start(cmd, param, shared.slot1_pending.len());
+
+    if !shared.slot1_pending.is_empty() {
+        // Data arrives only after the hardware transfer time: the command
+        // phase, the KEY1 gap, then the data bytes at the selected clock.
+        // The frame loop turns the delay request into a `Slot1Done` event
+        // that publishes `slot1_pending` and fires Slot-1 DMA / IRQ.
+        shared.slot1_romctrl |= 1 << 31;
+        shared.slot1_complete_irq = val & (1 << 14) != 0;
+        shared.slot1_complete_irq_to_arm7 = irq_to_arm7;
+        shared.slot1_delay_request = Some(slot1_transfer_cycles(val, bytes));
     } else {
         shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
     }
+}
+
+/// Transfer duration in ARM7 (33 MHz) cycles, per GBATEK: 8 command bytes
+/// plus the data payload at 5 cycles/byte (6.7 MHz, ROMCTRL bit 27 = 0) or
+/// 8 cycles/byte (4.19 MHz), preceded by the KEY1 gap1 (bits 0-12) and with
+/// gap2 (bits 16-21) between successive 512-byte pages.
+fn slot1_transfer_cycles(romctrl: u32, bytes: usize) -> u64 {
+    let gap1 = (romctrl & 0x1FFF) as u64;
+    let gap2 = ((romctrl >> 16) & 0x3F) as u64;
+    let cycles_per_byte: u64 = if romctrl & (1 << 27) != 0 { 8 } else { 5 };
+    let pages = bytes.div_ceil(0x200).max(1) as u64;
+    gap1 + gap2 * (pages - 1) + cycles_per_byte * (8 + bytes as u64)
 }
 
 fn slot1_transfer_len(romctrl: u32) -> usize {
@@ -457,14 +492,75 @@ fn queue_rom_bytes(shared: &mut SharedState, addr: u32, bytes: usize) {
                 *slot = rom_byte;
             }
         }
-        shared.slot1_data.push_back(u32::from_le_bytes(b));
+        shared.slot1_pending.push_back(u32::from_le_bytes(b));
     }
 }
 
 fn queue_repeat(shared: &mut SharedState, word: u32, bytes: usize) {
     for _ in 0..((bytes + 3) / 4) {
-        shared.slot1_data.push_back(word);
+        shared.slot1_pending.push_back(word);
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Slot1TraceState {
+    cmd: u8,
+    param: u32,
+    word_idx: usize,
+    total_words: usize,
+}
+
+fn trace_slot1_state() -> &'static Mutex<Slot1TraceState> {
+    static STATE: OnceLock<Mutex<Slot1TraceState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(Slot1TraceState::default()))
+}
+
+fn trace_slot1_start(cmd: u8, param: u32, total_words: usize) {
+    if std::env::var_os("NDS_TRACE_SLOT1_READS").is_none() {
+        return;
+    }
+    if let Ok(mut state) = trace_slot1_state().lock() {
+        *state = Slot1TraceState {
+            cmd,
+            param,
+            word_idx: 0,
+            total_words,
+        };
+    }
+}
+
+fn trace_slot1_read(data: u32, remaining_words: usize) {
+    if let Ok(mut state) = trace_slot1_state().lock() {
+        let word_idx = state.word_idx;
+        state.word_idx = state.word_idx.saturating_add(1);
+        let rom_addr = state.param.wrapping_add((word_idx as u32).wrapping_mul(4));
+        if let Some((start, end)) = trace_slot1_read_range() {
+            if rom_addr < start || rom_addr >= end {
+                return;
+            }
+        }
+        eprintln!(
+            "slot1 read cmd=0x{:02X} param=0x{:08X} word={}/{} rom_addr=0x{rom_addr:08X} data=0x{data:08X} remaining_words={remaining_words}",
+            state.cmd,
+            state.param,
+            word_idx,
+            state.total_words
+        );
+    } else {
+        eprintln!("slot1 read data=0x{data:08X} remaining_words={remaining_words}");
+    }
+}
+
+fn trace_slot1_read_range() -> Option<(u32, u32)> {
+    static RANGE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *RANGE.get_or_init(|| {
+        let spec = std::env::var_os("NDS_TRACE_SLOT1_READ_RANGE")?;
+        let spec = spec.to_str()?;
+        let (start, end) = spec.split_once("..")?;
+        let start = u32::from_str_radix(start.trim_start_matches("0x"), 16).ok()?;
+        let end = u32::from_str_radix(end.trim_start_matches("0x"), 16).ok()?;
+        Some((start, end))
+    })
 }
 
 /// IPCSYNC write helper.
@@ -576,13 +672,22 @@ pub fn write_io8(shared: &mut SharedState, addr: u32, val: u8) {
 }
 
 pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
+    let _ = write_io16_effect(shared, addr, val);
+}
+
+pub fn write_io16_effect(shared: &mut SharedState, addr: u32, val: u16) -> Write32Effect {
+    use crate::vram::BankId;
+
     let local = addr & 0x00FF_FFFE;
     if let Some((sel, off)) = classify_engine(local) {
         write_engine_reg16(engine_mut(shared, sel), off, val);
-        return;
+        return Write32Effect::None;
     }
     if shared.math.write16(local, val) {
-        return;
+        return Write32Effect::None;
+    }
+    if let Some((ch, half)) = decode_dma_reg16(local) {
+        return write_dma_reg16(shared, ch, half, val);
     }
     if (0x0100..0x0110).contains(&local) {
         let id = ((local - 0x0100) >> 2) as usize;
@@ -591,7 +696,7 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         } else {
             shared.timers9.write_control(id, val);
         }
-        return;
+        return Write32Effect::None;
     }
     match local {
         0x0004 => {
@@ -628,7 +733,26 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
         0x0180 => write_sync(shared, val),
         0x0184 => write_fifocnt(shared, val),
         0x0204 => shared.exmemcnt = val,
-        0x0246 => shared.wramcnt = val as u8,
+        0x0240 => {
+            shared.vram.write_cnt(BankId::A, val as u8);
+            shared.vram.write_cnt(BankId::B, (val >> 8) as u8);
+        }
+        0x0242 => {
+            shared.vram.write_cnt(BankId::C, val as u8);
+            shared.vram.write_cnt(BankId::D, (val >> 8) as u8);
+        }
+        0x0244 => {
+            shared.vram.write_cnt(BankId::E, val as u8);
+            shared.vram.write_cnt(BankId::F, (val >> 8) as u8);
+        }
+        0x0246 => {
+            shared.vram.write_cnt(BankId::G, val as u8);
+            shared.wramcnt = (val >> 8) as u8;
+        }
+        0x0248 => {
+            shared.vram.write_cnt(BankId::H, val as u8);
+            shared.vram.write_cnt(BankId::I, (val >> 8) as u8);
+        }
         0x0060 => shared.gpu3d.write_disp3dcnt(val),
         0x0600 => {
             shared.gpu3d.write_gxstat_low(val);
@@ -698,6 +822,7 @@ pub fn write_io16(shared: &mut SharedState, addr: u32, val: u16) {
             );
         }
     }
+    Write32Effect::None
 }
 
 /// Result of a 32-bit I/O write. The immediate-mode DMA path returns
@@ -729,8 +854,14 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
     // GXFIFO packed format at 0x04000400, mirrored through 0x0400043F,
     // plus the direct-port range 0x04000440..0x040005FF.
     if (0x0400..0x0440).contains(&local) {
+        if shared.gpu3d.fifo.next_packed_word_is_command_word()
+            && packed_word_contains_geometry_test(val)
+        {
+            shared.gpu3d.test_busy = true;
+        }
         shared.gpu3d.fifo.write_packed(val);
-        shared.gpu3d.drain_fifo();
+        let SharedState { gpu3d, vram, .. } = shared;
+        gpu3d.drain_fifo(Some(vram));
         update_gxfifo_irq(shared);
         if shared.gpu3d.fifo.take_below_half_edge() {
             return Write32Effect::FireGxFifoDma;
@@ -741,8 +872,12 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
         // Direct ports — each command lives at its own 4-byte slot.
         let cmd_byte = ((local - 0x0440) / 4 + 0x10) as u8;
         if let Some(cmd) = GxCmd::from_u8(cmd_byte) {
+            if matches!(cmd, GxCmd::BoxTest | GxCmd::PosTest | GxCmd::VecTest) {
+                shared.gpu3d.test_busy = true;
+            }
             shared.gpu3d.fifo.write_direct(cmd, val);
-            shared.gpu3d.drain_fifo();
+            let SharedState { gpu3d, vram, .. } = shared;
+            gpu3d.drain_fifo(Some(vram));
             update_gxfifo_irq(shared);
             if shared.gpu3d.fifo.take_below_half_edge() {
                 return Write32Effect::FireGxFifoDma;
@@ -772,8 +907,10 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
             Write32Effect::None
         }
         0x01A4 => {
+            // Slot-1 DMA fires from the Slot1Done event once the transfer
+            // time has elapsed — not at command start.
             start_slot1_transfer(shared, val, false);
-            Write32Effect::FireSlot1Dma
+            Write32Effect::None
         }
         0x01A8 | 0x01AC => {
             for i in 0..4 {
@@ -801,15 +938,33 @@ pub fn write_io32(shared: &mut SharedState, addr: u32, val: u32) -> Write32Effec
     }
 }
 
+fn packed_word_contains_geometry_test(word: u32) -> bool {
+    for shift in [0u32, 8, 16, 24] {
+        let id = ((word >> shift) & 0xFF) as u8;
+        if id == 0 {
+            break;
+        }
+        if matches!(
+            GxCmd::from_u8(id),
+            Some(GxCmd::BoxTest | GxCmd::PosTest | GxCmd::VecTest)
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Write32Effect {
     use crate::dma::WriteControlEffect;
     match kind {
         0 => {
             shared.dma9.write_sad(ch, val);
+            trace_dma9_reg_write(shared, ch, "sad32");
             Write32Effect::None
         }
         1 => {
             shared.dma9.write_dad(ch, val);
+            trace_dma9_reg_write(shared, ch, "dad32");
             Write32Effect::None
         }
         2 => {
@@ -817,6 +972,7 @@ fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Wr
             let count = val & 0x001F_FFFF;
             shared.dma9.write_count(ch, count);
             let effect = shared.dma9.write_control(ch, val);
+            trace_dma9_reg_write(shared, ch, "cnt32");
             match effect {
                 WriteControlEffect::RunNow => Write32Effect::RunDma9(ch),
                 WriteControlEffect::Armed(crate::dma::DmaTiming::Slot1)
@@ -828,5 +984,154 @@ fn write_dma_reg(shared: &mut SharedState, ch: usize, kind: u32, val: u32) -> Wr
             }
         }
         _ => Write32Effect::None,
+    }
+}
+
+fn write_dma_reg16(shared: &mut SharedState, ch: usize, half: u32, val: u16) -> Write32Effect {
+    use crate::dma::WriteControlEffect;
+
+    let merge_low = |old: u32| (old & 0xFFFF_0000) | val as u32;
+    let merge_high = |old: u32| (old & 0x0000_FFFF) | ((val as u32) << 16);
+
+    match half {
+        0 => {
+            let sad = merge_low(shared.dma9.read_sad(ch));
+            shared.dma9.write_sad(ch, sad);
+            trace_dma9_reg_write(shared, ch, "sad16l");
+            Write32Effect::None
+        }
+        1 => {
+            let sad = merge_high(shared.dma9.read_sad(ch));
+            shared.dma9.write_sad(ch, sad);
+            trace_dma9_reg_write(shared, ch, "sad16h");
+            Write32Effect::None
+        }
+        2 => {
+            let dad = merge_low(shared.dma9.read_dad(ch));
+            shared.dma9.write_dad(ch, dad);
+            trace_dma9_reg_write(shared, ch, "dad16l");
+            Write32Effect::None
+        }
+        3 => {
+            let dad = merge_high(shared.dma9.read_dad(ch));
+            shared.dma9.write_dad(ch, dad);
+            trace_dma9_reg_write(shared, ch, "dad16h");
+            Write32Effect::None
+        }
+        4 => {
+            let combined = merge_low(shared.dma9.read_control(ch));
+            shared.dma9.channels[ch].control = combined;
+            shared.dma9.write_count(ch, combined & 0x001F_FFFF);
+            trace_dma9_reg_write(shared, ch, "cnt16l");
+            Write32Effect::None
+        }
+        5 => {
+            let combined = merge_high(shared.dma9.read_control(ch));
+            shared.dma9.write_count(ch, combined & 0x001F_FFFF);
+            let effect = shared.dma9.write_control(ch, combined);
+            trace_dma9_reg_write(shared, ch, "cnt16h");
+            match effect {
+                WriteControlEffect::RunNow => Write32Effect::RunDma9(ch),
+                WriteControlEffect::Armed(crate::dma::DmaTiming::Slot1)
+                    if !shared.slot1_data.is_empty() =>
+                {
+                    Write32Effect::FireSlot1Dma
+                }
+                _ => Write32Effect::None,
+            }
+        }
+        _ => Write32Effect::None,
+    }
+}
+
+fn trace_dma9_reg_write(shared: &SharedState, ch: usize, kind: &str) {
+    let c = &shared.dma9.channels[ch];
+    let word_size = shared.dma9.word_size(ch);
+    let count = if c.count_programmed == 0 {
+        shared.dma9.max_count(ch)
+    } else {
+        c.count_programmed.min(shared.dma9.max_count(ch))
+    };
+    let bytes = count.saturating_mul(word_size).max(word_size);
+    let source_match =
+        trace_dma9_reg_range_matches("NDS_TRACE_DMA9_REG_SOURCE_RANGE", c.sad, bytes);
+    let dest_match = trace_dma9_reg_range_matches("NDS_TRACE_DMA9_REG_DEST_RANGE", c.dad, bytes);
+    if source_match || dest_match {
+        eprintln!(
+            "dma9-reg ch={ch} kind={kind} sad=0x{:08X} dad=0x{:08X} count={} ctrl=0x{:08X} active={} internal_sad=0x{:08X} internal_dad=0x{:08X} internal_count={}",
+            c.sad,
+            c.dad,
+            c.count_programmed,
+            c.control,
+            c.active,
+            c.internal_sad,
+            c.internal_dad,
+            c.internal_count
+        );
+    }
+}
+
+fn trace_dma9_reg_range_matches(env: &str, addr: u32, len: u32) -> bool {
+    let Some(spec) = std::env::var_os(env) else {
+        return false;
+    };
+    let Some(spec) = spec.to_str() else {
+        return false;
+    };
+    let Some((start, end)) = spec.split_once("..") else {
+        return false;
+    };
+    let Ok(start) = u32::from_str_radix(start.trim_start_matches("0x"), 16) else {
+        return false;
+    };
+    let Ok(end) = u32::from_str_radix(end.trim_start_matches("0x"), 16) else {
+        return false;
+    };
+    addr < end && addr.saturating_add(len) > start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::shared::SharedState;
+    use crate::vram::BankId;
+
+    #[test]
+    fn write_io16_updates_vramcnt_pairs() {
+        let mut shared = SharedState::new();
+
+        write_io16(&mut shared, 0x0400_0240, 0x8382);
+        write_io16(&mut shared, 0x0400_0242, 0x8584);
+        write_io16(&mut shared, 0x0400_0244, 0x8786);
+        write_io16(&mut shared, 0x0400_0246, 0x8988);
+        write_io16(&mut shared, 0x0400_0248, 0x8B8A);
+
+        assert_eq!(shared.vram.read_cnt(BankId::A), 0x82);
+        assert_eq!(shared.vram.read_cnt(BankId::B), 0x83);
+        assert_eq!(shared.vram.read_cnt(BankId::C), 0x84);
+        assert_eq!(shared.vram.read_cnt(BankId::D), 0x85);
+        assert_eq!(shared.vram.read_cnt(BankId::E), 0x86);
+        assert_eq!(shared.vram.read_cnt(BankId::F), 0x87);
+        assert_eq!(shared.vram.read_cnt(BankId::G), 0x88);
+        assert_eq!(shared.wramcnt, 0x89);
+        assert_eq!(shared.vram.read_cnt(BankId::H), 0x8A);
+        assert_eq!(shared.vram.read_cnt(BankId::I), 0x8B);
+    }
+
+    #[test]
+    fn write_io32_updates_vramcnt_pairs_through_halfword_fallback() {
+        let mut shared = SharedState::new();
+
+        let _ = write_io32(&mut shared, 0x0400_0240, 0x8584_8382);
+        let _ = write_io32(&mut shared, 0x0400_0244, 0x8988_8786);
+
+        assert_eq!(shared.vram.read_cnt(BankId::A), 0x82);
+        assert_eq!(shared.vram.read_cnt(BankId::B), 0x83);
+        assert_eq!(shared.vram.read_cnt(BankId::C), 0x84);
+        assert_eq!(shared.vram.read_cnt(BankId::D), 0x85);
+        assert_eq!(shared.vram.read_cnt(BankId::E), 0x86);
+        assert_eq!(shared.vram.read_cnt(BankId::F), 0x87);
+        assert_eq!(shared.vram.read_cnt(BankId::G), 0x88);
+        assert_eq!(shared.wramcnt, 0x89);
     }
 }

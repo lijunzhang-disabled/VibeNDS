@@ -29,6 +29,7 @@
 //! and the texture palette from its "texture palette" target.
 
 use crate::vram::VramRouter;
+use serde::{Deserialize, Serialize};
 
 /// Decoded view of `TEXIMAGE_PARAM`.
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +43,14 @@ pub struct TexParams {
     pub repeat_t: bool,
     pub flip_s: bool,
     pub flip_t: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextureSnapshot {
+    image_base: u32,
+    image: Vec<u8>,
+    palette_base_addr: u32,
+    palette: Vec<u8>,
 }
 
 impl TexParams {
@@ -62,6 +71,120 @@ impl TexParams {
     /// Whether this polygon has *no* texture (format 0 = none).
     pub fn is_disabled(self) -> bool {
         self.format == 0
+    }
+}
+
+impl TextureSnapshot {
+    pub fn capture(param: u32, palette_base: u16, vram: &VramRouter) -> Option<Self> {
+        let tp = TexParams::from_register(param);
+        if tp.is_disabled() || tp.format == 5 {
+            return None;
+        }
+
+        let image_len = texture_image_len(tp)?;
+        let mut image = Vec::with_capacity(image_len as usize);
+        for off in 0..image_len {
+            image.push(vram.read_texture_image(tp.vram_offset + off));
+        }
+
+        let palette_base_addr = palette_addr_for_format(tp.format, palette_base, 0);
+        let palette_len = texture_palette_len(tp.format)?;
+        let mut palette = Vec::with_capacity(palette_len as usize);
+        for off in 0..palette_len {
+            palette.push(vram.read_texture_palette(palette_base_addr + off));
+        }
+
+        Some(TextureSnapshot {
+            image_base: tp.vram_offset,
+            image,
+            palette_base_addr,
+            palette,
+        })
+    }
+
+    fn read_image(&self, addr: u32) -> u8 {
+        let Some(off) = addr.checked_sub(self.image_base) else {
+            return 0;
+        };
+        self.image.get(off as usize).copied().unwrap_or(0)
+    }
+
+    fn read_palette(&self, addr: u32) -> u8 {
+        let Some(off) = addr.checked_sub(self.palette_base_addr) else {
+            return 0;
+        };
+        self.palette.get(off as usize).copied().unwrap_or(0)
+    }
+
+    pub fn image_len(&self) -> usize {
+        self.image.len()
+    }
+
+    pub fn image_nonzero_nibbles(&self) -> usize {
+        self.image
+            .iter()
+            .map(|b| ((*b & 0x0F) != 0) as usize + ((*b >> 4) != 0) as usize)
+            .sum()
+    }
+}
+
+fn texture_image_len(tp: TexParams) -> Option<u32> {
+    let pixels = tp.width.checked_mul(tp.height)?;
+    match tp.format {
+        1 | 4 | 6 => Some(pixels),
+        2 => Some(pixels / 4),
+        3 => Some(pixels / 2),
+        7 => Some(pixels * 2),
+        _ => None,
+    }
+}
+
+fn texture_palette_len(format: u8) -> Option<u32> {
+    match format {
+        1 => Some(32 * 2),
+        2 => Some(4 * 2),
+        3 => Some(16 * 2),
+        4 => Some(256 * 2),
+        6 => Some(8 * 2),
+        _ => Some(0),
+    }
+}
+
+fn palette_addr_for_format(format: u8, palette_base: u16, idx: u32) -> u32 {
+    let base = palette_base as u32;
+    match format {
+        // ndsdoc: 4-color palettes use PLTT_BASE in 8-byte units.
+        2 => (base << 3) + idx * 2,
+        3 if std::env::var_os("NDS_FORMAT3_PLTT_DIV8").is_some() => (base << 3) + idx * 2,
+        // Other palette formats use 16-byte units.
+        _ => (base << 4) + idx * 2,
+    }
+}
+
+pub enum TextureSource<'a> {
+    Vram(&'a VramRouter),
+    Snapshot(&'a TextureSnapshot),
+}
+
+impl TextureSource<'_> {
+    fn read_image(&self, addr: u32) -> u8 {
+        match self {
+            TextureSource::Vram(vram) => vram.read_texture_image(addr),
+            TextureSource::Snapshot(snapshot) => snapshot.read_image(addr),
+        }
+    }
+
+    fn read_palette_u16(&self, addr: u32) -> u16 {
+        let a = addr & !1;
+        let lo = match self {
+            TextureSource::Vram(vram) => vram.read_texture_palette(a),
+            TextureSource::Snapshot(snapshot) => snapshot.read_palette(a),
+        } as u16;
+        let hi = match self {
+            TextureSource::Vram(vram) => vram.read_texture_palette(a + 1),
+            TextureSource::Snapshot(snapshot) => snapshot.read_palette(a + 1),
+        } as u16;
+        lo | (hi << 8)
     }
 }
 
@@ -94,6 +217,26 @@ pub struct Texel {
 /// Sample one texel at integer texture-space `(u, v)`. Caller is
 /// responsible for perspective-correcting `u` and `v` before calling.
 pub fn sample(tp: TexParams, u: i32, v: i32, palette_base: u16, vram: &VramRouter) -> Texel {
+    sample_from_source(tp, u, v, palette_base, TextureSource::Vram(vram))
+}
+
+pub fn sample_snapshot(
+    tp: TexParams,
+    u: i32,
+    v: i32,
+    palette_base: u16,
+    snapshot: &TextureSnapshot,
+) -> Texel {
+    sample_from_source(tp, u, v, palette_base, TextureSource::Snapshot(snapshot))
+}
+
+fn sample_from_source(
+    tp: TexParams,
+    u: i32,
+    v: i32,
+    palette_base: u16,
+    source: TextureSource<'_>,
+) -> Texel {
     if tp.is_disabled() {
         // Should never be called for format=0; return transparent for safety.
         return Texel { color: 0, alpha: 0 };
@@ -104,37 +247,30 @@ pub fn sample(tp: TexParams, u: i32, v: i32, palette_base: u16, vram: &VramRoute
     let pixel_idx = tv * tp.width + su;
 
     match tp.format {
-        1 => sample_a3i5(tp, pixel_idx, palette_base, vram),
-        2 => sample_4color(tp, pixel_idx, palette_base, vram),
-        3 => sample_16color(tp, pixel_idx, palette_base, vram),
-        4 => sample_256color(tp, pixel_idx, palette_base, vram),
-        5 => sample_block_compressed(tp, su, tv, palette_base, vram),
-        6 => sample_a5i3(tp, pixel_idx, palette_base, vram),
-        7 => sample_direct(tp, pixel_idx, vram),
+        1 => sample_a3i5(tp, pixel_idx, palette_base, &source),
+        2 => sample_4color(tp, pixel_idx, palette_base, &source),
+        3 => sample_16color(tp, pixel_idx, palette_base, &source),
+        4 => sample_256color(tp, pixel_idx, palette_base, &source),
+        5 => sample_block_compressed(tp, su, tv, palette_base, &source),
+        6 => sample_a5i3(tp, pixel_idx, palette_base, &source),
+        7 => sample_direct(tp, pixel_idx, &source),
         _ => Texel { color: 0, alpha: 0 },
     }
 }
 
-fn read_pal_entry(format: u8, palette_base: u16, idx: u32, vram: &VramRouter) -> u16 {
-    let base = palette_base as u32;
-    let addr = match format {
-        // ndsdoc: 4-color palettes use PLTT_BASE in 8-byte units.
-        2 => (base << 3) + idx * 2,
-        // Other palette formats use 16-byte units.
-        _ => (base << 4) + idx * 2,
-    };
-    vram.read_texture_palette_u16(addr)
+fn read_pal_entry(format: u8, palette_base: u16, idx: u32, source: &TextureSource<'_>) -> u16 {
+    source.read_palette_u16(palette_addr_for_format(format, palette_base, idx))
 }
 
-fn read_image_byte(tp: TexParams, byte_off: u32, vram: &VramRouter) -> u8 {
-    vram.read_texture_image(tp.vram_offset + byte_off)
+fn read_image_byte(tp: TexParams, byte_off: u32, source: &TextureSource<'_>) -> u8 {
+    source.read_image(tp.vram_offset + byte_off)
 }
 
-fn sample_a3i5(tp: TexParams, idx: u32, palette_base: u16, vram: &VramRouter) -> Texel {
-    let byte = read_image_byte(tp, idx, vram);
+fn sample_a3i5(tp: TexParams, idx: u32, palette_base: u16, source: &TextureSource<'_>) -> Texel {
+    let byte = read_image_byte(tp, idx, source);
     let alpha3 = (byte >> 5) & 0x7;
     let palidx = (byte & 0x1F) as u32;
-    let color = read_pal_entry(tp.format, palette_base, palidx, vram);
+    let color = read_pal_entry(tp.format, palette_base, palidx, source);
     // 3-bit alpha → 5-bit: (a3 * 4 + a3 / 2). Standard expansion.
     let alpha = (alpha3 << 2) | (alpha3 >> 1);
     Texel {
@@ -143,40 +279,50 @@ fn sample_a3i5(tp: TexParams, idx: u32, palette_base: u16, vram: &VramRouter) ->
     }
 }
 
-fn sample_a5i3(tp: TexParams, idx: u32, palette_base: u16, vram: &VramRouter) -> Texel {
-    let byte = read_image_byte(tp, idx, vram);
+fn sample_a5i3(tp: TexParams, idx: u32, palette_base: u16, source: &TextureSource<'_>) -> Texel {
+    let byte = read_image_byte(tp, idx, source);
     let alpha = (byte >> 3) & 0x1F;
     let palidx = (byte & 0x7) as u32;
-    let color = read_pal_entry(tp.format, palette_base, palidx, vram);
+    let color = read_pal_entry(tp.format, palette_base, palidx, source);
     Texel {
         color: color & 0x7FFF,
         alpha,
     }
 }
 
-fn sample_4color(tp: TexParams, idx: u32, palette_base: u16, vram: &VramRouter) -> Texel {
-    let byte = read_image_byte(tp, idx >> 2, vram);
+fn sample_4color(tp: TexParams, idx: u32, palette_base: u16, source: &TextureSource<'_>) -> Texel {
+    let byte = read_image_byte(tp, idx >> 2, source);
     let bit_off = (idx & 0x3) * 2;
     let palidx = ((byte >> bit_off) & 0x3) as u32;
-    palette_sample(tp, palidx, palette_base, vram)
+    palette_sample(tp, palidx, palette_base, source)
 }
 
-fn sample_16color(tp: TexParams, idx: u32, palette_base: u16, vram: &VramRouter) -> Texel {
-    let byte = read_image_byte(tp, idx >> 1, vram);
+fn sample_16color(tp: TexParams, idx: u32, palette_base: u16, source: &TextureSource<'_>) -> Texel {
+    let byte = read_image_byte(tp, idx >> 1, source);
     let palidx = if idx & 1 != 0 {
         (byte >> 4) & 0xF
     } else {
         byte & 0xF
     } as u32;
-    palette_sample(tp, palidx, palette_base, vram)
+    palette_sample(tp, palidx, palette_base, source)
 }
 
-fn sample_256color(tp: TexParams, idx: u32, palette_base: u16, vram: &VramRouter) -> Texel {
-    let palidx = read_image_byte(tp, idx, vram) as u32;
-    palette_sample(tp, palidx, palette_base, vram)
+fn sample_256color(
+    tp: TexParams,
+    idx: u32,
+    palette_base: u16,
+    source: &TextureSource<'_>,
+) -> Texel {
+    let palidx = read_image_byte(tp, idx, source) as u32;
+    palette_sample(tp, palidx, palette_base, source)
 }
 
-fn palette_sample(tp: TexParams, palidx: u32, palette_base: u16, vram: &VramRouter) -> Texel {
+fn palette_sample(
+    tp: TexParams,
+    palidx: u32,
+    palette_base: u16,
+    source: &TextureSource<'_>,
+) -> Texel {
     let alpha = if palidx == 0 && tp.color0_transparent {
         0
     } else {
@@ -185,16 +331,16 @@ fn palette_sample(tp: TexParams, palidx: u32, palette_base: u16, vram: &VramRout
     let color = if alpha == 0 {
         0
     } else {
-        read_pal_entry(tp.format, palette_base, palidx, vram) & 0x7FFF
+        read_pal_entry(tp.format, palette_base, palidx, source) & 0x7FFF
     };
     Texel { color, alpha }
 }
 
-fn sample_direct(tp: TexParams, idx: u32, vram: &VramRouter) -> Texel {
+fn sample_direct(tp: TexParams, idx: u32, source: &TextureSource<'_>) -> Texel {
     // 16-bit per texel: BGR555 in low 15 bits, alpha bit at 15.
     let addr = tp.vram_offset + idx * 2;
-    let lo = vram.read_texture_image(addr) as u16;
-    let hi = vram.read_texture_image(addr + 1) as u16;
+    let lo = source.read_image(addr) as u16;
+    let hi = source.read_image(addr + 1) as u16;
     let v = lo | (hi << 8);
     let alpha = if v & 0x8000 != 0 { 31 } else { 0 };
     Texel {
@@ -208,7 +354,7 @@ fn sample_block_compressed(
     u: u32,
     v: u32,
     palette_base: u16,
-    vram: &VramRouter,
+    source: &TextureSource<'_>,
 ) -> Texel {
     let blocks_per_row = (tp.width / 4).max(1);
     let block_x = u / 4;
@@ -216,26 +362,26 @@ fn sample_block_compressed(
     let block_idx = block_y * blocks_per_row + block_x;
     let block_addr = tp.vram_offset + block_idx * 4;
 
-    let texel_bits = read_image_byte(tp, block_idx * 4, vram) as u32
-        | ((read_image_byte(tp, block_idx * 4 + 1, vram) as u32) << 8)
-        | ((read_image_byte(tp, block_idx * 4 + 2, vram) as u32) << 16)
-        | ((read_image_byte(tp, block_idx * 4 + 3, vram) as u32) << 24);
+    let texel_bits = read_image_byte(tp, block_idx * 4, source) as u32
+        | ((read_image_byte(tp, block_idx * 4 + 1, source) as u32) << 8)
+        | ((read_image_byte(tp, block_idx * 4 + 2, source) as u32) << 16)
+        | ((read_image_byte(tp, block_idx * 4 + 3, source) as u32) << 24);
     let local = (v & 3) * 4 + (u & 3);
     let idx = (texel_bits >> (local * 2)) & 0x3;
 
     let Some(param_addr) = compressed_palette_param_addr(block_addr) else {
         return Texel { color: 0, alpha: 0 };
     };
-    let param = vram.read_texture_image(param_addr) as u16
-        | ((vram.read_texture_image(param_addr + 1) as u16) << 8);
+    let param =
+        source.read_image(param_addr) as u16 | ((source.read_image(param_addr + 1) as u16) << 8);
     let pal_off = (param & 0x3FFF) as u32;
     let mode = (param >> 14) as u8;
     let pal_addr = ((palette_base as u32) << 4) + pal_off * 4;
 
-    let c0 = vram.read_texture_palette_u16(pal_addr) & 0x7FFF;
-    let c1 = vram.read_texture_palette_u16(pal_addr + 2) & 0x7FFF;
-    let c2 = vram.read_texture_palette_u16(pal_addr + 4) & 0x7FFF;
-    let c3 = vram.read_texture_palette_u16(pal_addr + 6) & 0x7FFF;
+    let c0 = source.read_palette_u16(pal_addr) & 0x7FFF;
+    let c1 = source.read_palette_u16(pal_addr + 2) & 0x7FFF;
+    let c2 = source.read_palette_u16(pal_addr + 4) & 0x7FFF;
+    let c3 = source.read_palette_u16(pal_addr + 6) & 0x7FFF;
 
     match (mode, idx) {
         (0 | 1, 3) => Texel { color: 0, alpha: 0 },

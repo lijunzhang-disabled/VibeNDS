@@ -405,6 +405,7 @@ mod tests {
             attr: (16 << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -556,6 +557,7 @@ mod tests {
             attr: (31 << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 6 << 26,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
 
@@ -570,6 +572,7 @@ mod tests {
             attr: (1 << 6) | (1 << 7),
             tex_image_param: 6 << 26,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
 
@@ -588,6 +591,7 @@ mod tests {
             attr: (1 << 6) | (1 << 7),
             tex_image_param: 6 << 26,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
         for v in &mut wire.vertices {
@@ -599,6 +603,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
         for v in &mut opaque.vertices {
@@ -633,6 +638,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 6 << 26,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
         let mut back_blue = ScreenPolygon {
@@ -640,6 +646,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
         for v in &mut back_blue.vertices {
@@ -663,6 +670,7 @@ mod tests {
             attr: (1 << 4) | (31 << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 6 << 26,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
 
@@ -676,6 +684,7 @@ mod tests {
             attr: (1 << 4) | (1 << 6) | (1 << 7),
             tex_image_param: 6 << 26,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
 

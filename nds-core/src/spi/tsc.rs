@@ -35,10 +35,14 @@ use serde::{Deserialize, Serialize};
 /// Default ADC calibration constants — chosen to match the synthesized
 /// firmware calibration block so screen pixels round-trip cleanly.
 /// (Real DS firmware uses ADC ranges similar to these.)
-pub const ADC_X1: u16 = 0x0200; // raw ADC for screen X = 0
-pub const ADC_X2: u16 = 0x0E00; // raw ADC for screen X = 255
+pub const ADC_X1: u16 = 0x0200;
+pub const ADC_X2: u16 = 0x0E00;
 pub const ADC_Y1: u16 = 0x0200;
 pub const ADC_Y2: u16 = 0x0E00;
+pub const SCR_X1: u8 = 32;
+pub const SCR_Y1: u8 = 32;
+pub const SCR_X2: u8 = 224;
+pub const SCR_Y2: u8 = 160;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
@@ -85,15 +89,25 @@ impl Tsc {
         self.pen_down = down;
     }
 
-    /// Map screen X (0..255) → ADC value using the [ADC_X1, ADC_X2] range.
+    /// Map screen X (0..255) → ADC value using the synthesized firmware
+    /// calibration. Firmware screen calibration points are 1-origin, and
+    /// game-side conversion subtracts one after scaling.
     fn adc_x(&self) -> u16 {
         let span = ADC_X2 - ADC_X1;
-        ADC_X1 + ((self.screen_x as u32 * span as u32) / 255) as u16
+        let scr_span = SCR_X2 - SCR_X1;
+        let screen = self.screen_x.saturating_add(1);
+        let offset = screen.saturating_sub(SCR_X1 as u16) as u32;
+        let raw = ADC_X1 + ((offset * span as u32) / scr_span as u32) as u16;
+        raw.min(ADC_X2)
     }
 
     fn adc_y(&self) -> u16 {
         let span = ADC_Y2 - ADC_Y1;
-        ADC_Y1 + ((self.screen_y as u32 * span as u32) / 191) as u16
+        let scr_span = SCR_Y2 - SCR_Y1;
+        let screen = self.screen_y.saturating_add(1);
+        let offset = screen.saturating_sub(SCR_Y1 as u16) as u32;
+        let raw = ADC_Y1 + ((offset * span as u32) / scr_span as u32) as u16;
+        raw.min(ADC_Y2)
     }
 
     /// Z (pressure): non-zero when pen is down, zero when not.
@@ -105,31 +119,49 @@ impl Tsc {
         }
     }
 
+    fn sample_channel(&self, channel: u8) -> u16 {
+        let raw = match channel {
+            1 => {
+                if self.pen_down {
+                    self.adc_y()
+                } else {
+                    0x0FFF
+                }
+            }
+            2 => 0x0000, // battery voltage is wired to ground on NDS.
+            3 | 4 => self.adc_z(),
+            5 => {
+                if self.pen_down {
+                    self.adc_x()
+                } else {
+                    0x0000
+                }
+            }
+            _ => 0, // AUX / temperature — return 0
+        };
+        raw & 0x0FFF
+    }
+
+    fn start_conversion(&mut self, byte_in: u8) -> bool {
+        if byte_in & 0x80 == 0 {
+            return false;
+        }
+        let channel = (byte_in >> 4) & 0x7;
+        let eight_bit = byte_in & 0x08 != 0;
+        self.phase = Phase::HighByte {
+            value12: self.sample_channel(channel),
+            channel,
+            eight_bit,
+        };
+        true
+    }
+
     pub fn xfer(&mut self, byte_in: u8, _hold: bool) -> u8 {
         match self.phase {
             Phase::Idle => {
-                if byte_in & 0x80 == 0 {
-                    // Not a start bit — return 0 and stay idle.
-                    return 0;
-                }
-                let channel = (byte_in >> 4) & 0x7;
-                let eight_bit = byte_in & 0x08 != 0;
-
-                let raw = match channel {
-                    1 => self.adc_y(),
-                    2 => 0x0CCC,           // battery voltage (~80% of full scale)
-                    3 | 4 => self.adc_z(), // touch pressure
-                    5 => self.adc_x(),
-                    _ => 0, // AUX / temperature — return 0
-                };
-
-                // Real chip returns 0 for the channel-byte response (the
-                // result lands on the *next* two transfers).
-                self.phase = Phase::HighByte {
-                    value12: raw & 0x0FFF,
-                    channel,
-                    eight_bit,
-                };
+                // Real chip returns 0 for the channel-byte response; the
+                // result lands on following transfers.
+                let _ = self.start_conversion(byte_in);
                 0
             }
             Phase::HighByte {
@@ -153,7 +185,11 @@ impl Tsc {
                 } else {
                     ((value12 << 3) & 0xF8) as u8
                 };
-                self.phase = Phase::Idle;
+                // Software can pipeline reads by sending the next control byte
+                // while clocking out the previous conversion's low byte.
+                if !self.start_conversion(byte_in) {
+                    self.phase = Phase::Idle;
+                }
                 lo
             }
         }
@@ -214,6 +250,26 @@ mod tests {
         assert!(read_channel(&mut tsc, 3) > 0);
         tsc.set_touch(100, 100, false);
         assert_eq!(read_channel(&mut tsc, 3), 0);
+    }
+
+    #[test]
+    fn test_control_byte_can_pipeline_next_conversion_on_low_byte() {
+        let mut tsc = Tsc::new();
+        tsc.set_touch(128, 150, true);
+
+        let x_control = 0x80 | (5 << 4);
+        let y_control = 0x80 | (1 << 4);
+
+        assert_eq!(tsc.xfer(x_control, true), 0);
+        let x_hi = tsc.xfer(0, true);
+        let x_lo = tsc.xfer(y_control, true);
+        let x = ((x_hi as u16) << 5) | ((x_lo as u16) >> 3);
+        assert_eq!(x, tsc.adc_x());
+
+        let y_hi = tsc.xfer(0, true);
+        let y_lo = tsc.xfer(0, false);
+        let y = ((y_hi as u16) << 5) | ((y_lo as u16) >> 3);
+        assert_eq!(y, tsc.adc_y());
     }
 
     #[test]

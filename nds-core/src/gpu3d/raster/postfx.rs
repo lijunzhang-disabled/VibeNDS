@@ -333,6 +333,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7) | ((poly_id as u32) << 24),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -343,6 +344,7 @@ mod tests {
             attr: ((alpha as u32) << 16) | (1 << 6) | (1 << 7) | ((poly_id as u32) << 24),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -353,6 +355,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7) | if fog_enabled { 1 << 15 } else { 0 },
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -1069,6 +1072,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7) | (1 << 15),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
         r.render_frame(&[p], None);

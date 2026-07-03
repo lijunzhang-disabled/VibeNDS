@@ -8,12 +8,14 @@
 //! actual `0x04000400`/`0x04000440+` I/O wiring lives in `io_arm9.rs`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 use super::clip::clip_polygon;
 use super::command::GxCmd;
 use super::fifo::{GxFifo, GxOp};
 use super::lighting::{compute_vertex_color, LightingState};
 use super::matrix::Matrix;
+use super::raster::texture::TextureSnapshot;
 use super::raster::Rasterizer;
 use super::stacks::{MatrixStacks, MtxMode};
 use super::vertex::{
@@ -25,6 +27,38 @@ use super::viewport::{transform_polygon, ScreenPolygon, Viewport};
 /// Maximum polygons / vertices per frame, per GBATEK.
 pub const POLYGON_BUF_LIMIT: usize = 2048;
 pub const VERTEX_BUF_LIMIT: usize = 6144;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugRejectedPolygon {
+    pub reason: String,
+    pub attr: u32,
+    pub tex_image_param: u32,
+    pub palette_base: u16,
+    pub vertices: usize,
+    pub clip_min: [i32; 4],
+    pub clip_max: [i32; 4],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugScreenPolygon {
+    pub index: usize,
+    pub attr: u32,
+    pub tex_image_param: u32,
+    pub palette_base: u16,
+    pub vertices: usize,
+    pub clip: Vec<[i32; 4]>,
+    pub screen: Vec<[i32; 2]>,
+    pub texcoords: Vec<[i16; 2]>,
+    #[serde(default)]
+    pub recent_ops: Vec<DebugGxOp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugGxOp {
+    pub cmd: u8,
+    pub name: String,
+    pub params: Vec<u32>,
+}
 
 /// Full 3D engine state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +76,14 @@ pub struct Engine3d {
     /// Raster buffer: last frame's geometry, swapped in by SWAP_BUFFERS,
     /// rasterized into `rasterizer.framebuffer` at the same time.
     pub raster_polygons: Vec<ScreenPolygon>,
+    #[serde(default)]
+    pub debug_rejected_polygons: Vec<DebugRejectedPolygon>,
+    #[serde(default)]
+    pub debug_last_rejected_polygons: Vec<DebugRejectedPolygon>,
+    #[serde(default)]
+    pub debug_last_screen_polygons: Vec<DebugScreenPolygon>,
+    #[serde(default)]
+    pub debug_recent_ops: VecDeque<DebugGxOp>,
 
     /// Set whenever `SWAP_BUFFERS` is queued; consumed and cleared at the
     /// next frame boundary (VBlank-end) by the top-level scheduler.
@@ -85,6 +127,10 @@ impl Engine3d {
             viewport: Viewport::full_screen(),
             geometry_polygons: Vec::new(),
             raster_polygons: Vec::new(),
+            debug_rejected_polygons: Vec::new(),
+            debug_last_rejected_polygons: Vec::new(),
+            debug_last_screen_polygons: Vec::new(),
+            debug_recent_ops: VecDeque::new(),
             swap_pending: false,
             geometry_swap_attrs: 0,
             pending_swap_attrs: 0,
@@ -100,12 +146,12 @@ impl Engine3d {
 
     /// Drain every command currently `ready` in the FIFO. Called by the
     /// bus dispatcher after each write that might have completed a command.
-    pub fn drain_fifo(&mut self) {
+    pub fn drain_fifo(&mut self, vram: Option<&crate::vram::VramRouter>) {
         while !self.swap_pending && !self.geometry_locked {
             let Some(op) = self.fifo.pop_op() else {
                 break;
             };
-            self.dispatch(op);
+            self.dispatch_with_vram(op, vram);
         }
         if !self.swap_pending && !self.geometry_locked {
             self.fifo.reconcile_after_drain();
@@ -113,6 +159,10 @@ impl Engine3d {
     }
 
     fn dispatch(&mut self, op: GxOp) {
+        self.dispatch_with_vram(op, None);
+    }
+
+    fn dispatch_with_vram(&mut self, op: GxOp, vram: Option<&crate::vram::VramRouter>) {
         let cmd = match GxCmd::from_u8(op.cmd) {
             Some(c) => c,
             None => {
@@ -122,6 +172,11 @@ impl Engine3d {
         };
         let params = op.params;
         let p0 = params.first().copied().unwrap_or(0);
+        self.push_debug_op(DebugGxOp {
+            cmd: cmd as u8,
+            name: format!("{:?}", cmd),
+            params: params.clone(),
+        });
         match cmd {
             // ─── Matrix commands ─────────────────────────────────
             GxCmd::MtxMode => self.stacks.set_mode(MtxMode::from_bits(p0)),
@@ -250,7 +305,7 @@ impl Engine3d {
 
         // After every command, drain any newly-completed polygons through
         // clipping + viewport into the geometry buffer.
-        self.flush_polygons();
+        self.flush_polygons_with_vram(vram);
     }
 
     fn handle_normal(&mut self, param: u32) {
@@ -335,7 +390,17 @@ impl Engine3d {
             (p2 >> 16) as i16 as i32,
         ];
         let clip = self.stacks.clip_matrix();
-        self.box_test_visible = box_intersects_view_volume(origin, size, &clip);
+        self.box_test_visible = if std::env::var_os("NDS_FORCE_BOX_TEST_VISIBLE").is_some() {
+            true
+        } else {
+            box_intersects_view_volume(origin, size, &clip)
+        };
+        if std::env::var_os("NDS_TRACE_GX_BOX_TEST").is_some() {
+            eprintln!(
+                "box_test origin={origin:?} size={size:?} visible={}",
+                self.box_test_visible
+            );
+        }
         self.test_busy = false;
     }
 
@@ -343,21 +408,31 @@ impl Engine3d {
     /// through clipping + viewport into `geometry_polygons`. Respects the
     /// per-frame caps.
     fn flush_polygons(&mut self) {
+        self.flush_polygons_with_vram(None);
+    }
+
+    fn flush_polygons_with_vram(&mut self, vram: Option<&crate::vram::VramRouter>) {
         let polys: Vec<_> = self.vertex.polygon_buffer.drain(..).collect();
         for poly in polys {
             if self.geometry_polygons.len() >= POLYGON_BUF_LIMIT {
                 self.fifo.overflow = true;
+                self.record_rejected_polygon("polygon_limit", &poly);
                 continue;
             }
             if poly.attr & (1 << 12) == 0 && intersects_far_plane(&poly.vertices) {
+                self.record_rejected_polygon("far_plane", &poly);
                 continue;
             }
             let clipped: Vec<Vertex> = match clip_polygon(&poly.vertices) {
                 Some(v) => v,
-                None => continue, // fully outside; discard
+                None => {
+                    self.record_rejected_polygon("clip", &poly);
+                    continue;
+                } // fully outside; discard
             };
             if self.geometry_vertex_count() + clipped.len() > VERTEX_BUF_LIMIT {
                 self.fifo.overflow = true;
+                self.record_rejected_polygon("vertex_limit", &poly);
                 continue;
             }
             // Build a clipped Polygon, then viewport-transform.
@@ -368,12 +443,76 @@ impl Engine3d {
                 palette_base: poly.palette_base,
                 front_area_negative: poly.front_area_negative,
             };
-            let screen = transform_polygon(&clipped_poly, self.viewport);
+            let mut screen = transform_polygon(&clipped_poly, self.viewport);
             if zero_dot_polygon_is_hidden(&screen, self.disp_1dot_depth) {
+                self.record_rejected_polygon("zero_dot", &poly);
                 continue;
             }
+            if let Some(vram) = vram {
+                screen.texture_snapshot =
+                    TextureSnapshot::capture(screen.tex_image_param, screen.palette_base, vram);
+            }
+            let index = self.geometry_polygons.len();
+            self.record_debug_screen_polygon(index, &clipped_poly, &screen);
             self.geometry_polygons.push(screen);
         }
+    }
+
+    fn record_debug_screen_polygon(
+        &mut self,
+        index: usize,
+        clip_poly: &super::vertex::Polygon,
+        screen: &ScreenPolygon,
+    ) {
+        if self.debug_last_screen_polygons.len() >= 2048 {
+            self.debug_last_screen_polygons.remove(0);
+        }
+        self.debug_last_screen_polygons.push(DebugScreenPolygon {
+            index,
+            attr: screen.attr,
+            tex_image_param: screen.tex_image_param,
+            palette_base: screen.palette_base,
+            vertices: screen.vertices.len(),
+            clip: clip_poly.vertices.iter().map(|v| v.clip).collect(),
+            screen: screen
+                .vertices
+                .iter()
+                .map(|v| [v.screen_x, v.screen_y])
+                .collect(),
+            texcoords: screen.vertices.iter().map(|v| v.tex).collect(),
+            recent_ops: self.debug_recent_ops.iter().cloned().collect(),
+        });
+    }
+
+    fn push_debug_op(&mut self, op: DebugGxOp) {
+        const DEBUG_RECENT_OPS_LIMIT: usize = 48;
+        self.debug_recent_ops.push_back(op);
+        while self.debug_recent_ops.len() > DEBUG_RECENT_OPS_LIMIT {
+            self.debug_recent_ops.pop_front();
+        }
+    }
+
+    fn record_rejected_polygon(&mut self, reason: &str, poly: &super::vertex::Polygon) {
+        let mut clip_min = [i32::MAX; 4];
+        let mut clip_max = [i32::MIN; 4];
+        for v in &poly.vertices {
+            for i in 0..4 {
+                clip_min[i] = clip_min[i].min(v.clip[i]);
+                clip_max[i] = clip_max[i].max(v.clip[i]);
+            }
+        }
+        if self.debug_rejected_polygons.len() >= 512 {
+            self.debug_rejected_polygons.remove(0);
+        }
+        self.debug_rejected_polygons.push(DebugRejectedPolygon {
+            reason: reason.to_string(),
+            attr: poly.attr,
+            tex_image_param: poly.tex_image_param,
+            palette_base: poly.palette_base,
+            vertices: poly.vertices.len(),
+            clip_min,
+            clip_max,
+        });
     }
 
     /// Frame-boundary swap. Called by the top-level scheduler at VBlank end
@@ -388,11 +527,14 @@ impl Engine3d {
             return;
         }
         self.raster_polygons = std::mem::take(&mut self.geometry_polygons);
+        let screen_debug = std::mem::take(&mut self.debug_last_screen_polygons);
+        self.debug_last_rejected_polygons = std::mem::take(&mut self.debug_rejected_polygons);
+        self.debug_last_screen_polygons = screen_debug;
         self.swap_pending = false;
         self.rasterizer.set_swap_attrs(self.geometry_swap_attrs);
         self.rasterizer.render_frame(&self.raster_polygons, vram);
         self.geometry_swap_attrs = self.pending_swap_attrs;
-        self.drain_fifo();
+        self.drain_fifo(vram);
     }
 
     /// Read a pixel from the 3D framebuffer. Engine A's BG0 path calls
@@ -866,7 +1008,7 @@ mod tests {
             });
         }
 
-        e.drain_fifo();
+        e.drain_fifo(None);
         assert_eq!(e.geometry_polygons.len(), 1);
         assert_eq!(e.fifo.ready.len(), 5);
 
@@ -910,7 +1052,7 @@ mod tests {
             params: vec![1],
         });
 
-        e.drain_fifo();
+        e.drain_fifo(None);
 
         assert_eq!(e.fifo.ready.len(), 1);
         assert!(matches!(e.stacks.mode, MtxMode::Projection));
@@ -1557,6 +1699,7 @@ mod tests {
                 attr: 0,
                 tex_image_param: 0,
                 palette_base: 0,
+                texture_snapshot: None,
                 front_area_negative: true,
             });
         }
@@ -1611,6 +1754,7 @@ mod tests {
                 attr: (0x1F << 16) | (1 << 6) | (1 << 7),
                 tex_image_param: 0,
                 palette_base: 0,
+                texture_snapshot: None,
                 front_area_negative: true,
             });
         }

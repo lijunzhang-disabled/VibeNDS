@@ -120,6 +120,10 @@ impl GxFifo {
         self.entries
     }
 
+    pub fn next_packed_word_is_command_word(&self) -> bool {
+        self.pending_cmds.is_empty()
+    }
+
     /// Write to the packed-format port at `0x04000400`. Pushes one word
     /// into the FIFO and decodes commands as parameter words accumulate.
     pub fn write_packed(&mut self, word: u32) {

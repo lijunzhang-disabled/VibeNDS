@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::matrix::ONE;
+use super::raster::texture::TextureSnapshot;
 use super::vertex::{Polygon, Vertex};
 
 /// VIEWPORT command parameter unpacked into rectangle bounds.
@@ -80,6 +81,8 @@ pub struct ScreenPolygon {
     pub attr: u32,
     pub tex_image_param: u32,
     pub palette_base: u16,
+    #[serde(default)]
+    pub texture_snapshot: Option<TextureSnapshot>,
     /// True when a negative signed screen-space area is the polygon's front
     /// side. Triangle strips invert this for every second triangle on DS.
     #[serde(default = "default_front_area_negative")]
@@ -135,6 +138,7 @@ pub fn transform_polygon(p: &Polygon, vp: Viewport) -> ScreenPolygon {
         attr: p.attr,
         tex_image_param: p.tex_image_param,
         palette_base: p.palette_base,
+        texture_snapshot: None,
         front_area_negative: p.front_area_negative,
     }
 }

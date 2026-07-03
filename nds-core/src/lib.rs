@@ -130,6 +130,7 @@ impl Nds {
                     let itcm = self.cpu9.cp15.itcm;
                     let dtcm = self.cpu9.cp15.dtcm;
                     let mut bus = Bus9::new(&mut self.mem9, &mut self.shared, itcm, dtcm);
+                    bus.trace_pc = self.cpu9.regs[15];
                     arm9_cycles_total += self.cpu9.step(&mut bus);
                 } else {
                     arm9_cycles_total += 1;
@@ -171,6 +172,7 @@ impl Nds {
 
             self.scheduler.add_cycles(arm7_consumed as u64);
 
+            self.pump_slot1_schedule();
             while let Some(event) = self.scheduler.pop_if_ready() {
                 self.dispatch_event(event);
             }
@@ -233,6 +235,7 @@ impl Nds {
             let itcm = self.cpu9.cp15.itcm;
             let dtcm = self.cpu9.cp15.dtcm;
             let mut bus = Bus9::new(&mut self.mem9, &mut self.shared, itcm, dtcm);
+            bus.trace_pc = self.cpu9.regs[15];
             self.cpu9.step(&mut bus);
         }
         if let Some(swi) = self.cpu9.pending_swi.take() {
@@ -252,8 +255,22 @@ impl Nds {
         } else {
             self.scheduler.add_cycles(1);
         }
+        self.pump_slot1_schedule();
         while let Some(event) = self.scheduler.pop_if_ready() {
             self.dispatch_event(event);
+        }
+    }
+
+    /// Convert a pending slot-1 transfer-start into a scheduled `Slot1Done`
+    /// event. `start_slot1_transfer` runs deep inside a bus write with no
+    /// scheduler access, so it leaves the delay in `slot1_delay_request`.
+    fn pump_slot1_schedule(&mut self) {
+        if let Some(delay) = self.shared.slot1_delay_request.take() {
+            self.scheduler.cancel(EventKind::Slot1Done);
+            self.scheduler.schedule(Event {
+                fire_time: self.scheduler.timestamp() + delay,
+                kind: EventKind::Slot1Done,
+            });
         }
     }
 
@@ -265,8 +282,9 @@ impl Nds {
         self.check_keypad_irq();
     }
 
-    /// EXTKEYIN — bits 0 = X, 1 = Y, 2 = (rsvd), 3 = debug, 6 = lid open,
-    /// 7 = pen down. ARM7 only sees this register.
+    /// EXTKEYIN — bits 0 = X, 1 = Y, 2 = set/unknown, 3 = debug,
+    /// 4-5 = set/unknown, 6 = pen down, 7 = hinge/folded.
+    /// ARM7 only sees this register.
     pub fn set_extkeys(&mut self, extkeys: u16) {
         self.shared.extkeyin = extkeys & 0x007F;
     }
@@ -402,6 +420,13 @@ impl Nds {
         }
     }
 
+    fn run_gxfifo_dmas(&mut self) {
+        let itcm = self.cpu9.cp15.itcm;
+        let dtcm = self.cpu9.cp15.dtcm;
+        let mut bus = Bus9::new(&mut self.mem9, &mut self.shared, itcm, dtcm);
+        bus.run_gxfifo_dmas();
+    }
+
     fn feed_main_mem_display_fifo(&mut self) {
         while self.shared.disp_mmem_fifo.len() < 128
             && self.shared.dma9.channels[3].active
@@ -478,6 +503,19 @@ impl Nds {
     }
 
     fn handle_swi9(&mut self, swi: u8) {
+        if std::env::var_os("NDS_TRACE_SWI").is_some() {
+            eprintln!("swi arm9 0x{swi:02X}");
+        }
+        if std::env::var_os("NDS_TRACE_SWI9_ARGS").is_some() {
+            eprintln!(
+                "swi arm9 0x{swi:02X} r0=0x{:08X} r1=0x{:08X} r2=0x{:08X} r3=0x{:08X} pc=0x{:08X}",
+                self.cpu9.regs[0],
+                self.cpu9.regs[1],
+                self.cpu9.regs[2],
+                self.cpu9.regs[3],
+                self.cpu9.regs[15],
+            );
+        }
         let real_bios = !self.direct_boot;
         if real_bios {
             // With a real BIOS dump the CPU enters the standard SWI vector.
@@ -493,6 +531,9 @@ impl Nds {
     }
 
     fn handle_swi7(&mut self, swi: u8) {
+        if std::env::var_os("NDS_TRACE_SWI").is_some() {
+            eprintln!("swi arm7 0x{swi:02X}");
+        }
         let real_bios = !self.direct_boot;
         if real_bios {
             self.cpu7.software_interrupt(swi as u32);
@@ -500,6 +541,40 @@ impl Nds {
             let mut bus = Bus7::new(&mut self.mem7, &mut self.shared);
             if !bios::arm7::handle_swi(&mut self.cpu7, &mut bus, swi) {
                 log::trace!("ARM7 direct-boot unhandled SWI 0x{:02X}; returning", swi);
+            }
+        }
+    }
+
+    /// The card transfer time has elapsed: publish the pending data words,
+    /// then service any Slot1-timed DMA and the completion IRQ.
+    fn complete_slot1_transfer(&mut self) {
+        let SharedState {
+            slot1_pending,
+            slot1_data,
+            ..
+        } = &mut self.shared;
+        slot1_data.extend(slot1_pending.drain(..));
+        if !self.shared.slot1_data.is_empty() {
+            self.shared.slot1_romctrl |= 1 << 23;
+        } else {
+            self.shared.slot1_romctrl &= !((1 << 31) | (1 << 23));
+        }
+        {
+            let itcm = self.cpu9.cp15.itcm;
+            let dtcm = self.cpu9.cp15.dtcm;
+            let mut bus = Bus9::new(&mut self.mem9, &mut self.shared, itcm, dtcm);
+            bus.run_slot1_dmas();
+        }
+        {
+            let mut bus = Bus7::new(&mut self.mem7, &mut self.shared);
+            bus.run_slot1_dmas();
+        }
+        if self.shared.slot1_complete_irq {
+            self.shared.slot1_complete_irq = false;
+            if self.shared.slot1_complete_irq_to_arm7 {
+                self.shared.irq7.request(Irq::Slot1Data);
+            } else {
+                self.shared.irq9.request(Irq::Slot1Data);
             }
         }
     }
@@ -520,14 +595,16 @@ impl Nds {
                 // hasn't moved yet so we paint line N during line N's HBlank.
                 let line = self.shared.vcount;
                 if line < VISIBLE_LINES {
-                    let swap_lcd = self.shared.powcnt1 & (1 << 15) != 0;
-                    let (top_engine_a, bot_engine_a) = if swap_lcd {
-                        (false, true)
-                    } else {
+                    let display_a_upper = self.shared.powcnt1 & (1 << 15) != 0;
+                    let (top_engine_a, bot_engine_a) = if display_a_upper {
                         (true, false)
+                    } else {
+                        (false, true)
                     };
-                    // Engine A → top by default. Pass the 3D framebuffer
-                    // slice so BG0 can read from it when DISPCNT bit 3 is set.
+                    // POWCNT1 bit 15 routes Display A/Engine A to the upper
+                    // screen when set, otherwise to the lower touch screen.
+                    // Pass the 3D framebuffer slice so BG0 can read from it
+                    // when DISPCNT bit 3 is set.
                     if (self.shared.engine_a.dispcnt >> 16) & 0x3 == 3
                         || self.capture_needs_main_mem_fifo(line)
                     {
@@ -568,7 +645,7 @@ impl Nds {
                         &self.framebuffer_bot
                     };
                     capture_display_scanline(&mut self.shared, line, engine_a_framebuffer);
-                    // Engine B → bottom by default. Engine B has no 3D source.
+                    // Engine B appears on the opposite physical screen.
                     {
                         let palette = &self.shared.palette[0x400..0x800];
                         let oam = &self.shared.oam[0x400..0x800];
@@ -623,8 +700,20 @@ impl Nds {
                 check_vcount_match(&mut self.shared.dispstat9, &mut self.shared.irq9, line);
                 check_vcount_match(&mut self.shared.dispstat7, &mut self.shared.irq7, line);
 
+                // ARM9 display-sync DMA fires at the start of HDraw for
+                // scanlines 2..193.
+                if (2..=193).contains(&line) {
+                    self.run_dmas_for_timing9(dma::DmaTiming::DisplaySync);
+                }
+
                 if line == VISIBLE_LINES {
                     // Enter VBlank
+                    if std::env::var_os("NDS_TRACE_FRAME_MARK").is_some() {
+                        use std::sync::atomic::{AtomicU64, Ordering};
+                        static FRAME: AtomicU64 = AtomicU64::new(0);
+                        let n = FRAME.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("=== vblank frame={n}");
+                    }
                     self.shared.dispstat9 |= 0x0001;
                     self.shared.dispstat7 |= 0x0001;
                     if self.shared.dispstat9 & 0x0008 != 0 {
@@ -652,6 +741,9 @@ impl Nds {
                     // rasterizer can read textures.
                     let SharedState { gpu3d, vram, .. } = &mut self.shared;
                     gpu3d.swap_buffers(Some(vram));
+                    if self.shared.gpu3d.fifo.take_below_half_edge() {
+                        self.run_gxfifo_dmas();
+                    }
                 }
 
                 self.scheduler.schedule(Event {
@@ -662,6 +754,9 @@ impl Nds {
             EventKind::VBlank => {
                 // VBlank entry already handled in HBlankEnd; this event slot
                 // is reserved for VBlank DMA / capture wiring in Phase 3+.
+            }
+            EventKind::Slot1Done => {
+                self.complete_slot1_transfer();
             }
             _ => {
                 // Phase 2 doesn't wire these yet.
@@ -1348,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_solid_bg_renders_to_top_framebuffer() {
+    fn test_solid_bg_renders_to_lower_framebuffer_by_default() {
         let mut nds = Nds::new(None, None);
         let red = setup_solid_red_bg0(&mut nds);
         // Both CPUs halted so we just drive the scheduler.
@@ -1357,19 +1452,21 @@ mod tests {
 
         nds.run_frame();
 
-        // Every visible pixel on the top framebuffer should be red.
+        // POWCNT1 bit 15 defaults clear, so Display A/Engine A is on the
+        // lower touch screen.
         for y in 0..SCREEN_HEIGHT {
             for x in 0..SCREEN_WIDTH {
                 assert_eq!(
-                    nds.framebuffer_top[y * SCREEN_WIDTH + x],
+                    nds.framebuffer_bot[y * SCREEN_WIDTH + x],
                     red,
                     "pixel ({},{}) wrong: 0x{:04X}",
                     x,
                     y,
-                    nds.framebuffer_top[y * SCREEN_WIDTH + x]
+                    nds.framebuffer_bot[y * SCREEN_WIDTH + x]
                 );
             }
         }
+        assert_eq!(nds.framebuffer_top[0], 0);
     }
 
     #[test]
@@ -1377,6 +1474,7 @@ mod tests {
         let mut nds = Nds::new(None, None);
         nds.cpu9.halted = true;
         nds.cpu7.halted = true;
+        nds.shared.powcnt1 = 1 << 15;
         nds.shared.engine_a.dispcnt = 2 << 16;
         nds.shared.vram.write_cnt(crate::vram::BankId::A, 0x80);
         nds.shared.vram.cpu_write_arm9(0x0680_0000, 0x1F);
@@ -1392,6 +1490,7 @@ mod tests {
         let mut nds = Nds::new(None, None);
         nds.cpu9.halted = true;
         nds.cpu7.halted = true;
+        nds.shared.powcnt1 = 1 << 15;
         nds.shared.engine_a.dispcnt = 3 << 16;
         for _ in 0..128 {
             nds.shared.disp_mmem_fifo.push_back(0x03E0_001F);
@@ -1408,6 +1507,7 @@ mod tests {
         let mut nds = Nds::new(None, None);
         nds.cpu9.halted = true;
         nds.cpu7.halted = true;
+        nds.shared.powcnt1 = 1 << 15;
         nds.shared.engine_a.dispcnt = 3 << 16;
         for i in 0..128 {
             let lo: u32 = if i % 2 == 0 { 0x001F } else { 0x7C00 };
@@ -1772,27 +1872,36 @@ mod tests {
     }
 
     #[test]
-    fn test_powcnt_swap_lcd_routes_engine_a_to_bottom() {
+    fn test_powcnt_bit15_routes_display_a_between_screens() {
         let mut nds = Nds::new(None, None);
         let red = setup_solid_red_bg0(&mut nds);
-        // POWCNT1 bit 15 = swap LCDs.
+        nds.cpu9.halted = true;
+        nds.cpu7.halted = true;
+
+        nds.run_frame();
+
+        // POWCNT1 bit 15 clear sends Display A/Engine A to the lower screen.
+        assert_eq!(nds.framebuffer_bot[0], red);
+        assert_eq!(nds.framebuffer_top[0], 0);
+
+        let mut nds = Nds::new(None, None);
+        let red = setup_solid_red_bg0(&mut nds);
         nds.shared.powcnt1 = 1 << 15;
         nds.cpu9.halted = true;
         nds.cpu7.halted = true;
 
         nds.run_frame();
 
-        // Engine A's red should now be on the BOTTOM framebuffer.
-        assert_eq!(nds.framebuffer_bot[0], red);
-        // Top should be backdrop (palette[0] = 0 → black) since Engine B has
-        // no BGs configured.
-        assert_eq!(nds.framebuffer_top[0], 0);
+        // POWCNT1 bit 15 set sends Display A/Engine A to the upper screen.
+        assert_eq!(nds.framebuffer_top[0], red);
+        assert_eq!(nds.framebuffer_bot[0], 0);
     }
 
     #[test]
     fn test_obj_renders_above_bg() {
         let mut nds = Nds::new(None, None);
         let _red = setup_solid_red_bg0(&mut nds);
+        nds.shared.powcnt1 = 1 << 15;
 
         // OBJ palette index 1 → blue (BGR555 0x7C00).
         let blue = 0x7C00u16;
@@ -1964,6 +2073,36 @@ mod tests {
     }
 
     #[test]
+    fn test_dma9_halfword_control_starts_immediate_copy_to_vram() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.main_ram[0..4].copy_from_slice(&0x89AB_CDEFu32.to_le_bytes());
+        nds.shared.vram.write_cnt(crate::vram::BankId::A, 0x80 | 1);
+
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+        bus.write16(0x0400_00B0, 0x0000);
+        bus.write16(0x0400_00B2, 0x0200);
+        bus.write16(0x0400_00B4, 0x0100);
+        bus.write16(0x0400_00B6, 0x0600);
+        bus.write16(0x0400_00B8, 1);
+        bus.write16(0x0400_00BA, (((1u32 << 31) | (1 << 26)) >> 16) as u16);
+        drop(bus);
+
+        let v = u32::from_le_bytes([
+            nds.shared.vram.cpu_read_arm9(0x0600_0100),
+            nds.shared.vram.cpu_read_arm9(0x0600_0101),
+            nds.shared.vram.cpu_read_arm9(0x0600_0102),
+            nds.shared.vram.cpu_read_arm9(0x0600_0103),
+        ]);
+        assert_eq!(v, 0x89AB_CDEF);
+        assert!(!nds.shared.dma9.channels[0].active);
+    }
+
+    #[test]
     fn test_dma9_vblank_fires_at_line_192() {
         let mut nds = Nds::new(None, None);
         // Source word at 0x02000000.
@@ -1995,6 +2134,45 @@ mod tests {
             nds.shared.main_ram[0x2003],
         ]);
         assert_eq!(v, 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn test_dma9_display_sync_fires_at_hdraw_line_2() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.main_ram[0..4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        nds.shared.vram.write_cnt(crate::vram::BankId::A, 0x80 | 1);
+
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+        bus.write32(0x0400_00B0, 0x0200_0000);
+        bus.write32(0x0400_00B4, 0x0600_0100);
+        bus.write32(0x0400_00B8, (1u32 << 31) | (1 << 26) | (3 << 27) | 1);
+        drop(bus);
+
+        nds.shared.vcount = 0;
+        nds.dispatch_event(Event {
+            fire_time: nds.scheduler.timestamp(),
+            kind: EventKind::HBlankEnd,
+        });
+        assert_eq!(nds.shared.vram.cpu_read_arm9(0x0600_0100), 0);
+        assert!(nds.shared.dma9.channels[0].active);
+
+        nds.dispatch_event(Event {
+            fire_time: nds.scheduler.timestamp(),
+            kind: EventKind::HBlankEnd,
+        });
+        let v = u32::from_le_bytes([
+            nds.shared.vram.cpu_read_arm9(0x0600_0100),
+            nds.shared.vram.cpu_read_arm9(0x0600_0101),
+            nds.shared.vram.cpu_read_arm9(0x0600_0102),
+            nds.shared.vram.cpu_read_arm9(0x0600_0103),
+        ]);
+        assert_eq!(v, 0x1234_5678);
+        assert!(!nds.shared.dma9.channels[0].active);
     }
 
     #[test]
@@ -2081,6 +2259,7 @@ mod tests {
     #[test]
     fn test_3d_rasterized_triangle_lands_on_top_framebuffer() {
         let mut nds = Nds::new(None, None);
+        nds.shared.powcnt1 = 1 << 15;
 
         // Configure Engine A: display mode 1, BG0 enabled, BG0_3D enabled.
         // DISPCNT bits: [0..2] mode, [3] bg0_3d, [8] bg0_enable, [16..17] display mode.
@@ -2129,6 +2308,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7), // opaque, render front/back
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         });
         nds.shared.gpu3d.swap_pending = true;
@@ -2167,6 +2347,7 @@ mod tests {
     #[test]
     fn test_3d_disabled_when_bg0_3d_clear() {
         let mut nds = Nds::new(None, None);
+        nds.shared.powcnt1 = 1 << 15;
 
         // Engine A: BG0 enabled but BG0_3D *not* set. Plain BG0 source.
         nds.shared.engine_a.dispcnt = 0x0001_0100;
@@ -2204,6 +2385,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         });
         nds.shared.gpu3d.swap_pending = true;
@@ -2433,6 +2615,50 @@ mod tests {
     }
 
     #[test]
+    fn test_vblank_swap_drain_triggers_gxfifo_dma() {
+        let mut nds = Nds::new(None, None);
+        for i in 0..120u32 {
+            let off = (i * 4) as usize;
+            nds.shared.main_ram[off..off + 4].copy_from_slice(&0x0000_0011u32.to_le_bytes());
+        }
+
+        nds.shared.gpu3d.swap_pending = true;
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        // While SWAP_BUFFERS is pending, geometry commands queue but do not
+        // drain. 32 packed MTX_PUSH words produce exactly 128 FIFO entries.
+        for _ in 0..32 {
+            bus.write32(0x0400_0400, 0x1111_1111);
+        }
+        assert_eq!(bus.shared.gpu3d.fifo.len(), gpu3d::fifo::FIFO_HALF);
+
+        bus.write32(0x0400_00D4, 0x0200_0000);
+        bus.write32(0x0400_00D8, 0x0400_0400);
+        bus.write32(
+            0x0400_00DC,
+            (1 << 31) | (7 << 27) | (1 << 26) | (2 << 21) | 120,
+        );
+        assert!(bus.shared.dma9.channels[3].active);
+        drop(bus);
+
+        nds.shared.vcount = LINES_PER_FRAME - 1;
+        nds.dispatch_event(Event {
+            fire_time: nds.scheduler.timestamp(),
+            kind: EventKind::HBlankEnd,
+        });
+
+        assert!(!nds.shared.dma9.channels[3].active);
+        assert_eq!(nds.shared.dma9.channels[3].control & (1 << 31), 0);
+        assert_eq!(nds.shared.dma9.channels[3].internal_count, 0);
+        assert_eq!(nds.shared.dma9.channels[3].internal_sad, 0x0200_01E0);
+    }
+
+    #[test]
     fn test_gxstat_low_reflects_idle_geometry_at_boot() {
         let mut nds = Nds::new(None, None);
         let mut bus = Bus9::new(
@@ -2534,6 +2760,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         });
         let mut bus = Bus9::new(
@@ -2733,6 +2960,38 @@ mod tests {
     }
 
     #[test]
+    fn test_direct_geometry_test_sets_busy_while_queued() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.gpu3d.swap_pending = true;
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_05C0, 0); // BOX_TEST param 1, queued behind swap.
+
+        assert_ne!(bus.read16(0x0400_0600) & 1, 0);
+    }
+
+    #[test]
+    fn test_packed_geometry_test_sets_busy_while_queued() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.gpu3d.swap_pending = true;
+        let mut bus = Bus9::new(
+            &mut nds.mem9,
+            &mut nds.shared,
+            nds.cpu9.cp15.itcm,
+            nds.cpu9.cp15.dtcm,
+        );
+
+        bus.write32(0x0400_0400, 0x70); // Packed BOX_TEST command byte.
+
+        assert_ne!(bus.read16(0x0400_0600) & 1, 0);
+    }
+
+    #[test]
     fn test_set_touch_drives_tsc_and_extkeyin() {
         let mut nds = Nds::new(None, None);
         // Pen down at (128, 96).
@@ -2863,20 +3122,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_arm9_slot1_header_read_queues_card_data() {
-        let mut nds = Nds::new(None, None);
-        nds.shared.slot1_rom = (0..=0x1FF).map(|v| v as u8).collect();
-        let mut bus = Bus9::new(
+    fn test_bus9(nds: &mut Nds) -> Bus9<'_> {
+        Bus9::new(
             &mut nds.mem9,
             &mut nds.shared,
             cpu::cp15::TcmRegion::disabled(),
             cpu::cp15::TcmRegion::disabled(),
-        );
+        )
+    }
 
+    #[test]
+    fn test_arm9_slot1_header_read_queues_card_data() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = (0..=0x1FF).map(|v| v as u8).collect();
+
+        let mut bus = test_bus9(&mut nds);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (7 << 24));
 
+        // Busy immediately, but data only becomes readable after the
+        // hardware transfer time (Slot1Done event).
+        assert_eq!(bus.read32(0x0400_01A4) & ((1 << 31) | (1 << 23)), 1 << 31);
+        assert!(nds.shared.slot1_delay_request.is_some());
+        nds.complete_slot1_transfer();
+
+        let mut bus = test_bus9(&mut nds);
         assert_eq!(
             bus.read32(0x0400_01A4) & ((1 << 31) | (1 << 23)),
             (1 << 31) | (1 << 23)
@@ -2889,18 +3159,15 @@ mod tests {
     fn test_arm9_slot1_b7_read_uses_big_endian_command_offset() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x3F).map(|v| v as u8).collect();
-        let mut bus = Bus9::new(
-            &mut nds.mem9,
-            &mut nds.shared,
-            cpu::cp15::TcmRegion::disabled(),
-            cpu::cp15::TcmRegion::disabled(),
-        );
 
+        let mut bus = test_bus9(&mut nds);
         for (i, byte) in [0xB7, 0x00, 0x00, 0x00, 0x04, 0, 0, 0].iter().enumerate() {
             bus.write8(0x0400_01A8 + i as u32, *byte);
         }
         bus.write32(0x0400_01A4, (1 << 31) | (7 << 24));
+        nds.complete_slot1_transfer();
 
+        let mut bus = test_bus9(&mut nds);
         assert_eq!(bus.read32(0x0410_0010), 0x0706_0504);
         assert_eq!(bus.read32(0x0410_0010), 0xFFFF_FFFF);
     }
@@ -2909,16 +3176,13 @@ mod tests {
     fn test_arm9_slot1_data_port_repeats_for_incrementing_word_reads() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
-        let mut bus = Bus9::new(
-            &mut nds.mem9,
-            &mut nds.shared,
-            cpu::cp15::TcmRegion::disabled(),
-            cpu::cp15::TcmRegion::disabled(),
-        );
 
+        let mut bus = test_bus9(&mut nds);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+        nds.complete_slot1_transfer();
 
+        let mut bus = test_bus9(&mut nds);
         assert_eq!(bus.read32(0x0410_0010), 0x0302_0100);
         assert_eq!(bus.read32(0x0410_0014), 0x0706_0504);
         assert_eq!(bus.read32(0x0410_0018), 0x0B0A_0908);
@@ -2926,18 +3190,16 @@ mod tests {
     }
 
     #[test]
-    fn test_arm9_slot1_status_polling_completes_unread_transfer() {
+    fn test_arm9_slot1_status_polling_preserves_unread_transfer_data() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x1FF).map(|v| v as u8).collect();
-        let mut bus = Bus9::new(
-            &mut nds.mem9,
-            &mut nds.shared,
-            cpu::cp15::TcmRegion::disabled(),
-            cpu::cp15::TcmRegion::disabled(),
-        );
 
+        let mut bus = test_bus9(&mut nds);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+        nds.complete_slot1_transfer();
+
+        let mut bus = test_bus9(&mut nds);
         assert_eq!(bus.read32(0x0410_0010), 0x0302_0100);
 
         let mut status = 0;
@@ -2945,24 +3207,26 @@ mod tests {
             status = bus.read32(0x0400_01A4);
         }
 
-        assert_eq!(status & ((1 << 31) | (1 << 23)), 0);
-        assert_eq!(bus.read32(0x0410_0010), 0xFFFF_FFFF);
+        assert_eq!(status & (1 << 31), 0);
+        assert_eq!(status & (1 << 23), 1 << 23);
+        assert_eq!(bus.read32(0x0410_0010), 0x0706_0504);
     }
 
     #[test]
     fn test_arm9_slot1_read_with_irq_enable_requests_slot1_data_irq() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
-        let mut bus = Bus9::new(
-            &mut nds.mem9,
-            &mut nds.shared,
-            cpu::cp15::TcmRegion::disabled(),
-            cpu::cp15::TcmRegion::disabled(),
-        );
 
+        let mut bus = test_bus9(&mut nds);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (7 << 24) | (1 << 14));
 
+        // The completion IRQ arrives with the data, not at command start.
+        assert_eq!(
+            nds.shared.irq9.read_if() & interrupt::Irq::Slot1Data.bit(),
+            0
+        );
+        nds.complete_slot1_transfer();
         assert_ne!(
             nds.shared.irq9.read_if() & interrupt::Irq::Slot1Data.bit(),
             0
@@ -2973,13 +3237,8 @@ mod tests {
     fn test_arm9_slot1_transfer_fires_slot1_dma() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
-        let mut bus = Bus9::new(
-            &mut nds.mem9,
-            &mut nds.shared,
-            cpu::cp15::TcmRegion::disabled(),
-            cpu::cp15::TcmRegion::disabled(),
-        );
 
+        let mut bus = test_bus9(&mut nds);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_00B0, 0x0410_0010);
         bus.write32(0x0400_00B4, 0x0200_1000);
@@ -2988,6 +3247,10 @@ mod tests {
             (1u32 << 31) | (1 << 26) | (2 << 23) | (5 << 27) | 2,
         );
         bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+
+        // Nothing lands until the transfer time elapses.
+        assert_eq!(&nds.shared.main_ram[0x1000..0x1008], &[0u8; 8]);
+        nds.complete_slot1_transfer();
 
         assert_eq!(
             &nds.shared.main_ram[0x1000..0x1008],
@@ -2999,15 +3262,13 @@ mod tests {
     fn test_arm9_slot1_dma_fires_when_armed_after_card_data_ready() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
-        let mut bus = Bus9::new(
-            &mut nds.mem9,
-            &mut nds.shared,
-            cpu::cp15::TcmRegion::disabled(),
-            cpu::cp15::TcmRegion::disabled(),
-        );
 
+        let mut bus = test_bus9(&mut nds);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+        nds.complete_slot1_transfer();
+
+        let mut bus = test_bus9(&mut nds);
         bus.write32(0x0400_00BC, 0x0410_0010);
         bus.write32(0x0400_00C0, 0x0200_2000);
         bus.write32(
@@ -3041,10 +3302,11 @@ mod tests {
     fn test_arm7_slot1_read_with_irq_enable_requests_arm7_irq() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
-        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
 
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (7 << 24) | (1 << 14));
+        nds.complete_slot1_transfer();
 
         assert_ne!(
             nds.shared.irq7.read_if() & interrupt::Irq::Slot1Data.bit(),
@@ -3060,10 +3322,13 @@ mod tests {
     fn test_arm7_slot1_dma_fires_when_armed_after_card_data_ready() {
         let mut nds = Nds::new(None, None);
         nds.shared.slot1_rom = (0..=0x1F).map(|v| v as u8).collect();
-        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
 
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
         bus.write8(0x0400_01A8, 0x00);
         bus.write32(0x0400_01A4, (1 << 31) | (1 << 24));
+        nds.complete_slot1_transfer();
+
+        let mut bus = Bus7::new(&mut nds.mem7, &mut nds.shared);
         bus.write32(0x0400_00BC, 0x0410_0010);
         bus.write32(0x0400_00C0, 0x0200_3000);
         bus.write32(

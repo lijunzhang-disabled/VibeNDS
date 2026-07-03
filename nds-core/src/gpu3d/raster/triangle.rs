@@ -119,6 +119,7 @@ pub fn rasterize_polygon(p: &ScreenPolygon, rast: &mut Rasterizer, vram: Option<
             v2,
             rast,
             vram,
+            p,
             tex_params,
             palette_base,
             mode,
@@ -152,7 +153,8 @@ fn draw_wire_line(
     let mode = ((attr >> 4) & 0x3) as u8;
     let tex_params = TexParams::from_register(p.tex_image_param);
     let texture_mapping_enabled = rast.disp3dcnt & 1 != 0;
-    let textured = texture_mapping_enabled && !tex_params.is_disabled() && vram.is_some();
+    let textured =
+        texture_mapping_enabled && !tex_params.is_disabled() && texture_available(p, vram);
     // POLYGON_ATTR alpha=0 selects wireframe; actual wire pixels use Av=31.
     let attr_alpha = ((attr >> 16) & 0x1F) as u8;
     let poly_alpha = if attr_alpha == 0 { 31 } else { attr_alpha };
@@ -177,7 +179,7 @@ fn draw_wire_line(
             let vertex_color = lerp_screen_color(a, b, t);
             let (color_no_alpha_bit, frag_alpha) = if mode == 2 {
                 let texel = if textured {
-                    sample_line_texel(a, b, t, tex_params, p.palette_base, vram.unwrap())
+                    sample_line_texel(a, b, t, tex_params, p.palette_base, p, vram)
                 } else {
                     texture::Texel {
                         color: 0x7FFF,
@@ -186,7 +188,7 @@ fn draw_wire_line(
                 };
                 combine_toon_highlight(texel, vertex_color, rast)
             } else if textured {
-                let texel = sample_line_texel(a, b, t, tex_params, p.palette_base, vram.unwrap());
+                let texel = sample_line_texel(a, b, t, tex_params, p.palette_base, p, vram);
                 texture::combine_with_vertex(texel, vertex_color, mode)
             } else {
                 (vertex_color, 31)
@@ -312,7 +314,8 @@ fn sample_line_texel(
     t: i64,
     tex_params: TexParams,
     palette_base: u16,
-    vram: &VramRouter,
+    p: &ScreenPolygon,
+    vram: Option<&VramRouter>,
 ) -> texture::Texel {
     let w_a = (a.w.max(1)) as i64;
     let w_b = (b.w.max(1)) as i64;
@@ -327,7 +330,51 @@ fn sample_line_texel(
     let t_w = lerp_i64(t_over_w_a, t_over_w_b, t);
     let s_pixel = ((s_w * 16) / inv_w) as i32 >> 4;
     let t_pixel = ((t_w * 16) / inv_w) as i32 >> 4;
-    texture::sample(tex_params, s_pixel, t_pixel, palette_base, vram)
+    sample_texel(tex_params, s_pixel, t_pixel, palette_base, p, vram)
+}
+
+fn texture_available(p: &ScreenPolygon, vram: Option<&VramRouter>) -> bool {
+    p.texture_snapshot.is_some() || vram.is_some()
+}
+
+fn sample_texel(
+    tex_params: TexParams,
+    s_pixel: i32,
+    t_pixel: i32,
+    palette_base: u16,
+    p: &ScreenPolygon,
+    vram: Option<&VramRouter>,
+) -> texture::Texel {
+    if let Some(vram) = vram {
+        return texture::sample(tex_params, s_pixel, t_pixel, palette_base, vram);
+    }
+    if let Some(snapshot) = &p.texture_snapshot {
+        return texture::sample_snapshot(tex_params, s_pixel, t_pixel, palette_base, snapshot);
+    }
+    texture::Texel {
+        color: 0x7FFF,
+        alpha: 31,
+    }
+}
+
+fn sample_texel_for_polygon(
+    tex_params: TexParams,
+    s_pixel: i32,
+    t_pixel: i32,
+    palette_base: u16,
+    p: Option<&ScreenPolygon>,
+    vram: Option<&VramRouter>,
+) -> texture::Texel {
+    if let Some(p) = p {
+        return sample_texel(tex_params, s_pixel, t_pixel, palette_base, p, vram);
+    }
+    if let Some(vram) = vram {
+        return texture::sample(tex_params, s_pixel, t_pixel, palette_base, vram);
+    }
+    texture::Texel {
+        color: 0x7FFF,
+        alpha: 31,
+    }
 }
 
 fn draw_point(
@@ -347,17 +394,19 @@ fn draw_point(
     let mode = ((attr >> 4) & 0x3) as u8;
     let tex_params = TexParams::from_register(p.tex_image_param);
     let texture_mapping_enabled = rast.disp3dcnt & 1 != 0;
-    let textured = texture_mapping_enabled && !tex_params.is_disabled() && vram.is_some();
+    let textured =
+        texture_mapping_enabled && !tex_params.is_disabled() && texture_available(p, vram);
     let attr_alpha = ((attr >> 16) & 0x1F) as u8;
     let poly_alpha = if attr_alpha == 0 { 31 } else { attr_alpha };
     let (color_no_alpha_bit, frag_alpha) = if mode == 2 {
         let texel = if textured {
-            texture::sample(
+            sample_texel(
                 tex_params,
                 (v.tex[0] as i32) >> 4,
                 (v.tex[1] as i32) >> 4,
                 p.palette_base,
-                vram.unwrap(),
+                p,
+                vram,
             )
         } else {
             texture::Texel {
@@ -367,12 +416,13 @@ fn draw_point(
         };
         combine_toon_highlight(texel, v.color, rast)
     } else if textured {
-        let texel = texture::sample(
+        let texel = sample_texel(
             tex_params,
             (v.tex[0] as i32) >> 4,
             (v.tex[1] as i32) >> 4,
             p.palette_base,
-            vram.unwrap(),
+            p,
+            vram,
         );
         texture::combine_with_vertex(texel, v.color, mode)
     } else {
@@ -512,6 +562,7 @@ fn rasterize_triangle(
     mut v2: Vert,
     rast: &mut Rasterizer,
     vram: Option<&VramRouter>,
+    p: &ScreenPolygon,
     tex_params: TexParams,
     palette_base: u16,
     mode: u8,
@@ -549,7 +600,7 @@ fn rasterize_triangle(
             let edge_long = lerp_vert(&v0, &v2, t_long);
             let edge_short = lerp_vert(&v0, &v1, t_short);
             let (y_coverage, y_edge_hint) = vertical_pixel_coverage(y, v0.y_fp, v2.y_fp);
-            rasterize_scanline(
+            rasterize_scanline_with_polygon(
                 y,
                 edge_short,
                 edge_long,
@@ -558,6 +609,7 @@ fn rasterize_triangle(
                 aa_triangle,
                 rast,
                 vram,
+                p,
                 tex_params,
                 palette_base,
                 mode,
@@ -574,7 +626,7 @@ fn rasterize_triangle(
             let edge_long = lerp_vert(&v0, &v2, t_long);
             let edge_short = lerp_vert(&v1, &v2, t_short);
             let (y_coverage, y_edge_hint) = vertical_pixel_coverage(y, v0.y_fp, v2.y_fp);
-            rasterize_scanline(
+            rasterize_scanline_with_polygon(
                 y,
                 edge_short,
                 edge_long,
@@ -583,6 +635,7 @@ fn rasterize_triangle(
                 aa_triangle,
                 rast,
                 vram,
+                p,
                 tex_params,
                 palette_base,
                 mode,
@@ -643,6 +696,72 @@ fn rasterize_scanline(
     mode: u8,
     exclude_lower_right_edges: bool,
 ) {
+    rasterize_scanline_inner(
+        y,
+        a,
+        b,
+        y_coverage,
+        y_edge_hint,
+        aa_triangle,
+        rast,
+        vram,
+        None,
+        tex_params,
+        palette_base,
+        mode,
+        exclude_lower_right_edges,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_scanline_with_polygon(
+    y: i32,
+    a: Vert,
+    b: Vert,
+    y_coverage: u8,
+    y_edge_hint: u8,
+    aa_triangle: Option<[(i32, i32); 3]>,
+    rast: &mut Rasterizer,
+    vram: Option<&VramRouter>,
+    p: &ScreenPolygon,
+    tex_params: TexParams,
+    palette_base: u16,
+    mode: u8,
+    exclude_lower_right_edges: bool,
+) {
+    rasterize_scanline_inner(
+        y,
+        a,
+        b,
+        y_coverage,
+        y_edge_hint,
+        aa_triangle,
+        rast,
+        vram,
+        Some(p),
+        tex_params,
+        palette_base,
+        mode,
+        exclude_lower_right_edges,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_scanline_inner(
+    y: i32,
+    mut a: Vert,
+    mut b: Vert,
+    y_coverage: u8,
+    y_edge_hint: u8,
+    aa_triangle: Option<[(i32, i32); 3]>,
+    rast: &mut Rasterizer,
+    vram: Option<&VramRouter>,
+    p: Option<&ScreenPolygon>,
+    tex_params: TexParams,
+    palette_base: u16,
+    mode: u8,
+    exclude_lower_right_edges: bool,
+) {
     if y < 0 || y >= FB_HEIGHT as i32 {
         return;
     }
@@ -663,7 +782,12 @@ fn rasterize_scanline(
     let row_base = (y as usize) * FB_WIDTH;
 
     let texture_mapping_enabled = rast.disp3dcnt & 1 != 0;
-    let textured = texture_mapping_enabled && !tex_params.is_disabled() && vram.is_some();
+    let textured = texture_mapping_enabled
+        && !tex_params.is_disabled()
+        && match p {
+            Some(p) => texture_available(p, vram),
+            None => vram.is_some(),
+        };
 
     for x in x_left..=x_right {
         let (aa_coverage, aa_edge_hint) = if let Some(tri) = aa_triangle {
@@ -700,7 +824,7 @@ fn rasterize_scanline(
                 let t_w = lerp_i64(a.t_over_w, b.t_over_w, t);
                 let s_pixel = ((s_w * 16) / inv_w) as i32 >> 4;
                 let t_pixel = ((t_w * 16) / inv_w) as i32 >> 4;
-                texture::sample(tex_params, s_pixel, t_pixel, palette_base, vram.unwrap())
+                sample_texel_for_polygon(tex_params, s_pixel, t_pixel, palette_base, p, vram)
             } else {
                 texture::Texel {
                     color: 0x7FFF,
@@ -714,7 +838,8 @@ fn rasterize_scanline(
             // S = (S/W) / (1/W). S was scaled into pixel units when packed.
             let s_pixel = ((s_w * 16) / inv_w) as i32 >> 4;
             let t_pixel = ((t_w * 16) / inv_w) as i32 >> 4;
-            let texel = texture::sample(tex_params, s_pixel, t_pixel, palette_base, vram.unwrap());
+            let texel =
+                sample_texel_for_polygon(tex_params, s_pixel, t_pixel, palette_base, p, vram);
             texture::combine_with_vertex(texel, vertex_color, mode)
         } else {
             (vertex_color, 31)
@@ -1166,6 +1291,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7), // opaque, render front/back
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -1176,6 +1302,7 @@ mod tests {
             attr: (3 << 4) | (1 << 6) | (1 << 7) | (0x10 << 16) | ((poly_id as u32) << 24),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -1186,6 +1313,7 @@ mod tests {
             attr: (2 << 4) | (1 << 6) | (1 << 7) | (0x1F << 16),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -1196,6 +1324,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: (7 << 26), // direct-color, 8x8, image offset 0
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -1210,6 +1339,7 @@ mod tests {
             attr: ((alpha as u32) << 16) | (1 << 6) | (1 << 7) | ((poly_id as u32) << 24),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         }
     }
@@ -1717,6 +1847,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
         // Second polygon: red, same shape, far (depth = +ONE).
@@ -1750,6 +1881,7 @@ mod tests {
             attr: (0x1F << 16) | (1 << 6) | (1 << 7),
             tex_image_param: 0,
             palette_base: 0,
+            texture_snapshot: None,
             front_area_negative: true,
         };
         r.render_frame(&[near, far], None);

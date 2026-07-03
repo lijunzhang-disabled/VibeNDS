@@ -123,6 +123,12 @@ impl VramBank {
     pub fn write_cnt(&mut self, val: u8) {
         self.cnt = val;
         self.target = decode_target(self.id, val);
+        if std::env::var_os("NDS_TRACE_VRAMCNT").is_some() {
+            eprintln!(
+                "vramcnt {:?}=0x{:02X} -> {:?}",
+                self.id, self.cnt, self.target
+            );
+        }
     }
 }
 
@@ -620,14 +626,18 @@ fn bank_write_arm9(bank: &mut VramBank, addr: u32, val: u8) {
         VramTarget::EngineABg { base } => {
             let bg = win & 0x07_FFFF;
             if win < 0x20_0000 && bg >= base && bg < base + span {
-                bank.data[(bg - base) as usize] = val;
+                let off = bg - base;
+                trace_vram_write(bank, addr, off, val);
+                bank.data[off as usize] = val;
             }
         }
         VramTarget::EngineAObj { base } => {
             if (0x40_0000..0x60_0000).contains(&win) {
                 let off = (win - 0x40_0000) & 0x03_FFFF;
                 if off >= base && off < base + span {
-                    bank.data[(off - base) as usize] = val;
+                    let bank_off = off - base;
+                    trace_vram_write(bank, addr, bank_off, val);
+                    bank.data[bank_off as usize] = val;
                 }
             }
         }
@@ -635,7 +645,9 @@ fn bank_write_arm9(bank: &mut VramBank, addr: u32, val: u8) {
             if (0x20_0000..0x40_0000).contains(&win) {
                 let off = (win - 0x20_0000) & 0x01_FFFF;
                 if off >= base && off < base + span {
-                    bank.data[(off - base) as usize] = val;
+                    let bank_off = off - base;
+                    trace_vram_write(bank, addr, bank_off, val);
+                    bank.data[bank_off as usize] = val;
                 }
             }
         }
@@ -643,7 +655,9 @@ fn bank_write_arm9(bank: &mut VramBank, addr: u32, val: u8) {
             if (0x60_0000..0x80_0000).contains(&win) {
                 let off = (win - 0x60_0000) & 0x01_FFFF;
                 if off >= base && off < base + span {
-                    bank.data[(off - base) as usize] = val;
+                    let bank_off = off - base;
+                    trace_vram_write(bank, addr, bank_off, val);
+                    bank.data[bank_off as usize] = val;
                 }
             }
         }
@@ -651,11 +665,37 @@ fn bank_write_arm9(bank: &mut VramBank, addr: u32, val: u8) {
             if (0x80_0000..0x8A_4000).contains(&win) {
                 let off = win - 0x80_0000;
                 if off >= lcdc_offset && off < lcdc_offset + span {
-                    bank.data[(off - lcdc_offset) as usize] = val;
+                    let bank_off = off - lcdc_offset;
+                    trace_vram_write(bank, addr, bank_off, val);
+                    bank.data[bank_off as usize] = val;
                 }
             }
         }
         _ => {}
+    }
+}
+
+fn trace_vram_write(bank: &VramBank, addr: u32, bank_off: u32, val: u8) {
+    let Some(spec) = std::env::var_os("NDS_TRACE_VRAM_BANK_RANGE") else {
+        return;
+    };
+    let Some(spec) = spec.to_str() else {
+        return;
+    };
+    let Some((start, end)) = spec.split_once("..") else {
+        return;
+    };
+    let Ok(start) = u32::from_str_radix(start.trim_start_matches("0x"), 16) else {
+        return;
+    };
+    let Ok(end) = u32::from_str_radix(end.trim_start_matches("0x"), 16) else {
+        return;
+    };
+    if bank_off >= start && bank_off < end {
+        eprintln!(
+            "vram write bank={:?} target={:?} addr=0x{:08X} off=0x{:05X} val=0x{:02X}",
+            bank.id, bank.target, addr, bank_off, val
+        );
     }
 }
 

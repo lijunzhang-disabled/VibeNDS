@@ -29,7 +29,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::tsc::{ADC_X1, ADC_X2, ADC_Y1, ADC_Y2};
+use super::tsc::{ADC_X1, ADC_X2, ADC_Y1, ADC_Y2, SCR_X1, SCR_X2, SCR_Y1, SCR_Y2};
 
 pub const FIRMWARE_SIZE: usize = 256 * 1024;
 pub const USER_SETTINGS_OFFSET_1: usize = 0x3FE00;
@@ -81,6 +81,13 @@ impl Firmware {
     }
 
     fn write_default_user_settings(&mut self) {
+        // Minimal firmware header fields that commercial games use to find
+        // the user settings area. Addresses are stored divided by 8.
+        self.data[0x08..0x0C].copy_from_slice(b"MACP");
+        self.data[0x1D] = 0x20; // DS Lite-style console type.
+        let settings_off_div8 = (USER_SETTINGS_OFFSET_1 / 8) as u16;
+        self.data[0x20..0x22].copy_from_slice(&settings_off_div8.to_le_bytes());
+
         // Default user settings (252 bytes). We populate just enough for
         // a typical game's read pattern. Real format has dozens of fields;
         // most games only care about the calibration matrix and a few
@@ -116,20 +123,20 @@ impl Firmware {
         // like).
         settings[0x64] = 0x01; // language: English
 
-        // Touchscreen calibration matrix: 8 bytes at offset 0x58..0x60.
+        // Touchscreen calibration matrix: 12 bytes at offset 0x58..0x64.
         // Format:  raw_x1 (16), raw_y1 (16), screen_x1 (8), screen_y1 (8),
         //          raw_x2 (16), raw_y2 (16), screen_x2 (8), screen_y2 (8).
-        // We pick endpoint pairs so the game's linear transform reproduces
-        // the screen-pixel coords we fed into the TSC.
+        // Screen calibration points are 1-origin in firmware; games subtract
+        // one after applying the linear transform.
         let cal = &mut settings[0x58..0x68];
         cal[0..2].copy_from_slice(&ADC_X1.to_le_bytes());
         cal[2..4].copy_from_slice(&ADC_Y1.to_le_bytes());
-        cal[4] = 0;
-        cal[5] = 0;
+        cal[4] = SCR_X1;
+        cal[5] = SCR_Y1;
         cal[6..8].copy_from_slice(&ADC_X2.to_le_bytes());
         cal[8..10].copy_from_slice(&ADC_Y2.to_le_bytes());
-        cal[10] = 255;
-        cal[11] = 191;
+        cal[10] = SCR_X2;
+        cal[11] = SCR_Y2;
 
         // Update-counter at offset 0x70 (16-bit). Higher counter wins
         // between the two blocks; we set block #1 to 1, block #2 to 0.
@@ -345,6 +352,30 @@ mod tests {
         let stored = u16::from_le_bytes([settings[0x72], settings[0x73]]);
         let computed = crate::cart::header::crc16_modbus(&settings[..0x70]);
         assert_eq!(stored, computed);
+    }
+
+    #[test]
+    fn test_default_header_points_to_user_settings() {
+        let fw = Firmware::new();
+        let off_div8 = u16::from_le_bytes([fw.data[0x20], fw.data[0x21]]);
+        assert_eq!((off_div8 as usize) * 8, USER_SETTINGS_OFFSET_1);
+    }
+
+    #[test]
+    fn test_default_touchscreen_calibration_is_one_origin() {
+        let fw = Firmware::new();
+        let settings =
+            &fw.data[USER_SETTINGS_OFFSET_1..USER_SETTINGS_OFFSET_1 + USER_SETTINGS_SIZE];
+        let cal = &settings[0x58..0x64];
+
+        assert_eq!(u16::from_le_bytes([cal[0], cal[1]]), ADC_X1);
+        assert_eq!(u16::from_le_bytes([cal[2], cal[3]]), ADC_Y1);
+        assert_eq!(cal[4], SCR_X1);
+        assert_eq!(cal[5], SCR_Y1);
+        assert_eq!(u16::from_le_bytes([cal[6], cal[7]]), ADC_X2);
+        assert_eq!(u16::from_le_bytes([cal[8], cal[9]]), ADC_Y2);
+        assert_eq!(cal[10], SCR_X2);
+        assert_eq!(cal[11], SCR_Y2);
     }
 
     #[test]
