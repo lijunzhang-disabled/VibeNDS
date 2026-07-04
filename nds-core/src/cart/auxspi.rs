@@ -87,6 +87,27 @@ impl BackupKind {
         // commercial games. Frontend can override via --save-type.
         BackupKind::Eeprom64K
     }
+
+    /// Kind guess from the header gamecode, falling back to
+    /// `guess_from_header`. The gamecode's first three characters identify
+    /// the title across regions (4th char = region), so match on a prefix.
+    pub fn guess_from_gamecode(gamecode: [u8; 4], device_capacity: u8) -> Self {
+        match &gamecode[..3] {
+            // Pokémon gen 4: Diamond/Pearl (ADA/APA), Platinum (CPU),
+            // HeartGold/SoulSilver (IPK/IPG) — 4 Mbit FLASH.
+            b"ADA" | b"APA" | b"CPU" | b"IPK" | b"IPG" => BackupKind::Flash512K,
+            // Pokémon gen 5: Black/White (IRB/IRA), B2/W2 (IRE/IRD).
+            b"IRB" | b"IRA" | b"IRE" | b"IRD" => BackupKind::Flash512K,
+            _ => Self::guess_from_header(device_capacity),
+        }
+    }
+
+    /// Carts whose gamecode starts with `I` carry extra hardware (infrared
+    /// transceiver) between AUXSPI and the backup chip: every backup
+    /// transaction is tunneled behind a leading 0x00 pass-through byte.
+    pub fn is_ir_cart(gamecode: [u8; 4]) -> bool {
+        gamecode[0] == b'I'
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +127,18 @@ enum Phase {
     },
 }
 
+/// IR-cart tunnel state: the IR chip sits between AUXSPI and the backup
+/// chip. The first byte of every CS-asserted transaction addresses the IR
+/// chip: 0x00 = pass the rest of the transaction through to the backup
+/// chip, 0x08 = IR status probe (answers 0xAA), anything else is an IR
+/// command we ignore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum IrPhase {
+    Command,
+    Passthrough,
+    Ignore { reply: u8 },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuxSpi {
     pub cnt: u16,
@@ -120,6 +153,11 @@ pub struct AuxSpi {
     /// bit 1 = WEL (write enable latch).
     status: u8,
     phase: Phase,
+
+    /// IR-cart (gamecode `Ixxx`, e.g. HeartGold/SoulSilver): backup SPI is
+    /// tunneled through the cart's infrared chip.
+    ir: bool,
+    ir_phase: IrPhase,
 }
 
 impl AuxSpi {
@@ -131,7 +169,14 @@ impl AuxSpi {
             storage: Vec::new(),
             status: 0,
             phase: Phase::Idle,
+            ir: false,
+            ir_phase: IrPhase::Command,
         }
+    }
+
+    pub fn set_ir_cart(&mut self, ir: bool) {
+        self.ir = ir;
+        self.ir_phase = IrPhase::Command;
     }
 
     pub fn set_backup_kind(&mut self, kind: BackupKind) {
@@ -140,6 +185,7 @@ impl AuxSpi {
         // detect 0xFF == "no save" too).
         self.storage = vec![0xFFu8; kind.size()];
         self.phase = Phase::Idle;
+        self.ir_phase = IrPhase::Command;
         self.status = 0;
     }
 
@@ -163,9 +209,23 @@ impl AuxSpi {
     pub fn write_cnt(&mut self, val: u16) {
         let selected = val & (1 << 15) != 0 && val & (1 << 13) != 0;
         if !selected {
-            self.phase = Phase::Idle;
+            self.end_transaction();
         }
         self.cnt = val;
+    }
+
+    /// Chip-select released: close out the current transaction. A finished
+    /// program/write clears the write-enable latch, like real chips do when
+    /// the internally-timed write cycle starts.
+    fn end_transaction(&mut self) {
+        if let Phase::Data {
+            cmd: 0x02 | 0x0A, ..
+        } = self.phase
+        {
+            self.status &= !0x02;
+        }
+        self.phase = Phase::Idle;
+        self.ir_phase = IrPhase::Command;
     }
 
     pub fn read_data(&self) -> u8 {
@@ -188,12 +248,43 @@ impl AuxSpi {
             return self.cnt & (1 << 14) != 0;
         }
 
-        self.data_reg = self.handle_byte(byte_in);
+        let phase_before = self.phase;
+        let ir_before = self.ir_phase;
+        self.data_reg = if self.ir {
+            match self.ir_phase {
+                IrPhase::Command => match byte_in {
+                    0x00 => {
+                        self.ir_phase = IrPhase::Passthrough;
+                        0x00
+                    }
+                    0x08 => {
+                        self.ir_phase = IrPhase::Ignore { reply: 0xAA };
+                        0xAA
+                    }
+                    _ => {
+                        self.ir_phase = IrPhase::Ignore { reply: 0xFF };
+                        0xFF
+                    }
+                },
+                IrPhase::Passthrough => self.handle_byte(byte_in),
+                IrPhase::Ignore { reply } => reply,
+            }
+        } else {
+            self.handle_byte(byte_in)
+        };
+
+        if std::env::var_os("NDS_TRACE_AUXSPI").is_some() {
+            let hold = self.cnt & (1 << 6) != 0;
+            eprintln!(
+                "auxspi in=0x{byte_in:02X} out=0x{:02X} hold={} ir={:?}->{:?} phase={:?} -> {:?}",
+                self.data_reg, hold as u8, ir_before, self.ir_phase, phase_before, self.phase
+            );
+        }
 
         // CS hold: when bit 6 == 0, this is the final byte of the
         // sequence; reset state for the next transaction.
         if self.cnt & (1 << 6) == 0 {
-            self.phase = Phase::Idle;
+            self.end_transaction();
         }
 
         self.cnt & (1 << 14) != 0
@@ -496,6 +587,82 @@ mod tests {
         aux.set_backup_kind(BackupKind::Eeprom512B);
         let out = issue(&mut aux, &[0x05, 0]);
         assert_eq!(out[1], 0xF0);
+    }
+
+    #[test]
+    fn test_gamecode_guess_and_ir_flag() {
+        assert_eq!(
+            BackupKind::guess_from_gamecode(*b"IPKE", 10),
+            BackupKind::Flash512K
+        );
+        assert_eq!(
+            BackupKind::guess_from_gamecode(*b"IPGJ", 10),
+            BackupKind::Flash512K
+        );
+        assert_eq!(
+            BackupKind::guess_from_gamecode(*b"AAAE", 10),
+            BackupKind::Eeprom64K
+        );
+        assert!(BackupKind::is_ir_cart(*b"IPKE"));
+        assert!(!BackupKind::is_ir_cart(*b"ADAE"));
+    }
+
+    #[test]
+    fn test_ir_cart_tunnels_flash_behind_leading_zero() {
+        let mut aux = AuxSpi::new();
+        aux.set_backup_kind(BackupKind::Flash512K);
+        aux.set_ir_cart(true);
+
+        // WREN and PW must be prefixed with the IR pass-through byte.
+        issue(&mut aux, &[0x00, 0x06]);
+        issue(&mut aux, &[0x00, 0x02, 0x04, 0x00, 0x00, 0x12, 0x34]);
+        let out = issue(&mut aux, &[0x00, 0x03, 0x04, 0x00, 0x00, 0, 0]);
+        assert_eq!(out[5], 0x12);
+        assert_eq!(out[6], 0x34);
+
+        // Without the pass-through prefix, the IR chip swallows the bytes.
+        let out = issue(&mut aux, &[0x03, 0x04, 0x00, 0x00, 0, 0]);
+        assert_eq!(out[4], 0xFF);
+        assert_eq!(out[5], 0xFF);
+    }
+
+    #[test]
+    fn test_ir_cart_status_probe_answers_aa() {
+        let mut aux = AuxSpi::new();
+        aux.set_backup_kind(BackupKind::Flash512K);
+        aux.set_ir_cart(true);
+
+        let out = issue(&mut aux, &[0x08, 0x00]);
+        assert_eq!(out[0], 0xAA);
+        assert_eq!(out[1], 0xAA);
+    }
+
+    #[test]
+    fn test_flash_512k_high_addresses_do_not_wrap() {
+        let mut aux = AuxSpi::new();
+        aux.set_backup_kind(BackupKind::Flash512K);
+
+        // HGSS writes its save-block mirrors at +0x40000. With a correctly
+        // sized chip these must not alias the primary copies at 0x00000.
+        issue(&mut aux, &[0x06]);
+        issue(&mut aux, &[0x02, 0x00, 0x00, 0x00, 0x11]);
+        issue(&mut aux, &[0x06]);
+        issue(&mut aux, &[0x02, 0x04, 0x00, 0x00, 0x22]);
+
+        let low = issue(&mut aux, &[0x03, 0x00, 0x00, 0x00, 0]);
+        let high = issue(&mut aux, &[0x03, 0x04, 0x00, 0x00, 0]);
+        assert_eq!(low[4], 0x11);
+        assert_eq!(high[4], 0x22);
+    }
+
+    #[test]
+    fn test_wel_clears_after_completed_program() {
+        let mut aux = AuxSpi::new();
+        aux.set_backup_kind(BackupKind::Flash512K);
+        issue(&mut aux, &[0x06]);
+        issue(&mut aux, &[0x02, 0x00, 0x00, 0x00, 0x55]);
+        let out = issue(&mut aux, &[0x05, 0]);
+        assert_eq!(out[1] & 0x02, 0, "WEL should auto-clear after a write");
     }
 
     #[test]

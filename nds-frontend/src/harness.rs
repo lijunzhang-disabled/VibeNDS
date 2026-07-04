@@ -166,6 +166,13 @@ impl Eharness {
             }
             "dump_3d_texture" => self.dump_3d_texture(req),
             "get_audio" => Ok((self.get_audio_header(), self.take_audio_blob(), false)),
+            "export_save" => {
+                let bytes = self
+                    .nds
+                    .export_save()
+                    .ok_or_else(|| "no backup kind configured".to_string())?;
+                Ok((json!({"ok": true, "len": bytes.len()}), bytes, false))
+            }
             "save_state" => {
                 let bytes = bincode::serialize(&self.nds).map_err(|e| e.to_string())?;
                 Ok((json!({"ok": true}), bytes, false))
@@ -218,9 +225,15 @@ impl Eharness {
             self.nds
                 .load_cart_direct_boot(bytes)
                 .map_err(|e| format!("direct boot failed: {e}"))?;
-            if let Some(header) = self.nds.cart.header() {
-                let kind = BackupKind::guess_from_header(header.device_capacity);
+            if let Some((gamecode, device_capacity)) = self
+                .nds
+                .cart
+                .header()
+                .map(|h| (h.gamecode, h.device_capacity))
+            {
+                let kind = BackupKind::guess_from_gamecode(gamecode, device_capacity);
                 self.nds.set_backup_kind(kind);
+                self.nds.set_ir_cart(BackupKind::is_ir_cart(gamecode));
             }
         }
         if let Some(save) = &self.save_bytes {

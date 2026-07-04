@@ -312,6 +312,12 @@ impl Nds {
         self.shared.auxspi.set_backup_kind(kind);
     }
 
+    /// Mark the cart as an IR cart (gamecode `Ixxx`, e.g. HG/SS): backup
+    /// SPI transactions are tunneled through the cart's infrared chip.
+    pub fn set_ir_cart(&mut self, ir: bool) {
+        self.shared.auxspi.set_ir_cart(ir);
+    }
+
     /// Import a `.sav` file into the AUXSPI backup.
     pub fn import_save(&mut self, data: &[u8]) {
         self.shared.auxspi.load_save(data);

@@ -381,18 +381,21 @@ fn main() {
                             );
 
                             // Backup-type resolution.
+                            let gamecode = h.gamecode;
+                            let device_capacity = h.device_capacity;
                             let kind = match args.save_type.as_deref() {
                                 Some(s) => match parse_backup_kind(s) {
                                     Some(k) => k,
                                     None => {
                                         eprintln!("warning: unknown --save-type '{}', using header heuristic", s);
-                                        BackupKind::guess_from_header(h.device_capacity)
+                                        BackupKind::guess_from_gamecode(gamecode, device_capacity)
                                     }
                                 },
-                                None => BackupKind::guess_from_header(h.device_capacity),
+                                None => BackupKind::guess_from_gamecode(gamecode, device_capacity),
                             };
                             eprintln!("Backup type: {:?} ({} bytes)", kind, kind.size());
                             nds.set_backup_kind(kind);
+                            nds.set_ir_cart(BackupKind::is_ir_cart(gamecode));
 
                             // Auto-load .sav next to the ROM (read-only stage; saves
                             // back on exit).
