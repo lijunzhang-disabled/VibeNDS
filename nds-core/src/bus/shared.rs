@@ -136,7 +136,9 @@ pub struct SharedState {
 
     /// Minimal slot-1 ROM command state. This backs normal card reads used
     /// by NitroFS and card header probes; AUXSPI backup remains separate.
-    #[serde(with = "serde_bytes_vec")]
+    /// Excluded from save states (it would dominate them — frontends
+    /// reattach the ROM via `Nds::reattach_rom` after a state load).
+    #[serde(skip)]
     pub slot1_rom: Vec<u8>,
     pub slot1_romctrl: u32,
     pub slot1_command: [u8; 8],

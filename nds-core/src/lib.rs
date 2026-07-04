@@ -96,25 +96,38 @@ impl Nds {
 
     /// Load a ROM and apply the direct-boot path. Replaces any previous cart.
     pub fn load_cart_direct_boot(&mut self, rom: Vec<u8>) -> Result<(), CartLoadError> {
-        let cart = Cart::from_rom(rom).map_err(CartLoadError::Header)?;
-        let header = cart.header.as_ref().expect("just parsed").clone();
-        let rom_bytes = cart.rom.as_ref().expect("just parsed").clone();
+        let header = CartHeader::parse(&rom).map_err(CartLoadError::Header)?;
         cart::direct_boot::apply(
             &mut self.cpu9,
             &mut self.cpu7,
             &mut self.mem7,
             &mut self.shared,
             &header,
-            &rom_bytes,
+            &rom,
         )
         .map_err(CartLoadError::DirectBoot)?;
-        self.shared.slot1_rom = rom_bytes;
+        self.cart = Cart {
+            header: Some(header),
+            rom_len: rom.len(),
+        };
+        self.shared.slot1_rom = rom;
         self.shared.slot1_romctrl = 0;
         self.shared.slot1_command = [0; 8];
         self.shared.slot1_data.clear();
-        self.cart = cart;
         self.direct_boot = true;
         Ok(())
+    }
+
+    /// Detach the ROM bytes (e.g. to carry them across a save-state load —
+    /// the ROM is excluded from serialized states).
+    pub fn take_rom(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.shared.slot1_rom)
+    }
+
+    /// Reattach ROM bytes after deserializing a save state.
+    pub fn reattach_rom(&mut self, rom: Vec<u8>) {
+        self.cart.rom_len = rom.len();
+        self.shared.slot1_rom = rom;
     }
 
     pub fn run_cycles(&mut self, arm7_cycles: u64) {
@@ -1008,6 +1021,30 @@ mod tests {
         assert_eq!(restored.shared.main_ram[0x100], 0xAB);
         assert_eq!(restored.cpu9.regs[3], 0xCAFE_BABE);
         assert_eq!(restored.cpu7.regs[5], 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn test_save_state_excludes_rom_and_reattach_restores_it() {
+        let mut nds = Nds::new(None, None);
+        nds.shared.slot1_rom = vec![0x5A; 1024 * 1024];
+        nds.cart.rom_len = nds.shared.slot1_rom.len();
+
+        // The ROM must not dominate the serialized state.
+        let bytes = bincode::serialize(&nds).expect("serialize");
+        assert!(
+            bytes.len() < 64 * 1024 * 1024,
+            "state unexpectedly large: {} bytes",
+            bytes.len()
+        );
+
+        let mut restored: Nds = bincode::deserialize(&bytes).expect("deserialize");
+        assert!(restored.shared.slot1_rom.is_empty());
+
+        let rom = nds.take_rom();
+        restored.reattach_rom(rom);
+        assert_eq!(restored.shared.slot1_rom.len(), 1024 * 1024);
+        assert_eq!(restored.shared.slot1_rom[0], 0x5A);
+        assert_eq!(restored.cart.rom_len(), Some(1024 * 1024));
     }
 
     #[test]

@@ -179,6 +179,10 @@ impl Eharness {
             }
             "load_state" => {
                 self.nds = bincode::deserialize(blob).map_err(|e| e.to_string())?;
+                // States don't carry the ROM; reattach the one we loaded.
+                if let Some(rom) = &self.rom_bytes {
+                    self.nds.reattach_rom(rom.clone());
+                }
                 self.apply_input();
                 Ok((json!({"ok": true}), Vec::new(), false))
             }

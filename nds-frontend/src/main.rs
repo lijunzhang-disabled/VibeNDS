@@ -147,7 +147,10 @@ fn load_state(nds: &mut Nds, path: &Path) {
             return;
         }
     };
+    // States don't carry the ROM — move it across from the running machine.
+    let rom = nds.take_rom();
     *nds = restored;
+    nds.reattach_rom(rom);
     eprintln!("Loaded save state from {}", path.display());
 }
 
@@ -482,7 +485,7 @@ fn main() {
             if let Err(e) = write_capture_metadata(
                 &metadata_path,
                 args.rom.as_deref(),
-                nds.cart.rom().map(|rom| rom.len()),
+                nds.cart.rom_len(),
                 nds.cart.header(),
                 args.capture_frames,
                 args.capture_interval,
@@ -501,7 +504,7 @@ fn main() {
             if let Err(e) = write_capture_metadata(
                 &metadata_path,
                 args.rom.as_deref(),
-                nds.cart.rom().map(|rom| rom.len()),
+                nds.cart.rom_len(),
                 nds.cart.header(),
                 args.capture_frames,
                 interval,
