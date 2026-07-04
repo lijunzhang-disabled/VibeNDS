@@ -422,15 +422,15 @@ impl AuxSpi {
                 byte
             }
             0x02 | 0x0A => {
-                // EEPROM WRITE or FLASH PAGE_PROGRAM
+                // EEPROM WRITE / FLASH page write (0x02) / FLASH page
+                // program (0x0A). Both program commands overwrite cleanly:
+                // the DS backup flash used by retail carts auto-erases on
+                // program — games (e.g. HGSS via the NitroSDK CARD library)
+                // re-save with bare 0x0A and never issue an erase, then
+                // read-verify the exact bytes written. Textbook NOR
+                // AND-masking here corrupts every save after the first.
                 if let Some(slot) = self.storage.get_mut(addr as usize) {
-                    if cmd == 0x0A {
-                        // FLASH page-program AND-masks against existing data
-                        // (flash cells only flip 1→0 without an erase).
-                        *slot &= byte_in;
-                    } else {
-                        *slot = byte_in;
-                    }
+                    *slot = byte_in;
                 }
                 self.phase = Phase::Data {
                     cmd,
@@ -654,6 +654,25 @@ mod tests {
         let high = issue(&mut aux, &[0x03, 0x04, 0x00, 0x00, 0]);
         assert_eq!(low[4], 0x11);
         assert_eq!(high[4], 0x22);
+    }
+
+    #[test]
+    fn test_flash_page_program_overwrites_existing_data() {
+        let mut aux = AuxSpi::new();
+        aux.set_backup_kind(BackupKind::Flash512K);
+
+        // First save: program a page over erased (0xFF) cells.
+        issue(&mut aux, &[0x06]);
+        issue(&mut aux, &[0x0A, 0x00, 0x10, 0x00, 0x5A, 0xA5]);
+        // Overwrite save: the SDK re-programs the same page with no erase
+        // in between and read-verifies the new bytes. AND-masking would
+        // leave 0x5A & 0x0F = 0x0A and fail the game's verify.
+        issue(&mut aux, &[0x06]);
+        issue(&mut aux, &[0x0A, 0x00, 0x10, 0x00, 0x0F, 0xF0]);
+
+        let out = issue(&mut aux, &[0x03, 0x00, 0x10, 0x00, 0, 0]);
+        assert_eq!(out[4], 0x0F);
+        assert_eq!(out[5], 0xF0);
     }
 
     #[test]
