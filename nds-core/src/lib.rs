@@ -509,10 +509,10 @@ impl Nds {
     }
 
     fn handle_swi9(&mut self, swi: u8) {
-        if std::env::var_os("NDS_TRACE_SWI").is_some() {
+        if trace_swi_enabled() {
             eprintln!("swi arm9 0x{swi:02X}");
         }
-        if std::env::var_os("NDS_TRACE_SWI9_ARGS").is_some() {
+        if trace_swi9_args_enabled() {
             eprintln!(
                 "swi arm9 0x{swi:02X} r0=0x{:08X} r1=0x{:08X} r2=0x{:08X} r3=0x{:08X} pc=0x{:08X}",
                 self.cpu9.regs[0],
@@ -537,7 +537,7 @@ impl Nds {
     }
 
     fn handle_swi7(&mut self, swi: u8) {
-        if std::env::var_os("NDS_TRACE_SWI").is_some() {
+        if trace_swi_enabled() {
             eprintln!("swi arm7 0x{swi:02X}");
         }
         let real_bios = !self.direct_boot;
@@ -714,7 +714,7 @@ impl Nds {
 
                 if line == VISIBLE_LINES {
                     // Enter VBlank
-                    if std::env::var_os("NDS_TRACE_FRAME_MARK").is_some() {
+                    if trace_frame_mark_enabled() {
                         use std::sync::atomic::{AtomicU64, Ordering};
                         static FRAME: AtomicU64 = AtomicU64::new(0);
                         let n = FRAME.fetch_add(1, Ordering::Relaxed);
@@ -769,6 +769,21 @@ impl Nds {
             }
         }
     }
+}
+
+fn trace_swi_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_TRACE_SWI").is_some())
+}
+
+fn trace_swi9_args_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_TRACE_SWI9_ARGS").is_some())
+}
+
+fn trace_frame_mark_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_TRACE_FRAME_MARK").is_some())
 }
 
 fn apply_2d_debug_disable(mut dispcnt: u32, disable_obj: bool, disable_bg: [bool; 4]) -> u32 {

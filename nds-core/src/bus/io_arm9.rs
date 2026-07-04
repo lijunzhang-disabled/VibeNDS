@@ -396,9 +396,14 @@ pub(super) fn slot1_romctrl_status_mut(shared: &mut SharedState) -> u32 {
     slot1_romctrl_status(shared)
 }
 
+fn trace_slot1_reads_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_TRACE_SLOT1_READS").is_some())
+}
+
 pub(super) fn read_slot1_data(shared: &mut SharedState) -> u32 {
     let v = shared.slot1_data.pop_front().unwrap_or(0xFFFF_FFFF);
-    if std::env::var_os("NDS_TRACE_SLOT1_READS").is_some() {
+    if trace_slot1_reads_enabled() {
         trace_slot1_read(v, shared.slot1_data.len());
     }
     shared.slot1_busy_polls = 0;
@@ -435,7 +440,7 @@ pub(super) fn start_slot1_transfer(shared: &mut SharedState, val: u32, irq_to_ar
         _ => queue_repeat(shared, 0xFFFF_FFFF, bytes),
     }
 
-    if std::env::var_os("NDS_TRACE_SLOT1").is_some() {
+    if crate::bus::arm9::trace_slot1_enabled() {
         eprintln!(
             "slot1 start cmd=0x{cmd:02X} param=0x{param:08X} bytes=0x{bytes:X} romctrl=0x{val:08X} words={}",
             shared.slot1_pending.len()
@@ -516,7 +521,7 @@ fn trace_slot1_state() -> &'static Mutex<Slot1TraceState> {
 }
 
 fn trace_slot1_start(cmd: u8, param: u32, total_words: usize) {
-    if std::env::var_os("NDS_TRACE_SLOT1_READS").is_none() {
+    if !trace_slot1_reads_enabled() {
         return;
     }
     if let Ok(mut state) = trace_slot1_state().lock() {
@@ -1072,19 +1077,22 @@ fn trace_dma9_reg_write(shared: &SharedState, ch: usize, kind: &str) {
 }
 
 fn trace_dma9_reg_range_matches(env: &str, addr: u32, len: u32) -> bool {
-    let Some(spec) = std::env::var_os(env) else {
-        return false;
+    fn parse(env: &str) -> Option<(u32, u32)> {
+        let spec = std::env::var_os(env)?;
+        let spec = spec.to_str()?;
+        let (start, end) = spec.split_once("..")?;
+        let start = u32::from_str_radix(start.trim_start_matches("0x"), 16).ok()?;
+        let end = u32::from_str_radix(end.trim_start_matches("0x"), 16).ok()?;
+        Some((start, end))
+    }
+    static SOURCE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    static DEST: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    let range = match env {
+        "NDS_TRACE_DMA9_REG_SOURCE_RANGE" => *SOURCE.get_or_init(|| parse(env)),
+        "NDS_TRACE_DMA9_REG_DEST_RANGE" => *DEST.get_or_init(|| parse(env)),
+        _ => parse(env),
     };
-    let Some(spec) = spec.to_str() else {
-        return false;
-    };
-    let Some((start, end)) = spec.split_once("..") else {
-        return false;
-    };
-    let Ok(start) = u32::from_str_radix(start.trim_start_matches("0x"), 16) else {
-        return false;
-    };
-    let Ok(end) = u32::from_str_radix(end.trim_start_matches("0x"), 16) else {
+    let Some((start, end)) = range else {
         return false;
     };
     addr < end && addr.saturating_add(len) > start

@@ -150,12 +150,19 @@ fn texture_palette_len(format: u8) -> Option<u32> {
     }
 }
 
+fn format3_pltt_div8() -> bool {
+    // Experiment toggle; this sits on the per-texel sampling path, so the
+    // env lookup must be cached.
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_FORMAT3_PLTT_DIV8").is_some())
+}
+
 fn palette_addr_for_format(format: u8, palette_base: u16, idx: u32) -> u32 {
     let base = palette_base as u32;
     match format {
         // ndsdoc: 4-color palettes use PLTT_BASE in 8-byte units.
         2 => (base << 3) + idx * 2,
-        3 if std::env::var_os("NDS_FORMAT3_PLTT_DIV8").is_some() => (base << 3) + idx * 2,
+        3 if format3_pltt_div8() => (base << 3) + idx * 2,
         // Other palette formats use 16-byte units.
         _ => (base << 4) + idx * 2,
     }

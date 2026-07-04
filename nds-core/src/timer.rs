@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 const PRESCALER_DIVIDERS: [u32; 4] = [1, 64, 256, 1024];
+const PRESCALER_SHIFTS: [u32; 4] = [0, 6, 8, 10];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Timer {
@@ -77,8 +78,14 @@ impl Timers {
     /// Tick all four timers by `cycles` cycles in this CPU's clock domain.
     pub fn tick(&mut self, cycles: u32) -> TimerTickResult {
         let mut result = TimerTickResult::default();
-        let mut prev_overflow = false;
 
+        // This is called once per emulated instruction pair — bail out with
+        // one branch when nothing is running.
+        if !self.timers.iter().any(Timer::enabled) {
+            return result;
+        }
+
+        let mut prev_overflow = false;
         for i in 0..4 {
             if !self.timers[i].enabled() {
                 prev_overflow = false;
@@ -92,10 +99,12 @@ impl Timers {
                     0
                 }
             } else {
-                let prescaler = self.timers[i].prescaler();
+                // Prescalers are powers of two (1/64/256/1024) — divide and
+                // wrap with shift/mask on this per-instruction path.
+                let shift = PRESCALER_SHIFTS[(self.timers[i].control & 3) as usize];
                 self.timers[i].prescaler_counter += cycles;
-                let ticks = self.timers[i].prescaler_counter / prescaler;
-                self.timers[i].prescaler_counter %= prescaler;
+                let ticks = self.timers[i].prescaler_counter >> shift;
+                self.timers[i].prescaler_counter &= (1 << shift) - 1;
                 if ticks > 0 {
                     self.increment(i, ticks)
                 } else {

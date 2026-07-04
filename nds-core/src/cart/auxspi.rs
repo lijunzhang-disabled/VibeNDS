@@ -273,7 +273,8 @@ impl AuxSpi {
             self.handle_byte(byte_in)
         };
 
-        if std::env::var_os("NDS_TRACE_AUXSPI").is_some() {
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *TRACE.get_or_init(|| std::env::var_os("NDS_TRACE_AUXSPI").is_some()) {
             let hold = self.cnt & (1 << 6) != 0;
             eprintln!(
                 "auxspi in=0x{byte_in:02X} out=0x{:02X} hold={} ir={:?}->{:?} phase={:?} -> {:?}",

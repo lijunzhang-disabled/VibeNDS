@@ -280,7 +280,7 @@ impl<'a> Bus9<'a> {
             .dma9
             .channels_for_timing(crate::dma::DmaTiming::Slot1);
         for ch in channels {
-            if std::env::var_os("NDS_TRACE_SLOT1").is_some() {
+            if trace_slot1_enabled() {
                 let c = &self.shared.dma9.channels[ch];
                 eprintln!(
                     "slot1 dma9 ch={ch} start sad=0x{:08X} dad=0x{:08X} count={} ctrl=0x{:08X} queued_words={}",
@@ -311,7 +311,7 @@ impl<'a> Bus9<'a> {
                     break;
                 }
             }
-            if std::env::var_os("NDS_TRACE_SLOT1").is_some() {
+            if trace_slot1_enabled() {
                 let c = &self.shared.dma9.channels[ch];
                 eprintln!(
                     "slot1 dma9 ch={ch} end active={} sad=0x{:08X} dad=0x{:08X} count={} ctrl=0x{:08X} queued_words={}",
@@ -376,19 +376,9 @@ fn advance(addr: &mut u32, ctrl: AddrControl, word: u32) {
 }
 
 fn trace_arm9_vram_store(kind: &str, pc: u32, addr: u32, len: u32, val: u32) {
-    let Some(spec) = std::env::var_os("NDS_TRACE_BUS9_VRAM_RANGE") else {
-        return;
-    };
-    let Some(spec) = spec.to_str() else {
-        return;
-    };
-    let Some((start, end)) = spec.split_once("..") else {
-        return;
-    };
-    let Ok(start) = u32::from_str_radix(start.trim_start_matches("0x"), 16) else {
-        return;
-    };
-    let Ok(end) = u32::from_str_radix(end.trim_start_matches("0x"), 16) else {
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    let Some((start, end)) = *RANGE.get_or_init(|| parse_trace_range("NDS_TRACE_BUS9_VRAM_RANGE"))
+    else {
         return;
     };
     if addr < end && addr.saturating_add(len) > start {
@@ -418,16 +408,20 @@ fn trace_dma9_source_range() -> Option<(u32, u32)> {
 }
 
 fn trace_dma9_value_matches(val: u32) -> bool {
-    let Some(spec) = std::env::var_os("NDS_TRACE_DMA9_VALUE") else {
-        return false;
-    };
-    let Some(spec) = spec.to_str() else {
-        return false;
-    };
-    let Ok(want) = u32::from_str_radix(spec.trim_start_matches("0x"), 16) else {
+    static VALUE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let Some(want) = *VALUE.get_or_init(|| {
+        let spec = std::env::var_os("NDS_TRACE_DMA9_VALUE")?;
+        let spec = spec.to_str()?;
+        u32::from_str_radix(spec.trim_start_matches("0x"), 16).ok()
+    }) else {
         return false;
     };
     val == want
+}
+
+pub(crate) fn trace_slot1_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_TRACE_SLOT1").is_some())
 }
 
 fn parse_trace_range(env: &str) -> Option<(u32, u32)> {
@@ -494,13 +488,14 @@ fn trace_arm9_main_load_range(kind: &str, pc: u32, addr: u32, len: u32, val: u32
 }
 
 fn trace_arm9_main_read_value(kind: &str, pc: u32, addr: u32, val: u32) {
-    let Some(spec) = std::env::var_os("NDS_TRACE_BUS9_MAIN_READ_VALUE") else {
-        return;
-    };
-    let Some(spec) = spec.to_str() else {
-        return;
-    };
-    let Ok(want) = u32::from_str_radix(spec.trim_start_matches("0x"), 16) else {
+    // Sits on the ARM9 main-RAM read32 fast path — the env lookup must be
+    // cached or every load pays for it.
+    static VALUE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let Some(want) = *VALUE.get_or_init(|| {
+        let spec = std::env::var_os("NDS_TRACE_BUS9_MAIN_READ_VALUE")?;
+        let spec = spec.to_str()?;
+        u32::from_str_radix(spec.trim_start_matches("0x"), 16).ok()
+    }) else {
         return;
     };
     if val == want {

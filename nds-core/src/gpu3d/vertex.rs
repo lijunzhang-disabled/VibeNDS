@@ -466,8 +466,13 @@ pub enum VtxAxisPair {
     YZ,
 }
 
+fn trace_gx_state_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_TRACE_GX_STATE").is_some())
+}
+
 fn trace_gx_state(index: usize, args: std::fmt::Arguments<'_>) {
-    if std::env::var_os("NDS_TRACE_GX_STATE").is_none() || !trace_gx_poly_index_matches(index) {
+    if !trace_gx_state_enabled() || !trace_gx_poly_index_matches(index) {
         return;
     }
     eprintln!("gx state poly_index={index} {args}");

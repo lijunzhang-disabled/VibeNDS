@@ -123,7 +123,8 @@ impl VramBank {
     pub fn write_cnt(&mut self, val: u8) {
         self.cnt = val;
         self.target = decode_target(self.id, val);
-        if std::env::var_os("NDS_TRACE_VRAMCNT").is_some() {
+        static TRACE_VRAMCNT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *TRACE_VRAMCNT.get_or_init(|| std::env::var_os("NDS_TRACE_VRAMCNT").is_some()) {
             eprintln!(
                 "vramcnt {:?}=0x{:02X} -> {:?}",
                 self.id, self.cnt, self.target
@@ -676,19 +677,17 @@ fn bank_write_arm9(bank: &mut VramBank, addr: u32, val: u8) {
 }
 
 fn trace_vram_write(bank: &VramBank, addr: u32, bank_off: u32, val: u8) {
-    let Some(spec) = std::env::var_os("NDS_TRACE_VRAM_BANK_RANGE") else {
-        return;
-    };
-    let Some(spec) = spec.to_str() else {
-        return;
-    };
-    let Some((start, end)) = spec.split_once("..") else {
-        return;
-    };
-    let Ok(start) = u32::from_str_radix(start.trim_start_matches("0x"), 16) else {
-        return;
-    };
-    let Ok(end) = u32::from_str_radix(end.trim_start_matches("0x"), 16) else {
+    // Called for every CPU/DMA byte landing in a VRAM bank — the env
+    // lookup must be cached.
+    static RANGE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    let Some((start, end)) = *RANGE.get_or_init(|| {
+        let spec = std::env::var_os("NDS_TRACE_VRAM_BANK_RANGE")?;
+        let spec = spec.to_str()?;
+        let (start, end) = spec.split_once("..")?;
+        let start = u32::from_str_radix(start.trim_start_matches("0x"), 16).ok()?;
+        let end = u32::from_str_radix(end.trim_start_matches("0x"), 16).ok()?;
+        Some((start, end))
+    }) else {
         return;
     };
     if bank_off >= start && bank_off < end {

@@ -9,6 +9,26 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::OnceLock;
+
+/// Master switch for 3D debug capture (per-op history, per-polygon debug
+/// records, texture snapshots). Env `NDS_DEBUG_3D`, read once — all of this
+/// allocates per GX command / per polygon, far too hot to leave on by
+/// default.
+pub(crate) fn debug_3d_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_DEBUG_3D").is_some())
+}
+
+fn force_box_test_visible() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_FORCE_BOX_TEST_VISIBLE").is_some())
+}
+
+fn trace_gx_box_test() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NDS_TRACE_GX_BOX_TEST").is_some())
+}
 
 use super::clip::clip_polygon;
 use super::command::GxCmd;
@@ -172,11 +192,13 @@ impl Engine3d {
         };
         let params = op.params;
         let p0 = params.first().copied().unwrap_or(0);
-        self.push_debug_op(DebugGxOp {
-            cmd: cmd as u8,
-            name: format!("{:?}", cmd),
-            params: params.clone(),
-        });
+        if debug_3d_enabled() {
+            self.push_debug_op(DebugGxOp {
+                cmd: cmd as u8,
+                name: format!("{:?}", cmd),
+                params: params.clone(),
+            });
+        }
         match cmd {
             // ─── Matrix commands ─────────────────────────────────
             GxCmd::MtxMode => self.stacks.set_mode(MtxMode::from_bits(p0)),
@@ -390,12 +412,12 @@ impl Engine3d {
             (p2 >> 16) as i16 as i32,
         ];
         let clip = self.stacks.clip_matrix();
-        self.box_test_visible = if std::env::var_os("NDS_FORCE_BOX_TEST_VISIBLE").is_some() {
+        self.box_test_visible = if force_box_test_visible() {
             true
         } else {
             box_intersects_view_volume(origin, size, &clip)
         };
-        if std::env::var_os("NDS_TRACE_GX_BOX_TEST").is_some() {
+        if trace_gx_box_test() {
             eprintln!(
                 "box_test origin={origin:?} size={size:?} visible={}",
                 self.box_test_visible
@@ -448,9 +470,15 @@ impl Engine3d {
                 self.record_rejected_polygon("zero_dot", &poly);
                 continue;
             }
-            if let Some(vram) = vram {
-                screen.texture_snapshot =
-                    TextureSnapshot::capture(screen.tex_image_param, screen.palette_base, vram);
+            // Snapshots are only consumed by VRAM-less debug re-renders and
+            // the harness debug JSON; the normal render path samples live
+            // VRAM. Capturing per polygon is far too expensive to do
+            // unconditionally (whole-texture copy through the bank router).
+            if debug_3d_enabled() {
+                if let Some(vram) = vram {
+                    screen.texture_snapshot =
+                        TextureSnapshot::capture(screen.tex_image_param, screen.palette_base, vram);
+                }
             }
             let index = self.geometry_polygons.len();
             self.record_debug_screen_polygon(index, &clipped_poly, &screen);
@@ -464,6 +492,9 @@ impl Engine3d {
         clip_poly: &super::vertex::Polygon,
         screen: &ScreenPolygon,
     ) {
+        if !debug_3d_enabled() {
+            return;
+        }
         if self.debug_last_screen_polygons.len() >= 2048 {
             self.debug_last_screen_polygons.remove(0);
         }
@@ -493,6 +524,9 @@ impl Engine3d {
     }
 
     fn record_rejected_polygon(&mut self, reason: &str, poly: &super::vertex::Polygon) {
+        if !debug_3d_enabled() {
+            return;
+        }
         let mut clip_min = [i32::MAX; 4];
         let mut clip_max = [i32::MIN; 4];
         for v in &poly.vertices {

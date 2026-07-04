@@ -611,8 +611,17 @@ impl Cpu {
     }
 }
 
+fn exec_trace_configured() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("NDS_TRACE_ARM9_EXEC_PCS").is_some()
+            || std::env::var_os("NDS_TRACE_ARM9_EXEC_RANGE").is_some()
+    })
+}
+
 fn trace_arm9_exec(cpu: &Cpu) {
-    if !cpu.is_arm9 {
+    // Per-instruction path: one cached branch when tracing is off.
+    if !exec_trace_configured() || !cpu.is_arm9 {
         return;
     }
     let pc = if cpu.cpsr.thumb() {
