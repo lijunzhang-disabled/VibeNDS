@@ -102,6 +102,12 @@ impl Ipc {
         let send_data = ((val >> 8) & 0xF) as u8;
         let my_recv_irq_en = val & (1 << 14) != 0;
         let trigger = val & (1 << 13) != 0;
+        if std::env::var_os("NDS_TRACE_IPC").is_some() {
+            eprintln!(
+                "ipc sync {:?} send=0x{send_data:X} trigger={trigger} recv_irq_en={my_recv_irq_en}",
+                side
+            );
+        }
 
         match side {
             Side::Arm9 => {
@@ -243,6 +249,9 @@ impl Ipc {
     /// caller should raise `Irq::IpcRecvNotEmpty` on the OTHER CPU
     /// (empty→non-empty transition with the OTHER CPU's recv IRQ enabled).
     pub fn write_send(&mut self, side: Side, val: u32) -> bool {
+        if std::env::var_os("NDS_TRACE_IPC").is_some() {
+            eprintln!("ipc send {:?} val=0x{val:08X}", side);
+        }
         let enable = match side {
             Side::Arm9 => self.fifo_arm9_enable,
             Side::Arm7 => self.fifo_arm7_enable,

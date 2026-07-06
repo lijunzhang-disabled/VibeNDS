@@ -158,6 +158,7 @@ impl Eharness {
             "dump_texture_image_raw" => self.dump_texture_image_raw(req),
             "dump_texture_palette_raw" => self.dump_texture_palette_raw(req),
             "dump_main_ram_raw" => self.dump_main_ram_raw(req),
+            "dump_arm7_ram_raw" => self.dump_arm7_ram_raw(req),
             "poke_main_ram_raw" => self.poke_main_ram_raw(req, &blob),
             "dump_vram_bank_raw" => self.dump_vram_bank_raw(req),
             "rerender_3d_debug" => {
@@ -673,6 +674,32 @@ impl Eharness {
                 "addr": addr,
                 "len": len,
             }),
+            blob,
+            false,
+        ))
+    }
+
+    fn dump_arm7_ram_raw(&self, req: &Value) -> Result<(Value, Vec<u8>, bool), String> {
+        // region: "private" = ARM7 64 KB WRAM (0x03800000), "shared" =
+        // shared WRAM bank. Offset is relative to the region base.
+        let region = req
+            .get("region")
+            .and_then(Value::as_str)
+            .unwrap_or("private");
+        let off = req.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let len = req.get("len").and_then(Value::as_u64).unwrap_or(0x200) as usize;
+        let src: &[u8] = match region {
+            "private" => &self.nds.mem7.wram,
+            "shared" => &self.nds.shared.shared_wram,
+            _ => return Err(format!("unknown region {region:?}")),
+        };
+        if off >= src.len() {
+            return Err(format!("offset 0x{off:X} outside {region} WRAM"));
+        }
+        let end = off.saturating_add(len).min(src.len());
+        let blob = src[off..end].to_vec();
+        Ok((
+            json!({"ok": true, "region": region, "offset": off, "len": blob.len()}),
             blob,
             false,
         ))

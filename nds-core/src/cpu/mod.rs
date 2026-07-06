@@ -619,9 +619,28 @@ fn exec_trace_configured() -> bool {
     })
 }
 
+fn arm7_exec_trace_range() -> Option<(u32, u32)> {
+    static RANGE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *RANGE.get_or_init(|| parse_trace_range_env("NDS_TRACE_ARM7_EXEC_RANGE"))
+}
+
 fn trace_arm9_exec(cpu: &Cpu) {
+    // ARM7 exec trace: separate env, gated so it's free when off.
+    if !cpu.is_arm9 {
+        if let Some((start, end)) = arm7_exec_trace_range() {
+            let pc = if cpu.cpsr.thumb() {
+                cpu.regs[15].wrapping_sub(4) & !1
+            } else {
+                cpu.regs[15].wrapping_sub(8) & !3
+            };
+            if pc >= start && pc < end {
+                eprintln!("arm7 exec pc=0x{pc:08X} thumb={}", cpu.cpsr.thumb());
+            }
+        }
+        return;
+    }
     // Per-instruction path: one cached branch when tracing is off.
-    if !exec_trace_configured() || !cpu.is_arm9 {
+    if !exec_trace_configured() {
         return;
     }
     let pc = if cpu.cpsr.thumb() {
