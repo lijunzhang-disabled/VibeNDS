@@ -41,6 +41,21 @@ impl Timer {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Timers {
     pub timers: [Timer; 4],
+    /// Cycles accumulated since the last flush. Skipped in save states:
+    /// `countdown` defaults to 0, which forces a flush on the first tick.
+    #[serde(skip)]
+    pending_cycles: u32,
+    /// Exact cycles from the last flush to the earliest possible overflow
+    /// among enabled non-cascade timers (`u32::MAX` when none run). Cascade
+    /// timers only move when their driver overflows, which is itself a flush
+    /// point, so they never need their own countdown.
+    #[serde(skip)]
+    countdown: u32,
+    /// Overflow IRQs produced by a flush outside `tick_lazy` (defensive: the
+    /// countdown invariant means sync-on-IO-access can never produce one).
+    /// Drained into the next `tick_lazy`/`tick` result.
+    #[serde(skip)]
+    pending_irqs: [bool; 4],
 }
 
 #[derive(Debug, Default)]
@@ -55,17 +70,31 @@ impl Timers {
     }
 
     pub fn read_counter(&self, id: usize) -> u16 {
-        self.timers[id].counter
+        // Fold pending cycles in on the fly rather than flushing (reads come
+        // through the immutable IO path). Cascade timers only advance at
+        // flush points, so their stored counter is always current; for
+        // prescaled timers the countdown invariant guarantees the pending
+        // window holds no overflow, so a plain add is exact.
+        let t = &self.timers[id];
+        if !t.enabled() || (t.cascade() && id > 0) {
+            return t.counter;
+        }
+        let shift = PRESCALER_SHIFTS[(t.control & 3) as usize];
+        let ticks = (t.prescaler_counter + self.pending_cycles) >> shift;
+        t.counter.wrapping_add(ticks as u16)
     }
     pub fn read_control(&self, id: usize) -> u16 {
         self.timers[id].control
     }
 
     pub fn write_reload(&mut self, id: usize, value: u16) {
+        self.sync();
         self.timers[id].reload = value;
     }
 
     pub fn write_control(&mut self, id: usize, value: u16) {
+        // Apply pending cycles under the old prescaler/enable first.
+        self.sync();
         let was_enabled = self.timers[id].enabled();
         self.timers[id].control = value;
         let now_enabled = self.timers[id].enabled();
@@ -73,14 +102,73 @@ impl Timers {
             self.timers[id].counter = self.timers[id].reload;
             self.timers[id].prescaler_counter = 0;
         }
+        self.countdown = self.compute_countdown();
     }
 
-    /// Tick all four timers by `cycles` cycles in this CPU's clock domain.
+    /// Accumulate `cycles` and only materialize timer state when the next
+    /// overflow is actually due. This is the per-instruction-pair path: two
+    /// adds and a compare instead of walking four timers. IRQ timing is
+    /// unchanged — `countdown` is the exact distance to the earliest
+    /// overflow, so the flush lands in the same iteration an eager tick
+    /// would have fired in.
+    pub fn tick_lazy(&mut self, cycles: u32) -> TimerTickResult {
+        self.pending_cycles = self.pending_cycles.saturating_add(cycles);
+        if self.pending_cycles < self.countdown {
+            return TimerTickResult::default();
+        }
+        self.flush()
+    }
+
+    /// Tick all four timers by `cycles` cycles in this CPU's clock domain,
+    /// eagerly (counters advance immediately).
     pub fn tick(&mut self, cycles: u32) -> TimerTickResult {
+        self.pending_cycles = self.pending_cycles.saturating_add(cycles);
+        self.flush()
+    }
+
+    /// Bring counters up to date without a caller to deliver IRQs to. The
+    /// countdown invariant guarantees no overflow is pending here; any that
+    /// somehow occur are stashed and delivered on the next tick.
+    fn sync(&mut self) {
+        if self.pending_cycles == 0 {
+            return;
+        }
+        let r = self.flush();
+        for i in 0..4 {
+            self.pending_irqs[i] |= r.irqs[i];
+        }
+    }
+
+    /// Apply all pending cycles to the counters and recompute the countdown.
+    fn flush(&mut self) -> TimerTickResult {
+        let cycles = std::mem::take(&mut self.pending_cycles);
+        let mut result = self.tick_now(cycles);
+        for i in 0..4 {
+            result.irqs[i] |= std::mem::take(&mut self.pending_irqs[i]);
+        }
+        self.countdown = self.compute_countdown();
+        result
+    }
+
+    /// Exact cycles until the earliest possible overflow, from current state.
+    fn compute_countdown(&self) -> u32 {
+        let mut min_cd = u32::MAX;
+        for i in 0..4 {
+            let t = &self.timers[i];
+            if !t.enabled() || (t.cascade() && i > 0) {
+                continue;
+            }
+            let shift = PRESCALER_SHIFTS[(t.control & 3) as usize];
+            let remaining_ticks = 0x10000 - t.counter as u32;
+            let cd = (remaining_ticks << shift) - t.prescaler_counter;
+            min_cd = min_cd.min(cd);
+        }
+        min_cd
+    }
+
+    fn tick_now(&mut self, cycles: u32) -> TimerTickResult {
         let mut result = TimerTickResult::default();
 
-        // This is called once per emulated instruction pair — bail out with
-        // one branch when nothing is running.
         if !self.timers.iter().any(Timer::enabled) {
             return result;
         }

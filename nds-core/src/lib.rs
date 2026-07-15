@@ -506,14 +506,14 @@ impl Nds {
     fn tick_timers(&mut self, arm9_cycles: u32, arm7_cycles: u32) {
         const TIMER_IRQS: [Irq; 4] = [Irq::Timer0, Irq::Timer1, Irq::Timer2, Irq::Timer3];
 
-        let r9 = self.shared.timers9.tick(arm9_cycles);
+        let r9 = self.shared.timers9.tick_lazy(arm9_cycles);
         for (i, &fired) in r9.irqs.iter().enumerate() {
             if fired {
                 self.shared.irq9.request(TIMER_IRQS[i]);
             }
         }
 
-        let r7 = self.shared.timers7.tick(arm7_cycles);
+        let r7 = self.shared.timers7.tick_lazy(arm7_cycles);
         for (i, &fired) in r7.irqs.iter().enumerate() {
             if fired {
                 self.shared.irq7.request(TIMER_IRQS[i]);

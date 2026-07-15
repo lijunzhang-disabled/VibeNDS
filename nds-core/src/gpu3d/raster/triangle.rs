@@ -950,7 +950,7 @@ fn triangle_pixel_coverage_and_edges(x: i32, y: i32, tri: [(i32, i32); 3]) -> (u
     let pixel_top = (y << 8) - 128;
     let pixel_bottom = (y << 8) + 128;
 
-    let mut poly = vec![
+    let corners = [
         (pixel_left as f64, pixel_top as f64),
         (pixel_right as f64, pixel_top as f64),
         (pixel_right as f64, pixel_bottom as f64),
@@ -966,16 +966,36 @@ fn triangle_pixel_coverage_and_edges(x: i32, y: i32, tri: [(i32, i32); 3]) -> (u
         return (0, 0);
     }
 
-    for i in 0..3 {
-        let a = tri64[i];
-        let b = tri64[(i + 1) % 3];
-        poly = clip_polygon_to_edge(&poly, a, b, orient);
-        if poly.is_empty() {
-            return (0, 0);
-        }
+    // Fast path for interior pixels (the vast majority): if the whole pixel
+    // box is inside the triangle, the clip below would return the full box —
+    // coverage 31, no edge hints. Skipping it keeps this per-pixel call
+    // allocation-free and cheap.
+    if corners.iter().all(|&c| point_in_triangle(c, tri64, orient)) {
+        return (31, 0);
     }
 
-    let area = polygon_area(&poly).min(256.0 * 256.0);
+    // Sutherland-Hodgman clip of the pixel box against the triangle, using
+    // stack ping-pong buffers (a convex n-gon clipped by a half-plane yields
+    // at most n+1 vertices, so 4 corners -> at most 7 after three clips).
+    let mut buf_a = [(0.0f64, 0.0f64); 16];
+    let mut buf_b = [(0.0f64, 0.0f64); 16];
+    buf_a[..4].copy_from_slice(&corners);
+
+    let len = clip_polygon_to_edge(&buf_a[..4], tri64[0], tri64[1], orient, &mut buf_b);
+    if len == 0 {
+        return (0, 0);
+    }
+    let len = clip_polygon_to_edge(&buf_b[..len], tri64[1], tri64[2], orient, &mut buf_a);
+    if len == 0 {
+        return (0, 0);
+    }
+    let len = clip_polygon_to_edge(&buf_a[..len], tri64[2], tri64[0], orient, &mut buf_b);
+    if len == 0 {
+        return (0, 0);
+    }
+    let poly = &buf_b[..len];
+
+    let area = polygon_area(poly).min(256.0 * 256.0);
     if area <= 0.0 {
         return (0, 0);
     }
@@ -997,30 +1017,36 @@ fn triangle_pixel_coverage_and_edges(x: i32, y: i32, tri: [(i32, i32); 3]) -> (u
     (coverage, hints)
 }
 
+/// Clip `poly` against one triangle edge into `out`, returning the vertex
+/// count. `out` is comfortably oversized (see caller); pushes saturate rather
+/// than overflow if a degenerate input somehow exceeds it.
 fn clip_polygon_to_edge(
     poly: &[(f64, f64)],
     edge_a: (f64, f64),
     edge_b: (f64, f64),
     orient: f64,
-) -> Vec<(f64, f64)> {
-    let mut out = Vec::new();
+    out: &mut [(f64, f64); 16],
+) -> usize {
+    let mut len = 0;
     let Some(&last) = poly.last() else {
-        return out;
+        return len;
     };
     let mut prev = last;
     let mut prev_inside = point_inside_edge(prev, edge_a, edge_b, orient);
     for &curr in poly {
         let curr_inside = point_inside_edge(curr, edge_a, edge_b, orient);
-        if curr_inside != prev_inside {
-            out.push(line_intersection(prev, curr, edge_a, edge_b));
+        if curr_inside != prev_inside && len < out.len() {
+            out[len] = line_intersection(prev, curr, edge_a, edge_b);
+            len += 1;
         }
-        if curr_inside {
-            out.push(curr);
+        if curr_inside && len < out.len() {
+            out[len] = curr;
+            len += 1;
         }
         prev = curr;
         prev_inside = curr_inside;
     }
-    out
+    len
 }
 
 fn point_inside_edge(p: (f64, f64), edge_a: (f64, f64), edge_b: (f64, f64), orient: f64) -> bool {
